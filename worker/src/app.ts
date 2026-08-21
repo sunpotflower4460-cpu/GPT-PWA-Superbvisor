@@ -16,6 +16,12 @@ import {
   getLatestGuardianRun,
   sweepGuardianRuns,
 } from './guardianRunner';
+import {
+  SaveCloudStateBody,
+  deleteCloudState,
+  getCloudState,
+  saveCloudState,
+} from './stateSync';
 
 interface Env {
   OPENAI_API_KEY: string;
@@ -54,10 +60,29 @@ export default {
     if (
       url.pathname.startsWith('/api/developer-') ||
       url.pathname.startsWith('/api/github-agent') ||
-      url.pathname.startsWith('/api/guardian-')
+      url.pathname.startsWith('/api/guardian-') ||
+      url.pathname.startsWith('/api/state-sync')
     ) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(env, request) });
       if (!authorized(request, env)) return json({ error: 'unauthorized' }, 401, env, request);
+    }
+
+    if (url.pathname === '/api/state-sync' && request.method === 'GET') {
+      const state = await getCloudState(env);
+      return state ? json({ state }, 200, env, request) : json({ error: 'cloud_state_not_found' }, 404, env, request);
+    }
+
+    if (url.pathname === '/api/state-sync' && request.method === 'POST') {
+      const body = await readJson<SaveCloudStateBody>(request);
+      if (!body) return json({ error: 'invalid_json' }, 400, env, request);
+      const result = await saveCloudState(env, body);
+      if (!result.ok) return json({ error: result.error, current: result.current }, result.status, env, request);
+      return json({ state: result.state }, 200, env, request);
+    }
+
+    if (url.pathname === '/api/state-sync' && request.method === 'DELETE') {
+      await deleteCloudState(env);
+      return json({ ok: true }, 200, env, request);
     }
 
     if (url.pathname === '/api/developer-jobs' && request.method === 'POST') {

@@ -1,4 +1,11 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { loadWorkerConnection } from './backgroundWorker';
+import {
+  CloudStateRecord,
+  deleteCloudState as deleteRemoteCloudState,
+  getCloudState,
+  pushCloudState,
+} from './cloudStateSync';
 import { DevProject, loadProjects, saveProjects } from './core';
 import { HandoffCheckpoint, loadHandoffCheckpoints } from './handoff';
 import { SupervisorNotification, loadNotifications, saveNotifications } from './notifications';
@@ -13,6 +20,7 @@ const STORAGE_KEYS = {
 };
 
 type BackupMode = 'MERGE' | 'REPLACE';
+type CloudBusy = '' | 'check' | 'push' | 'pull' | 'force' | 'delete';
 
 interface BackupEnvelope {
   schema: typeof BACKUP_SCHEMA;
@@ -34,6 +42,10 @@ export default function DataBackupCenter() {
   const [error, setError] = useState('');
   const [pending, setPending] = useState<BackupEnvelope | null>(null);
   const [fileName, setFileName] = useState('');
+  const [cloudState, setCloudState] = useState<CloudStateRecord<BackupEnvelope> | null>(null);
+  const [cloudBusy, setCloudBusy] = useState<CloudBusy>('');
+  const [cloudMessage, setCloudMessage] = useState('');
+  const [cloudError, setCloudError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -43,6 +55,8 @@ export default function DataBackupCenter() {
   }, []);
 
   const currentCounts = useMemo(() => snapshotCounts(createBackup()), [open]);
+  const connection = loadWorkerConnection();
+  const cloudAvailable = Boolean(connection.baseUrl.trim() && connection.token.trim());
 
   function openCenter() {
     setOpen(true);
@@ -50,6 +64,11 @@ export default function DataBackupCenter() {
     setError('');
     setPending(null);
     setFileName('');
+    setCloudMessage('');
+    setCloudError('');
+    if (loadWorkerConnection().baseUrl.trim() && loadWorkerConnection().token.trim()) {
+      window.setTimeout(() => void refreshCloudState(false), 0);
+    }
   }
 
   function exportBackup() {
@@ -101,13 +120,106 @@ export default function DataBackupCenter() {
     setError('');
   }
 
+  async function refreshCloudState(showMessage = true) {
+    setCloudBusy('check');
+    setCloudError('');
+    if (showMessage) setCloudMessage('');
+    try {
+      const state = await getCloudState<BackupEnvelope>();
+      if (!state) {
+        setCloudState(null);
+        if (showMessage) setCloudMessage('Cloudにはまだ同期データがありません。');
+        return null;
+      }
+      const validated = parseBackup(JSON.stringify(state.data));
+      const next = { ...state, data: validated };
+      setCloudState(next);
+      if (showMessage) setCloudMessage(`Cloud状態を確認しました。案件 ${validated.data.projects.length}件。`);
+      return next;
+    } catch (reason) {
+      setCloudError(reason instanceof Error ? reason.message : 'Cloud状態を確認できませんでした。');
+      return null;
+    } finally {
+      setCloudBusy('');
+    }
+  }
+
+  async function saveCurrentToCloud(force = false) {
+    if (force) {
+      const ok = window.confirm('Cloud側で別端末が更新した内容があっても、この端末の状態で上書きします。必要な場合だけ使ってください。続けますか？');
+      if (!ok) return;
+    }
+    setCloudBusy(force ? 'force' : 'push');
+    setCloudMessage('');
+    setCloudError('');
+    try {
+      const backup = createBackup();
+      const result = await pushCloudState(backup, { force });
+      if (!result.ok) {
+        const current = result.current;
+        setCloudError(current
+          ? `Cloudは別端末で ${new Date(current.updatedAt).toLocaleString('ja-JP')} に更新されています。先にCloudから安全にマージしてから保存してください。`
+          : 'Cloudが別端末で更新されています。先にCloud状態を確認・マージしてください。');
+        await refreshCloudState(false);
+        return;
+      }
+      setCloudState(result.state);
+      setCloudMessage(`この端末の状態をCloudへ保存しました。案件 ${backup.data.projects.length}件。`);
+    } catch (reason) {
+      setCloudError(reason instanceof Error ? reason.message : 'Cloudへ保存できませんでした。');
+    } finally {
+      setCloudBusy('');
+    }
+  }
+
+  async function mergeCloudIntoDevice() {
+    setCloudBusy('pull');
+    setCloudMessage('');
+    setCloudError('');
+    try {
+      const remote = await getCloudState<BackupEnvelope>();
+      if (!remote) {
+        setCloudState(null);
+        setCloudMessage('Cloudにはまだ同期データがありません。');
+        return;
+      }
+      const incoming = parseBackup(JSON.stringify(remote.data));
+      const merged = mergeBackup(createBackup(), incoming);
+      writeBackup(merged);
+      setCloudState({ ...remote, data: incoming });
+      setCloudMessage(`Cloudから安全にマージしました。案件は現在 ${merged.data.projects.length}件です。`);
+    } catch (reason) {
+      setCloudError(reason instanceof Error ? reason.message : 'Cloudから復元できませんでした。');
+    } finally {
+      setCloudBusy('');
+    }
+  }
+
+  async function deleteCloudCopy() {
+    const ok = window.confirm('Cloudflare KV上の同期コピーだけを削除します。この端末の案件データは消えません。続けますか？');
+    if (!ok) return;
+    setCloudBusy('delete');
+    setCloudMessage('');
+    setCloudError('');
+    try {
+      await deleteRemoteCloudState();
+      setCloudState(null);
+      setCloudMessage('Cloud同期コピーを削除しました。この端末のデータは残っています。');
+    } catch (reason) {
+      setCloudError(reason instanceof Error ? reason.message : 'Cloud同期コピーを削除できませんでした。');
+    } finally {
+      setCloudBusy('');
+    }
+  }
+
   const preview = pending ? snapshotCounts(pending) : null;
+  const cloudCounts = cloudState ? snapshotCounts(cloudState.data) : null;
 
   return (
     <>
       <button className="backup-settings-launcher" onClick={openCenter}>
         <span>↧</span>
-        <div><b>データバックアップ</b><small>案件・Plan・履歴をJSON保存 / 復元</small></div>
+        <div><b>データバックアップ</b><small>案件・Plan・履歴をJSON保存 / Cloud同期</small></div>
         <i>›</i>
       </button>
 
@@ -115,13 +227,13 @@ export default function DataBackupCenter() {
         <div className="backup-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="backup-sheet">
             <header className="backup-header">
-              <div><p className="eyebrow">LOCAL DATA SAFETY</p><h2>バックアップ / 復元</h2></div>
+              <div><p className="eyebrow">LOCAL DATA SAFETY</p><h2>バックアップ / 同期</h2></div>
               <button className="icon-button" onClick={() => setOpen(false)}>×</button>
             </header>
 
             <div className="backup-note">
-              <b>案件状態を失わないためのローカルJSONバックアップです。</b>
-              <span>Worker接続トークン、APIキー、Push subscriptionなどの秘密・認証情報は書き出しません。</span>
+              <b>案件状態を失わないためのバックアップです。</b>
+              <span>Worker接続トークン、APIキー、Push subscriptionなどの秘密・認証情報はJSONにもCloudにも保存しません。</span>
             </div>
 
             <article className="backup-summary">
@@ -131,13 +243,48 @@ export default function DataBackupCenter() {
               <div><b>{currentCounts.notifications}</b><span>通知</span></div>
             </article>
 
+            <section className="backup-cloud">
+              <div className="backup-cloud-head">
+                <div><b>☁ Cloud Sync</b><span>手動同期・revision競合検知あり</span></div>
+                <i className={cloudAvailable ? 'ready' : 'off'}>{cloudAvailable ? 'Worker接続あり' : 'Worker未設定'}</i>
+              </div>
+              {!cloudAvailable ? (
+                <p>Cloud Syncは任意です。利用する場合は先に⚡ Background Workerで接続設定を保存してください。Chat-only利用には不要です。</p>
+              ) : (
+                <>
+                  {cloudState ? (
+                    <div className="backup-cloud-state">
+                      <div><strong>Cloud更新</strong><span>{new Date(cloudState.updatedAt).toLocaleString('ja-JP')}</span></div>
+                      <div><strong>Cloud案件</strong><span>{cloudCounts?.projects ?? 0}件</span></div>
+                      <div><strong>更新端末</strong><span>{cloudState.deviceId.slice(0, 8)}…</span></div>
+                    </div>
+                  ) : <p>Cloud上の同期コピーはまだ確認できていません。</p>}
+                  <div className="backup-cloud-actions">
+                    <button disabled={Boolean(cloudBusy)} onClick={() => refreshCloudState()}>{cloudBusy === 'check' ? '確認中…' : 'Cloud状態を確認'}</button>
+                    <button className="backup-primary" disabled={Boolean(cloudBusy)} onClick={() => saveCurrentToCloud(false)}>{cloudBusy === 'push' ? '保存中…' : 'この端末 → Cloudへ保存'}</button>
+                    <button className="backup-primary" disabled={Boolean(cloudBusy)} onClick={mergeCloudIntoDevice}>{cloudBusy === 'pull' ? 'マージ中…' : 'Cloud → 安全にマージ'}</button>
+                  </div>
+                  <details className="backup-cloud-advanced">
+                    <summary>高度な操作</summary>
+                    <div>
+                      <button disabled={Boolean(cloudBusy)} onClick={() => saveCurrentToCloud(true)}>{cloudBusy === 'force' ? '上書き中…' : 'この端末でCloudを強制上書き'}</button>
+                      <button className="backup-danger" disabled={Boolean(cloudBusy)} onClick={deleteCloudCopy}>{cloudBusy === 'delete' ? '削除中…' : 'Cloud同期コピーを削除'}</button>
+                    </div>
+                  </details>
+                </>
+              )}
+              {cloudMessage && <div className="backup-message success">{cloudMessage}</div>}
+              {cloudError && <div className="backup-message error">{cloudError}</div>}
+              <small>CloudにはローカルJSONバックアップと同じ非秘密データをCloudflare KVへ保存します。Chat URLや履歴を含むため、任意機能として扱ってください。</small>
+            </section>
+
             <section className="backup-section">
-              <div><b>書き出し</b><span>この端末の非秘密データを1ファイルに保存</span></div>
+              <div><b>JSON書き出し</b><span>この端末の非秘密データを1ファイルに保存</span></div>
               <button className="backup-primary" onClick={exportBackup}>JSONバックアップを保存</button>
             </section>
 
             <section className="backup-section">
-              <div><b>復元</b><span>以前のバックアップ、または別端末から移行</span></div>
+              <div><b>JSON復元</b><span>以前のバックアップ、または別端末から移行</span></div>
               <input ref={inputRef} className="backup-file-input" type="file" accept="application/json,.json" onChange={selectFile} />
               <button onClick={() => inputRef.current?.click()}>バックアップを選ぶ</button>
             </section>
@@ -159,7 +306,7 @@ export default function DataBackupCenter() {
             {message && <div className="backup-message success">{message}</div>}
             {error && <div className="backup-message error">{error}</div>}
 
-            <p className="backup-footnote">バックアップにはChatGPT URL、GitHub URL、案件名、履歴、通知文などが含まれます。認証トークンは除外していますが、ファイル自体は私的データとして保管してください。</p>
+            <p className="backup-footnote">バックアップにはChatGPT URL、GitHub URL、案件名、履歴、通知文などが含まれます。認証トークンは除外していますが、JSONファイルとCloud同期コピーは私的データとして扱ってください。</p>
           </section>
         </div>
       )}
