@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { DevProject, QuickAction, buildActionPrompt, loadProjects } from './core';
+import { DevProject, ProjectStatus, QuickAction, buildActionPrompt, loadProjects, saveProjects } from './core';
 import {
   BackgroundJob,
   loadWorkerConnection,
@@ -98,6 +98,33 @@ export default function OperatingPlanCenter() {
     setMessage('Operating Planを保存しました。今後の標準指示・Background・GitHub Agent・Guardianに反映されます。');
   }
 
+  function markLocalExecution(route: ExecutionRoute, phase: string, at = new Date().toISOString(), status?: ProjectStatus) {
+    if (!selected) return;
+    const next = loadProjects().map((project) => {
+      if (project.id !== selected.id) return project;
+      const executionMode = route === 'CHAT' ? 'CHAT' : 'API_WORKER';
+      const automationLevel = route === 'GUARDIAN' ? 'GUARDIAN' : route === 'BACKGROUND' ? 'AUTO' : 'ASSIST';
+      const event = {
+        id: `execution-route:${route}:${at}`,
+        at,
+        kind: 'info' as const,
+        message: `実行ルートを${routeLabel(route)}へ切替: ${phase}`,
+      };
+      return {
+        ...project,
+        executionMode,
+        automationLevel,
+        status: status ?? project.status,
+        currentPhase: phase,
+        lastActivityAt: at,
+        timeline: project.timeline.some((item) => item.id === event.id) ? project.timeline : [...project.timeline, event].slice(-100),
+      };
+    });
+    saveProjects(next);
+    setProjects(next);
+    window.dispatchEvent(new CustomEvent('devdeck:projects-changed'));
+  }
+
   async function copyChatPrompt() {
     if (!selected || !persistPlan()) return;
     setBusy('copy');
@@ -120,6 +147,7 @@ export default function OperatingPlanCenter() {
     try {
       const prompt = buildActionPrompt(selected, runAction);
       await navigator.clipboard.writeText(prompt);
+      markLocalExecution('CHAT', 'ChatへOperating Plan指示を準備');
       setMessage(nextWindow
         ? 'Plan指示をコピーしてChatGPTを開きました。開いたチャットへ貼り付けて送信してください。'
         : 'Plan指示はコピーしました。ポップアップがブロックされたためChatGPTは手動で開いてください。');
@@ -142,6 +170,7 @@ export default function OperatingPlanCenter() {
       });
       setBackground(job);
       setGuardian(null);
+      markLocalExecution('BACKGROUND', `Background · ${job.status}`, job.updatedAt, 'RUNNING');
       setMessage('Operating PlanをBackgroundへ渡しました。失敗/incomplete時は最大2回まで上限付きで自動復旧します。端末を閉じても処理は継続します。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Backgroundを開始できませんでした。');
@@ -163,6 +192,7 @@ export default function OperatingPlanCenter() {
       const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection());
       setGuardian(run);
       setBackground(null);
+      markLocalExecution('GUARDIAN', `Guardian cycle ${run.cycle}/${run.maxCycles}`, run.updatedAt, run.status === 'waiting_ci' ? 'WAITING_AI' : 'RUNNING');
       setMessage('Operating PlanをGuardianへ渡しました。実装→CI確認→必要なら同一branchで修正を、最大3 cycle / 3時間まで監督します。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Guardianを開始できませんでした。');
