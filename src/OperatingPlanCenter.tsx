@@ -102,8 +102,8 @@ export default function OperatingPlanCenter() {
     if (!selected) return;
     const next = loadProjects().map((project) => {
       if (project.id !== selected.id) return project;
-      const executionMode = route === 'CHAT' ? 'CHAT' : 'API_WORKER';
-      const automationLevel = route === 'GUARDIAN' ? 'GUARDIAN' : route === 'BACKGROUND' ? 'AUTO' : 'ASSIST';
+      const executionMode: DevProject['executionMode'] = route === 'CHAT' ? 'CHAT' : 'API_WORKER';
+      const automationLevel: DevProject['automationLevel'] = route === 'GUARDIAN' ? 'GUARDIAN' : route === 'BACKGROUND' ? 'AUTO' : 'ASSIST';
       const event = {
         id: `execution-route:${route}:${at}`,
         at,
@@ -308,53 +308,19 @@ export default function OperatingPlanCenter() {
                       </div>
 
                       <div className="execution-route-grid">
-                        <RouteCard
-                          route="CHAT"
-                          recommended={recommendedRoute === 'CHAT'}
-                          disabled={Boolean(busy)}
-                          title="💬 Chat"
-                          detail="追加API費用なし。指示をコピーしてChatGPTで進める。"
-                          onClick={copyAndOpenChat}
-                        />
-                        <RouteCard
-                          route="BACKGROUND"
-                          recommended={recommendedRoute === 'BACKGROUND'}
-                          disabled={Boolean(busy)}
-                          title="⚡ Background"
-                          detail="非GitHub作業や長い分析を端末非依存で。Auto Recovery最大2回。"
-                          onClick={runBackground}
-                        />
-                        <RouteCard
-                          route="GUARDIAN"
-                          recommended={recommendedRoute === 'GUARDIAN'}
-                          disabled={Boolean(busy) || !selected.githubUrl}
-                          title="🛡 Guardian"
-                          detail={selected.githubUrl ? 'GitHub実装→CI→失敗時修正を最大3 cycle監督。' : 'GitHub URL登録済み案件のみ。'}
-                          onClick={runGuardian}
-                        />
+                        <RouteCard route="CHAT" recommended={recommendedRoute === 'CHAT'} disabled={Boolean(busy)} title="💬 Chat" detail="追加API費用なし。指示をコピーしてChatGPTで進める。" onClick={copyAndOpenChat} />
+                        <RouteCard route="BACKGROUND" recommended={recommendedRoute === 'BACKGROUND'} disabled={Boolean(busy)} title="⚡ Background" detail="非GitHub作業や長い分析を端末非依存で。Auto Recovery最大2回。" onClick={runBackground} />
+                        <RouteCard route="GUARDIAN" recommended={recommendedRoute === 'GUARDIAN'} disabled={Boolean(busy) || !selected.githubUrl} title="🛡 Guardian" detail={selected.githubUrl ? 'GitHub実装→CI→失敗時修正を最大3 cycle監督。' : 'GitHub URL登録済み案件のみ。'} onClick={runGuardian} />
                       </div>
 
-                      <button className={`execution-recommended ${recommendedRoute.toLowerCase()}`} disabled={Boolean(busy)} onClick={runRecommended}>
-                        {busy ? '準備中…' : `推奨: ${routeLabel(recommendedRoute)} でPlanを開始`}
-                      </button>
+                      <button className={`execution-recommended ${recommendedRoute.toLowerCase()}`} disabled={Boolean(busy)} onClick={runRecommended}>{busy ? '準備中…' : `推奨: ${routeLabel(recommendedRoute)} でPlanを開始`}</button>
                       <button className="execution-copy-only" disabled={Boolean(busy)} onClick={copyChatPrompt}>Chat用指示だけコピー</button>
                       <p className="plan-cost-note">Background / Guardianは明示クリック時だけOpenAI APIを利用します。Workへは自動切替しません。</p>
                     </section>
 
-                    {background && (
-                      <article className={`plan-run-status background ${background.status}`}>
-                        <div><b>Background · {background.status}</b><span>attempt {(background.retryCount ?? 0) + 1}/{(background.maxAutoRetries ?? 0) + 1}</span></div>
-                        <p>{background.checkpoint?.summary || background.report?.summary || 'BackgroundへPlanを引き継ぎました。'}</p>
-                      </article>
-                    )}
+                    {background && <article className={`plan-run-status background ${background.status}`}><div><b>Background · {background.status}</b><span>attempt {(background.retryCount ?? 0) + 1}/{(background.maxAutoRetries ?? 0) + 1}</span></div><p>{background.checkpoint?.summary || background.report?.summary || 'BackgroundへPlanを引き継ぎました。'}</p></article>}
 
-                    {guardian && (
-                      <article className={`plan-run-status ${guardian.status}`}>
-                        <div><b>Guardian · {guardian.status}</b><span>cycle {guardian.cycle}/{guardian.maxCycles}</span></div>
-                        <p>{guardian.message || 'GuardianへPlanを引き継ぎました。'}</p>
-                        {guardian.pullRequest && <button onClick={() => window.open(guardian.pullRequest!.url, '_blank', 'noopener,noreferrer')}>Draft PR #{guardian.pullRequest.number} ↗</button>}
-                      </article>
-                    )}
+                    {guardian && <article className={`plan-run-status ${guardian.status}`}><div><b>Guardian · {guardian.status}</b><span>cycle {guardian.cycle}/{guardian.maxCycles}</span></div><p>{guardian.message || 'GuardianへPlanを引き継ぎました。'}</p>{guardian.pullRequest && <button onClick={() => window.open(guardian.pullRequest!.url, '_blank', 'noopener,noreferrer')}>Draft PR #{guardian.pullRequest.number} ↗</button>}</article>}
                     {message && <div className="plan-message">{message}</div>}
                   </div>
                 )}
@@ -367,30 +333,12 @@ export default function OperatingPlanCenter() {
   );
 }
 
-function RouteCard({ route, recommended, disabled, title, detail, onClick }: {
-  route: ExecutionRoute;
-  recommended: boolean;
-  disabled: boolean;
-  title: string;
-  detail: string;
-  onClick: () => void | Promise<void>;
-}) {
-  return (
-    <button className={`execution-route ${route.toLowerCase()} ${recommended ? 'recommended' : ''}`} disabled={disabled} onClick={onClick}>
-      <span>{recommended ? '推奨' : '選択'}</span>
-      <b>{title}</b>
-      <small>{detail}</small>
-    </button>
-  );
+function RouteCard({ route, recommended, disabled, title, detail, onClick }: { route: ExecutionRoute; recommended: boolean; disabled: boolean; title: string; detail: string; onClick: () => void | Promise<void>; }) {
+  return <button className={`execution-route ${route.toLowerCase()} ${recommended ? 'recommended' : ''}`} disabled={disabled} onClick={onClick}><span>{recommended ? '推奨' : '選択'}</span><b>{title}</b><small>{detail}</small></button>;
 }
 
 function PlanToggle({ checked, onChange, title, detail }: { checked: boolean; onChange: (value: boolean) => void; title: string; detail: string }) {
-  return (
-    <label className="plan-toggle">
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
-      <span><b>{title}</b><small>{detail}</small></span>
-    </label>
-  );
+  return <label className="plan-toggle"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span><b>{title}</b><small>{detail}</small></span></label>;
 }
 
 function routeLabel(route: ExecutionRoute) {
