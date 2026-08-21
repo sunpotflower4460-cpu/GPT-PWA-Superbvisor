@@ -1,0 +1,301 @@
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { DevProject, loadProjects, saveProjects } from './core';
+import { HandoffCheckpoint, loadHandoffCheckpoints } from './handoff';
+import { SupervisorNotification, loadNotifications, saveNotifications } from './notifications';
+import { OperatingPlan, loadOperatingPlans } from './operatingPlan';
+import { WatchdogState, loadWatchdogStates, saveWatchdogStates } from './watchdog';
+
+const BACKUP_SCHEMA = 'gpt-pwa-supervisor.backup';
+const BACKUP_VERSION = 1;
+const STORAGE_KEYS = {
+  plans: 'gpt-pwa-supervisor.operating-plans.v1',
+  handoffs: 'gpt-pwa-supervisor.handoffs.v1',
+};
+
+type BackupMode = 'MERGE' | 'REPLACE';
+
+interface BackupEnvelope {
+  schema: typeof BACKUP_SCHEMA;
+  version: number;
+  createdAt: string;
+  sourceOrigin: string;
+  data: {
+    projects: DevProject[];
+    operatingPlans: Record<string, OperatingPlan>;
+    handoffs: HandoffCheckpoint[];
+    notifications: SupervisorNotification[];
+    watchdog: Record<string, WatchdogState>;
+  };
+}
+
+export default function DataBackupCenter() {
+  const [open, setOpen] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState<BackupEnvelope | null>(null);
+  const [fileName, setFileName] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handler = () => openCenter();
+    window.addEventListener('devdeck:open-backup', handler);
+    return () => window.removeEventListener('devdeck:open-backup', handler);
+  }, []);
+
+  const currentCounts = useMemo(() => snapshotCounts(createBackup()), [open]);
+
+  function openCenter() {
+    setOpen(true);
+    setMessage('');
+    setError('');
+    setPending(null);
+    setFileName('');
+  }
+
+  function exportBackup() {
+    const backup = createBackup();
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `ai-dev-deck-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setMessage(`バックアップを書き出しました（案件 ${backup.data.projects.length}件）。`);
+    setError('');
+  }
+
+  async function selectFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setMessage('');
+    setError('');
+    try {
+      const backup = parseBackup(await file.text());
+      setPending(backup);
+      setFileName(file.name);
+    } catch (reason) {
+      setPending(null);
+      setFileName('');
+      setError(reason instanceof Error ? reason.message : 'バックアップを読み込めませんでした。');
+    }
+  }
+
+  function restore(mode: BackupMode) {
+    if (!pending) return;
+    if (mode === 'REPLACE') {
+      const ok = window.confirm('この端末の案件・Plan・Handoff・通知・Watchdog履歴をバックアップ内容で置き換えます。Worker接続設定は変更されません。続けますか？');
+      if (!ok) return;
+    }
+
+    const restored = mode === 'MERGE' ? mergeBackup(createBackup(), pending) : pending;
+    writeBackup(restored);
+    setPending(null);
+    setFileName('');
+    setMessage(mode === 'MERGE'
+      ? `バックアップをマージしました。案件は現在 ${restored.data.projects.length}件です。`
+      : `バックアップへ置き換えました。案件は現在 ${restored.data.projects.length}件です。`);
+    setError('');
+  }
+
+  const preview = pending ? snapshotCounts(pending) : null;
+
+  return (
+    <>
+      <button className="backup-settings-launcher" onClick={openCenter}>
+        <span>↧</span>
+        <div><b>データバックアップ</b><small>案件・Plan・履歴をJSON保存 / 復元</small></div>
+        <i>›</i>
+      </button>
+
+      {open && (
+        <div className="backup-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
+          <section className="backup-sheet">
+            <header className="backup-header">
+              <div><p className="eyebrow">LOCAL DATA SAFETY</p><h2>バックアップ / 復元</h2></div>
+              <button className="icon-button" onClick={() => setOpen(false)}>×</button>
+            </header>
+
+            <div className="backup-note">
+              <b>案件状態を失わないためのローカルJSONバックアップです。</b>
+              <span>Worker接続トークン、APIキー、Push subscriptionなどの秘密・認証情報は書き出しません。</span>
+            </div>
+
+            <article className="backup-summary">
+              <div><b>{currentCounts.projects}</b><span>案件</span></div>
+              <div><b>{currentCounts.plans}</b><span>Plan</span></div>
+              <div><b>{currentCounts.handoffs}</b><span>Handoff</span></div>
+              <div><b>{currentCounts.notifications}</b><span>通知</span></div>
+            </article>
+
+            <section className="backup-section">
+              <div><b>書き出し</b><span>この端末の非秘密データを1ファイルに保存</span></div>
+              <button className="backup-primary" onClick={exportBackup}>JSONバックアップを保存</button>
+            </section>
+
+            <section className="backup-section">
+              <div><b>復元</b><span>以前のバックアップ、または別端末から移行</span></div>
+              <input ref={inputRef} className="backup-file-input" type="file" accept="application/json,.json" onChange={selectFile} />
+              <button onClick={() => inputRef.current?.click()}>バックアップを選ぶ</button>
+            </section>
+
+            {pending && preview && (
+              <article className="backup-preview">
+                <div><b>{fileName}</b><span>{new Date(pending.createdAt).toLocaleString('ja-JP')}</span></div>
+                <div className="backup-preview-counts">
+                  <span>案件 {preview.projects}</span><span>Plan {preview.plans}</span><span>Handoff {preview.handoffs}</span><span>通知 {preview.notifications}</span>
+                </div>
+                <p>通常は「安全にマージ」がおすすめです。同じ案件IDはバックアップ側で更新し、この端末だけにある案件は残します。</p>
+                <div className="backup-restore-actions">
+                  <button className="backup-primary" onClick={() => restore('MERGE')}>安全にマージ</button>
+                  <button className="backup-danger" onClick={() => restore('REPLACE')}>全データを置き換え</button>
+                </div>
+              </article>
+            )}
+
+            {message && <div className="backup-message success">{message}</div>}
+            {error && <div className="backup-message error">{error}</div>}
+
+            <p className="backup-footnote">バックアップにはChatGPT URL、GitHub URL、案件名、履歴、通知文などが含まれます。認証トークンは除外していますが、ファイル自体は私的データとして保管してください。</p>
+          </section>
+        </div>
+      )}
+    </>
+  );
+}
+
+function createBackup(): BackupEnvelope {
+  return {
+    schema: BACKUP_SCHEMA,
+    version: BACKUP_VERSION,
+    createdAt: new Date().toISOString(),
+    sourceOrigin: window.location.origin,
+    data: {
+      projects: loadProjects(),
+      operatingPlans: loadOperatingPlans(),
+      handoffs: loadHandoffCheckpoints(),
+      notifications: loadNotifications(),
+      watchdog: loadWatchdogStates(),
+    },
+  };
+}
+
+function parseBackup(raw: string): BackupEnvelope {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch { throw new Error('JSONとして読み込めないファイルです。'); }
+
+  if (!parsed || typeof parsed !== 'object') throw new Error('バックアップ形式を確認できません。');
+  const value = parsed as Partial<BackupEnvelope>;
+  if (value.schema !== BACKUP_SCHEMA) throw new Error('AI DEV DECKのバックアップではありません。');
+  if (value.version !== BACKUP_VERSION) throw new Error(`未対応のバックアップversionです（${String(value.version)}）。`);
+  if (!value.data || typeof value.data !== 'object') throw new Error('バックアップdataがありません。');
+
+  const data = value.data as BackupEnvelope['data'];
+  const projects = Array.isArray(data.projects) ? data.projects.filter(isDevProject) : [];
+  if (projects.length !== (Array.isArray(data.projects) ? data.projects.length : 0)) throw new Error('案件データに不正な項目があります。');
+
+  return {
+    schema: BACKUP_SCHEMA,
+    version: BACKUP_VERSION,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
+    sourceOrigin: typeof value.sourceOrigin === 'string' ? value.sourceOrigin : '',
+    data: {
+      projects,
+      operatingPlans: normalizeObject<OperatingPlan>(data.operatingPlans),
+      handoffs: Array.isArray(data.handoffs) ? data.handoffs.filter(isHandoff) : [],
+      notifications: Array.isArray(data.notifications) ? data.notifications.filter(isNotification) : [],
+      watchdog: normalizeWatchdog(data.watchdog),
+    },
+  };
+}
+
+function writeBackup(backup: BackupEnvelope) {
+  saveProjects(backup.data.projects);
+  localStorage.setItem(STORAGE_KEYS.plans, JSON.stringify(backup.data.operatingPlans));
+  localStorage.setItem(STORAGE_KEYS.handoffs, JSON.stringify(backup.data.handoffs.slice(0, 40)));
+  saveNotifications(backup.data.notifications.slice(0, 100));
+  saveWatchdogStates(backup.data.watchdog);
+  window.dispatchEvent(new CustomEvent('devdeck:projects-changed'));
+  window.dispatchEvent(new CustomEvent('devdeck:operating-plan-changed'));
+  window.dispatchEvent(new CustomEvent('devdeck:watchdog-scan'));
+}
+
+function mergeBackup(current: BackupEnvelope, incoming: BackupEnvelope): BackupEnvelope {
+  return {
+    ...incoming,
+    createdAt: new Date().toISOString(),
+    sourceOrigin: window.location.origin,
+    data: {
+      projects: mergeByKey(current.data.projects, incoming.data.projects, (item) => item.id),
+      operatingPlans: { ...current.data.operatingPlans, ...incoming.data.operatingPlans },
+      handoffs: mergeByKey(current.data.handoffs, incoming.data.handoffs, (item) => item.id)
+        .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)).slice(0, 40),
+      notifications: mergeByKey(current.data.notifications, incoming.data.notifications, (item) => item.dedupeKey || item.id)
+        .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)).slice(0, 100),
+      watchdog: { ...current.data.watchdog, ...incoming.data.watchdog },
+    },
+  };
+}
+
+function mergeByKey<T>(current: T[], incoming: T[], key: (item: T) => string) {
+  const items = new Map(current.map((item) => [key(item), item]));
+  for (const item of incoming) items.set(key(item), item);
+  return Array.from(items.values());
+}
+
+function snapshotCounts(backup: BackupEnvelope) {
+  return {
+    projects: backup.data.projects.length,
+    plans: Object.keys(backup.data.operatingPlans).length,
+    handoffs: backup.data.handoffs.length,
+    notifications: backup.data.notifications.length,
+  };
+}
+
+function normalizeObject<T>(value: unknown): Record<string, T> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, T> : {};
+}
+
+function normalizeWatchdog(value: unknown): Record<string, WatchdogState> {
+  const input = normalizeObject<WatchdogState>(value);
+  return Object.fromEntries(Object.entries(input).filter(([, item]) => isWatchdog(item)));
+}
+
+function isDevProject(value: unknown): value is DevProject {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<DevProject>;
+  return typeof item.id === 'string' && typeof item.name === 'string' && typeof item.goal === 'string'
+    && typeof item.currentPhase === 'string' && typeof item.lastActivityAt === 'string'
+    && typeof item.progress === 'number' && Array.isArray(item.definitionOfDone)
+    && Array.isArray(item.humanBlockers) && Array.isArray(item.milestones) && Array.isArray(item.timeline)
+    && ['RUNNING','WAITING_AI','WAITING_USER','STALLED','ERROR','RATE_LIMITED','CONTEXT_LIMIT','COMPLETED'].includes(String(item.status))
+    && ['CHAT','WORK','API_WORKER'].includes(String(item.executionMode))
+    && ['OFF','ASSIST','AUTO','GUARDIAN'].includes(String(item.automationLevel));
+}
+
+function isHandoff(value: unknown): value is HandoffCheckpoint {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<HandoffCheckpoint>;
+  return typeof item.id === 'string' && typeof item.projectId === 'string' && typeof item.projectName === 'string'
+    && typeof item.createdAt === 'string' && typeof item.packet === 'string'
+    && ['MANUAL','CONTEXT_LIMIT','STALL_RECOVERY'].includes(String(item.reason));
+}
+
+function isNotification(value: unknown): value is SupervisorNotification {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<SupervisorNotification>;
+  return typeof item.id === 'string' && typeof item.dedupeKey === 'string' && typeof item.title === 'string'
+    && typeof item.detail === 'string' && typeof item.createdAt === 'string'
+    && ['complete','human','error','handoff','info'].includes(String(item.kind));
+}
+
+function isWatchdog(value: unknown): value is WatchdogState {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<WatchdogState>;
+  return typeof item.projectId === 'string' && typeof item.retryCount === 'number'
+    && typeof item.alternativeCount === 'number' && typeof item.lastObservedAt === 'string';
+}
