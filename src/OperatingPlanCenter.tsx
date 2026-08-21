@@ -3,8 +3,8 @@ import { DevProject, loadProjects } from './core';
 import {
   OperatingPlan,
   OperatingPlanTarget,
-  buildOperatingPlanPrompt,
   defaultOperatingPlan,
+  formatOperatingPlanPrompt,
   getOperatingPlan,
   saveOperatingPlan,
   targetLabels,
@@ -139,7 +139,7 @@ export default function OperatingPlanCenter() {
 
                     <details className="plan-preview">
                       <summary>AIへ渡るPlanを確認</summary>
-                      <pre>{buildPreview(selected.id, plan)}</pre>
+                      <pre>{formatOperatingPlanPrompt(plan)}</pre>
                     </details>
 
                     <button className="plan-save" onClick={save}>この案件のPlanを保存</button>
@@ -162,16 +162,4 @@ function PlanToggle({ checked, onChange, title, detail }: { checked: boolean; on
       <span><b>{title}</b><small>{detail}</small></span>
     </label>
   );
-}
-
-function buildPreview(projectId: string, plan: OperatingPlan) {
-  const current = getOperatingPlan(projectId);
-  try {
-    saveOperatingPlan(projectId, plan);
-    const preview = buildOperatingPlanPrompt(projectId);
-    saveOperatingPlan(projectId, current);
-    return preview;
-  } catch {
-    return 'プレビューを生成できませんでした。';
-  }
 }
