@@ -17,7 +17,7 @@ export interface GuardianRun {
   goal: string;
   prompt: string;
   model?: string;
-  status: 'starting' | 'running' | 'waiting_ci' | 'completed' | 'failed' | 'expired';
+  status: 'starting' | 'running' | 'waiting_ci' | 'review_ready' | 'completed' | 'failed' | 'expired';
   cycle: number;
   maxCycles: number;
   maxToolTurns: number;
