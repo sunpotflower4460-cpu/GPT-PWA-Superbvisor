@@ -1,0 +1,31 @@
+.recovery-control {
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid rgba(255,200,90,.14);
+  border-radius: 13px;
+  background: rgba(255,200,90,.035);
+}
+.recovery-toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.recovery-toggle input { width: 18px; height: 18px; accent-color: #ffd478; }
+.recovery-toggle span { display: grid; gap: 3px; }
+.recovery-toggle b { color: #f4d794; font-size: 11px; }
+.recovery-toggle small { color: #7f8ba3; font-size: 9px; line-height: 1.4; }
+.retry-limit { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #929eb5; font-size: 10px; font-weight: 700; }
+.retry-limit select { padding: 7px 10px; border: 1px solid rgba(255,255,255,.09); border-radius: 9px; background: #111a2c; color: #e9effb; }
+.recovery-badge { margin-top: 8px; padding: 7px 9px; border-radius: 9px; background: rgba(255,200,90,.07); color: #e6c779; font-size: 9px; font-weight: 800; }
+.completion-report { display: grid; gap: 9px; margin-top: 10px; padding: 11px; border: 1px solid rgba(85,230,193,.13); border-radius: 12px; background: rgba(85,230,193,.035); }
+.report-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.report-title b { color: #94e9cb; font-size: 11px; }
+.report-title span { max-width: 45%; color: #8391aa; font-size: 9px; text-align: right; }
+.completion-report > p { margin: 0; color: #b5c1d5; font-size: 10px; line-height: 1.55; }
+.report-list { padding-top: 8px; border-top: 1px solid rgba(255,255,255,.06); }
+.report-list b { color: #aab7cc; font-size: 9px; }
+.report-list ol { margin: 6px 0 0; padding-left: 20px; color: #8e9bb2; font-size: 9px; line-height: 1.55; }
+.reply-engine-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid rgba(124,156,255,.12); border-radius: 12px; background: rgba(124,156,255,.035); }
+.reply-engine-row > div { display: grid; gap: 3px; }
+.reply-engine-row b { color: #bdc9e0; font-size: 10px; }
+.reply-engine-row small { color: #74819a; font-size: 8px; line-height: 1.4; }
+.reply-engine-row button { flex: 0 0 auto; padding: 8px 10px; border: 1px solid rgba(124,156,255,.2); border-radius: 9px; background: rgba(124,156,255,.08); color: #b9c9f2; font-size: 9px; font-weight: 800; cursor: pointer; }
+.reply-engine-row button:disabled { opacity: .55; cursor: progress; }
+.smart-ai-error { padding: 9px; border-radius: 10px; background: rgba(255,111,132,.07); color: #ff9aad; font-size: 9px; line-height: 1.5; }
