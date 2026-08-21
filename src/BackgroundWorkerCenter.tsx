@@ -4,8 +4,7 @@ import {
   BackgroundJob,
   WorkerConnection,
   checkWorkerHealth,
-  getBackgroundJob,
-  loadBackgroundJobIds,
+  getLatestBackgroundJob,
   loadWorkerConnection,
   saveWorkerConnection,
   startBackgroundJob,
@@ -22,6 +21,8 @@ export default function BackgroundWorkerCenter() {
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
+  const [autoRecover, setAutoRecover] = useState(false);
+  const [maxAutoRetries, setMaxAutoRetries] = useState(2);
 
   const selected = useMemo(
     () => projects.find((project) => project.id === selectedId) ?? projects[0] ?? null,
@@ -29,7 +30,7 @@ export default function BackgroundWorkerCenter() {
   );
   const selectedJob = selected ? jobs[selected.id] : undefined;
 
-  async function openCenter() {
+  function openCenter() {
     const nextProjects = loadProjects();
     setProjects(nextProjects);
     setSelectedId((current) => current && nextProjects.some((project) => project.id === current) ? current : nextProjects[0]?.id ?? '');
@@ -65,9 +66,14 @@ export default function BackgroundWorkerCenter() {
     try {
       saveWorkerConnection(connection);
       const prompt = customPrompt.trim() || buildActionPrompt(selected, completionAction);
-      const job = await startBackgroundJob(selected, prompt, connection);
+      const job = await startBackgroundJob(selected, prompt, connection, {
+        autoRecover,
+        maxAutoRetries,
+      });
       setJobs((items) => ({ ...items, [selected.id]: job }));
-      setMessage('Background処理を開始しました。端末を閉じてもOpenAI側で処理が継続します。');
+      setMessage(autoRecover
+        ? `Background処理を開始しました。失敗/incomplete時は最大${maxAutoRetries}回まで別アプローチで自動復旧します。`
+        : 'Background処理を開始しました。端末を閉じてもOpenAI側で処理が継続します。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Background処理を開始できませんでした。');
     } finally {
@@ -81,10 +87,12 @@ export default function BackgroundWorkerCenter() {
     setMessage('');
     try {
       saveWorkerConnection(connection);
-      const known = jobs[selected.id]?.id || loadBackgroundJobIds()[selected.id];
-      if (!known) throw new Error('この案件のBackground Jobはまだありません。');
-      const job = await getBackgroundJob(known, connection);
+      const job = await getLatestBackgroundJob(selected.id, connection);
       setJobs((items) => ({ ...items, [selected.id]: job }));
+      if (job.status === 'completed') setMessage('完了状態を取得しました。');
+      if ((job.status === 'failed' || job.status === 'incomplete') && job.autoRecover && (job.retryCount ?? 0) < (job.maxAutoRetries ?? 0)) {
+        setMessage('復旧Jobの起動待ち、またはWebhook反映待ちの可能性があります。少し後で再更新してください。');
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '状態取得に失敗しました。');
     } finally {
@@ -116,20 +124,11 @@ export default function BackgroundWorkerCenter() {
               <summary>Worker接続設定</summary>
               <label>
                 Worker URL
-                <input
-                  value={connection.baseUrl}
-                  onChange={(event) => setConnection((current) => ({ ...current, baseUrl: event.target.value }))}
-                  placeholder="https://gpt-pwa-supervisor-worker.example.workers.dev"
-                />
+                <input value={connection.baseUrl} onChange={(event) => setConnection((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="https://...workers.dev" />
               </label>
               <label>
                 個人接続トークン
-                <input
-                  type="password"
-                  value={connection.token}
-                  onChange={(event) => setConnection((current) => ({ ...current, token: event.target.value }))}
-                  placeholder="Workerに設定したSUPERVISOR_CLIENT_TOKEN"
-                />
+                <input type="password" value={connection.token} onChange={(event) => setConnection((current) => ({ ...current, token: event.target.value }))} placeholder="SUPERVISOR_CLIENT_TOKEN" />
               </label>
               <div className="worker-setting-actions">
                 <button onClick={persistConnection}>保存</button>
@@ -138,22 +137,16 @@ export default function BackgroundWorkerCenter() {
             </details>
 
             {projects.length === 0 ? (
-              <div className="empty-state compact">
-                <div>⚡</div><h2>案件がありません</h2><p>先にプロジェクトを登録してください。</p>
-              </div>
+              <div className="empty-state compact"><div>⚡</div><h2>案件がありません</h2><p>先にプロジェクトを登録してください。</p></div>
             ) : (
               <>
                 <div className="worker-project-tabs">
                   {projects.map((project) => (
-                    <button
-                      key={project.id}
-                      className={project.id === selected?.id ? 'active' : ''}
-                      onClick={() => {
-                        setSelectedId(project.id);
-                        setCustomPrompt('');
-                        setMessage('');
-                      }}
-                    >{project.name}</button>
+                    <button key={project.id} className={project.id === selected?.id ? 'active' : ''} onClick={() => {
+                      setSelectedId(project.id);
+                      setCustomPrompt('');
+                      setMessage('');
+                    }}>{project.name}</button>
                   ))}
                 </div>
 
@@ -169,21 +162,26 @@ export default function BackgroundWorkerCenter() {
 
                     <label className="worker-prompt">
                       <span>このWorkerへ任せる指示 <small>空欄なら「手動作業だけになるまで」の標準指示</small></span>
-                      <textarea
-                        rows={5}
-                        value={customPrompt}
-                        onChange={(event) => setCustomPrompt(event.target.value)}
-                        placeholder="例：現在の設計をレビューし、次の実装順と修正案を完成条件まで整理して"
-                      />
+                      <textarea rows={5} value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="例：現在の設計をレビューし、次の実装順と修正案を完成条件まで整理して" />
                     </label>
 
+                    <div className="recovery-control">
+                      <label className="recovery-toggle">
+                        <input type="checkbox" checked={autoRecover} onChange={(event) => setAutoRecover(event.target.checked)} />
+                        <span><b>Auto Recovery</b><small>失敗/incompleteなら原因を渡して別アプローチで再開</small></span>
+                      </label>
+                      {autoRecover && (
+                        <label className="retry-limit">最大再試行
+                          <select value={maxAutoRetries} onChange={(event) => setMaxAutoRetries(Number(event.target.value))}>
+                            <option value={1}>1回</option><option value={2}>2回</option>
+                          </select>
+                        </label>
+                      )}
+                    </div>
+
                     <div className="worker-actions">
-                      <button className="worker-start" disabled={busy === 'start'} onClick={startSelected}>
-                        {busy === 'start' ? '開始中…' : '⚡ Backgroundへ任せる'}
-                      </button>
-                      <button disabled={busy === 'refresh'} onClick={refreshSelected}>
-                        {busy === 'refresh' ? '更新中…' : '状態を更新'}
-                      </button>
+                      <button className="worker-start" disabled={busy === 'start'} onClick={startSelected}>{busy === 'start' ? '開始中…' : '⚡ Backgroundへ任せる'}</button>
+                      <button disabled={busy === 'refresh'} onClick={refreshSelected}>{busy === 'refresh' ? '更新中…' : '状態を更新'}</button>
                     </div>
 
                     {selectedJob && <JobCard job={selectedJob} />}
@@ -193,10 +191,7 @@ export default function BackgroundWorkerCenter() {
             )}
 
             {message && <div className="worker-message">{message}</div>}
-
-            <p className="worker-footnote">
-              現段階のBackground Workerは、長い推論・調査結果・引き継ぎ/計画などを端末非依存で完了させる実行層です。GitHubを書き換える能力はまだ自動付与していません。次段階で安全なGitHub実行ツールを接続します。
-            </p>
+            <p className="worker-footnote">Auto Recoveryは明示的にONにしたJobだけで動作し、最大2回で必ず停止します。通常Chat/Workへ勝手に昇格することはありません。</p>
           </section>
         </div>
       )}
@@ -208,27 +203,30 @@ function JobCard({ job }: { job: BackgroundJob }) {
   const final = ['completed', 'failed', 'incomplete', 'cancelled'].includes(job.status);
   return (
     <article className={`worker-job ${final ? 'final' : 'running'}`}>
-      <div className="section-heading">
-        <span>Job {job.id.slice(0, 12)}…</span>
-        <b>{job.status}</b>
-      </div>
+      <div className="section-heading"><span>Job {job.id.slice(0, 12)}…</span><b>{job.status}</b></div>
       <div className="worker-job-meta">
         <span>{job.model}</span>
+        <span>attempt {(job.retryCount ?? 0) + 1}/{(job.maxAutoRetries ?? 0) + 1}</span>
         <span>更新 {new Date(job.updatedAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
-      {job.checkpoint && (
-        <div className="worker-checkpoint">
-          <b>Checkpoint</b>
-          <p>{job.checkpoint.summary}</p>
+      {job.autoRecover && <div className="recovery-badge">↻ Auto Recovery ON ・ 残り {Math.max(0, (job.maxAutoRetries ?? 0) - (job.retryCount ?? 0))}回</div>}
+      {job.checkpoint && <div className="worker-checkpoint"><b>Checkpoint</b><p>{job.checkpoint.summary}</p></div>}
+      {job.error && <div className="worker-error">⚠ {job.error}</div>}
+      {job.report && (
+        <div className="completion-report">
+          <div className="report-title"><b>{job.report.done ? '✅ 完成条件まで到達' : '📍 到達レポート'}</b><span>{job.report.reachedStage}</span></div>
+          <p>{job.report.summary}</p>
+          {job.report.steps.length > 0 && <ReportList title="やったこと" items={job.report.steps} />}
+          {job.report.remaining.length > 0 && <ReportList title="残っていること" items={job.report.remaining} />}
+          {job.report.humanRequired.length > 0 && <ReportList title="👤 あなたが必要" items={job.report.humanRequired} />}
         </div>
       )}
-      {job.error && <div className="worker-error">⚠ {job.error}</div>}
-      {job.outputText && (
-        <details className="worker-output">
-          <summary>完了レポートを見る</summary>
-          <pre>{job.outputText}</pre>
-        </details>
-      )}
+      {job.nextJobId && <div className="worker-message">↻ 復旧Jobへ引き継ぎ済みです。状態更新で最新attemptを取得できます。</div>}
+      {job.outputText && <details className="worker-output"><summary>AIの全文を見る</summary><pre>{job.outputText}</pre></details>}
     </article>
   );
+}
+
+function ReportList({ title, items }: { title: string; items: string[] }) {
+  return <div className="report-list"><b>{title}</b><ol>{items.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ol></div>;
 }

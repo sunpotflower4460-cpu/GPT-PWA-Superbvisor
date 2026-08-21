@@ -8,6 +8,15 @@ export interface BackgroundCheckpoint {
   summary: string;
 }
 
+export interface CompletionReport {
+  summary: string;
+  steps: string[];
+  reachedStage: string;
+  remaining: string[];
+  humanRequired: string[];
+  done: boolean;
+}
+
 export interface BackgroundJob {
   id: string;
   projectId: string;
@@ -15,6 +24,7 @@ export interface BackgroundJob {
   goal: string;
   currentPhase?: string;
   definitionOfDone: string[];
+  prompt?: string;
   model: string;
   status: BackgroundJobStatus;
   createdAt: string;
@@ -23,6 +33,26 @@ export interface BackgroundJob {
   outputText?: string;
   error?: string;
   checkpoint?: BackgroundCheckpoint;
+  report?: CompletionReport;
+  autoRecover?: boolean;
+  maxAutoRetries?: number;
+  retryCount?: number;
+  rootJobId?: string;
+  previousJobId?: string;
+  nextJobId?: string;
+}
+
+export interface BackgroundStartOptions {
+  autoRecover?: boolean;
+  maxAutoRetries?: number;
+  model?: string;
+}
+
+export interface WorkerSmartReply {
+  label: string;
+  reason: string;
+  prompt: string;
+  confidence: number;
 }
 
 export interface WorkerConnection {
@@ -81,6 +111,7 @@ export async function startBackgroundJob(
   project: DevProject,
   prompt: string,
   connection: WorkerConnection = loadWorkerConnection(),
+  options: BackgroundStartOptions = {},
 ): Promise<BackgroundJob> {
   validateConnection(connection);
   const response = await workerFetch<{ job: BackgroundJob }>(connection, '/api/jobs', {
@@ -92,6 +123,9 @@ export async function startBackgroundJob(
       currentPhase: project.currentPhase,
       definitionOfDone: project.definitionOfDone,
       prompt,
+      model: options.model,
+      autoRecover: options.autoRecover === true,
+      maxAutoRetries: options.autoRecover ? Math.max(0, Math.min(2, options.maxAutoRetries ?? 2)) : 0,
     }),
   });
   rememberBackgroundJob(project.id, response.job.id);
@@ -108,6 +142,7 @@ export async function getBackgroundJob(
     `/api/jobs/${encodeURIComponent(jobId)}`,
     { method: 'GET' },
   );
+  if (response.job.nextJobId) rememberBackgroundJob(response.job.projectId, response.job.nextJobId);
   return response.job;
 }
 
@@ -123,6 +158,30 @@ export async function getLatestBackgroundJob(
   );
   rememberBackgroundJob(projectId, response.job.id);
   return response.job;
+}
+
+export async function generateWorkerSmartReplies(
+  project: DevProject,
+  lastAssistantMessage: string,
+  connection: WorkerConnection = loadWorkerConnection(),
+): Promise<{ model: string; suggestions: WorkerSmartReply[] }> {
+  validateConnection(connection);
+  return workerFetch<{ model: string; suggestions: WorkerSmartReply[] }>(connection, '/api/smart-replies', {
+    method: 'POST',
+    body: JSON.stringify({
+      project: {
+        id: project.id,
+        name: project.name,
+        goal: project.goal,
+        currentPhase: project.currentPhase,
+        status: project.status,
+        automationLevel: project.automationLevel,
+        definitionOfDone: project.definitionOfDone,
+        humanBlockers: project.humanBlockers,
+      },
+      lastAssistantMessage,
+    }),
+  });
 }
 
 async function workerFetch<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {

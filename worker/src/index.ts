@@ -1,10 +1,12 @@
 import { Webhook } from 'standardwebhooks';
+import { generateSmartReplies, SmartReplyRequest } from './smartReplies';
 
 interface Env {
   OPENAI_API_KEY: string;
   OPENAI_WEBHOOK_SECRET: string;
   SUPERVISOR_CLIENT_TOKEN: string;
   OPENAI_MODEL?: string;
+  SMART_REPLY_MODEL?: string;
   ALLOWED_ORIGIN?: string;
   SUPERVISOR_STATE: KVNamespace;
 }
@@ -19,6 +21,17 @@ interface CreateJobBody {
   definitionOfDone?: string[];
   prompt: string;
   model?: string;
+  autoRecover?: boolean;
+  maxAutoRetries?: number;
+}
+
+interface CompletionReport {
+  summary: string;
+  steps: string[];
+  reachedStage: string;
+  remaining: string[];
+  humanRequired: string[];
+  done: boolean;
 }
 
 interface OpenAIResponseRecord {
@@ -40,6 +53,7 @@ interface StoredJob {
   goal: string;
   currentPhase?: string;
   definitionOfDone: string[];
+  prompt: string;
   model: string;
   status: JobStatus;
   createdAt: string;
@@ -47,6 +61,13 @@ interface StoredJob {
   completedAt?: string;
   outputText?: string;
   error?: string;
+  report?: CompletionReport;
+  autoRecover: boolean;
+  maxAutoRetries: number;
+  retryCount: number;
+  rootJobId: string;
+  previousJobId?: string;
+  nextJobId?: string;
   checkpoint?: {
     at: string;
     status: JobStatus;
@@ -62,6 +83,7 @@ interface WebhookEvent {
 const JOB_TTL_SECONDS = 60 * 60 * 24 * 14;
 const EVENT_TTL_SECONDS = 60 * 60 * 24;
 const FINAL_STATUSES = new Set<JobStatus>(['completed', 'failed', 'incomplete', 'cancelled']);
+const MAX_ALLOWED_AUTO_RETRIES = 2;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -87,6 +109,10 @@ export default {
       return createJob(request, env);
     }
 
+    if (url.pathname === '/api/smart-replies' && request.method === 'POST') {
+      return createSmartReplies(request, env);
+    }
+
     const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
     if (jobMatch && request.method === 'GET') {
       return getJob(decodeURIComponent(jobMatch[1]), request, env);
@@ -101,37 +127,68 @@ export default {
   },
 };
 
+async function createSmartReplies(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<SmartReplyRequest>(request);
+  if (!body) return json({ error: 'invalid_json' }, 400, env, request);
+  const result = await generateSmartReplies(body, env);
+  if (!result.ok) return json({ error: result.error }, result.status, env, request);
+  return json(result, 200, env, request);
+}
+
 async function createJob(request: Request, env: Env): Promise<Response> {
   const body = await readJson<CreateJobBody>(request);
   if (!body || !body.projectId?.trim() || !body.goal?.trim() || !body.prompt?.trim()) {
     return json({ error: 'projectId, goal and prompt are required' }, 400, env, request);
   }
 
-  const model = body.model?.trim() || env.OPENAI_MODEL?.trim() || 'gpt-5.6-luna';
-  const response = await openAI<OpenAIResponseRecord>(env, '/responses', {
-    method: 'POST',
-    body: {
-      model,
-      background: true,
-      input: buildWorkerInput(body),
-      metadata: {
-        devdeck_project_id: body.projectId.slice(0, 64),
-        devdeck_project_name: (body.projectName || body.projectId).slice(0, 64),
-      },
-    },
+  const launched = await launchJob(env, body, {
+    retryCount: 0,
   });
 
-  if (!response.ok || !response.data?.id) {
+  if (!launched.ok) {
     return json(
-      { error: 'openai_create_failed', detail: response.error || 'Unknown OpenAI error' },
-      response.status || 502,
+      { error: 'openai_create_failed', detail: launched.error },
+      launched.status,
       env,
       request,
     );
   }
 
+  return json({ job: launched.job }, 202, env, request);
+}
+
+async function launchJob(
+  env: Env,
+  body: CreateJobBody,
+  chain: { retryCount: number; rootJobId?: string; previousJobId?: string },
+): Promise<{ ok: true; job: StoredJob } | { ok: false; status: number; error: string }> {
+  const model = body.model?.trim() || env.OPENAI_MODEL?.trim() || 'gpt-5.6-luna';
+  const autoRecover = body.autoRecover === true;
+  const maxAutoRetries = autoRecover
+    ? clampInteger(body.maxAutoRetries ?? 2, 0, MAX_ALLOWED_AUTO_RETRIES)
+    : 0;
+
+  const response = await openAI<OpenAIResponseRecord>(env, '/responses', {
+    method: 'POST',
+    body: {
+      model,
+      background: true,
+      input: buildWorkerInput(body, chain.retryCount),
+      metadata: {
+        devdeck_project_id: body.projectId.slice(0, 64),
+        devdeck_project_name: (body.projectName || body.projectId).slice(0, 64),
+        devdeck_attempt: String(chain.retryCount),
+      },
+    },
+  });
+
+  if (!response.ok || !response.data?.id) {
+    return { ok: false, status: response.status || 502, error: response.error || 'Unknown OpenAI error' };
+  }
+
   const now = new Date().toISOString();
   const status = normalizeStatus(response.data.status);
+  const rootJobId = chain.rootJobId || response.data.id;
   const job: StoredJob = {
     id: response.data.id,
     projectId: body.projectId,
@@ -139,16 +196,21 @@ async function createJob(request: Request, env: Env): Promise<Response> {
     goal: body.goal,
     currentPhase: body.currentPhase,
     definitionOfDone: body.definitionOfDone ?? [],
+    prompt: body.prompt,
     model,
     status,
     createdAt: now,
     updatedAt: now,
+    autoRecover,
+    maxAutoRetries,
+    retryCount: chain.retryCount,
+    rootJobId,
+    previousJobId: chain.previousJobId,
   };
 
   await persistJob(env, job);
   await env.SUPERVISOR_STATE.put(`project:${body.projectId}:latest`, job.id, { expirationTtl: JOB_TTL_SECONDS });
-
-  return json({ job }, 202, env, request);
+  return { ok: true, job };
 }
 
 async function getJob(id: string, request: Request, env: Env): Promise<Response> {
@@ -200,11 +262,50 @@ async function handleOpenAIWebhook(request: Request, env: Env): Promise<Response
   const responseId = event.data?.id;
   if (responseId && event.type.startsWith('response.')) {
     const existing = await readJob(env, responseId);
-    if (existing) await refreshJobFromOpenAI(env, existing);
+    if (existing) {
+      const refreshed = await refreshJobFromOpenAI(env, existing);
+      if (event.type === 'response.failed' || event.type === 'response.incomplete') {
+        await maybeAutoRecover(env, refreshed);
+      }
+    }
   }
 
   await env.SUPERVISOR_STATE.put(dedupeKey, event.type, { expirationTtl: EVENT_TTL_SECONDS });
   return Response.json({ ok: true });
+}
+
+async function maybeAutoRecover(env: Env, failedJob: StoredJob): Promise<void> {
+  if (!failedJob.autoRecover) return;
+  if (failedJob.nextJobId) return;
+  if (failedJob.retryCount >= failedJob.maxAutoRetries) return;
+  if (failedJob.status !== 'failed' && failedJob.status !== 'incomplete') return;
+
+  const nextRetry = failedJob.retryCount + 1;
+  const recoveryPrompt = `前回のBackground attempt #${failedJob.retryCount + 1} は ${failedJob.status} で終了しました。\n原因: ${failedJob.error || '詳細不明'}\n\n元の依頼:\n${failedJob.prompt}\n\n同じ失敗を漫然と繰り返さず、原因を踏まえて修正した進め方または別アプローチで再試行してください。完了済みの内容がある場合は重複せず、最終目標へ近づけてください。`;
+
+  const launched = await launchJob(env, {
+    projectId: failedJob.projectId,
+    projectName: failedJob.projectName,
+    goal: failedJob.goal,
+    currentPhase: failedJob.currentPhase,
+    definitionOfDone: failedJob.definitionOfDone,
+    prompt: recoveryPrompt,
+    model: failedJob.model,
+    autoRecover: true,
+    maxAutoRetries: failedJob.maxAutoRetries,
+  }, {
+    retryCount: nextRetry,
+    rootJobId: failedJob.rootJobId,
+    previousJobId: failedJob.id,
+  });
+
+  if (launched.ok) {
+    await persistJob(env, {
+      ...failedJob,
+      nextJobId: launched.job.id,
+      updatedAt: new Date().toISOString(),
+    });
+  }
 }
 
 async function refreshJobFromOpenAI(env: Env, job: StoredJob): Promise<StoredJob> {
@@ -224,6 +325,7 @@ async function refreshJobFromOpenAI(env: Env, job: StoredJob): Promise<StoredJob
   const outputText = extractOutputText(response.data);
   const error = response.data.error?.message || response.data.incomplete_details?.reason;
   const final = FINAL_STATUSES.has(status);
+  const report = outputText ? parseCompletionReport(outputText) : undefined;
   const updated: StoredJob = {
     ...job,
     status,
@@ -231,11 +333,12 @@ async function refreshJobFromOpenAI(env: Env, job: StoredJob): Promise<StoredJob
     completedAt: final ? now : job.completedAt,
     outputText: outputText || job.outputText,
     error: error || undefined,
+    report: report || job.report,
     checkpoint: final
       ? {
           at: now,
           status,
-          summary: checkpointSummary(outputText, error, status),
+          summary: report?.summary || checkpointSummary(outputText, error, status),
         }
       : job.checkpoint,
   };
@@ -244,12 +347,12 @@ async function refreshJobFromOpenAI(env: Env, job: StoredJob): Promise<StoredJob
   return updated;
 }
 
-function buildWorkerInput(body: CreateJobBody): string {
+function buildWorkerInput(body: CreateJobBody, retryCount: number): string {
   const done = body.definitionOfDone?.length
     ? body.definitionOfDone.map((item) => `- ${item}`).join('\n')
     : '- ユーザーが指定した最終目標を満たす';
 
-  return `あなたはAI DEV DECKのBackground Workerです。\n\n【プロジェクト】\n${body.projectName || body.projectId}\n\n【最終目標】\n${body.goal}\n\n【現在地点】\n${body.currentPhase || '未指定'}\n\n【完成条件】\n${done}\n\n【今回の指示】\n${body.prompt}\n\nルール:\n- 完了済み作業を推測で繰り返さず、与えられた情報から必要な次工程を進める。\n- エラーがある場合は原因を分析し、同じ失敗を漫然と繰り返さない。\n- 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様変更など本人判断が必要な内容は明示する。\n- 最後に必ず、実施した手順・到達地点・残作業・本人が必要なことを簡潔にまとめる。\n- 実際にアクセスできない外部システムを操作したと偽らない。`;
+  return `あなたはAI DEV DECKのBackground Workerです。\n\n【プロジェクト】\n${body.projectName || body.projectId}\n\n【最終目標】\n${body.goal}\n\n【現在地点】\n${body.currentPhase || '未指定'}\n\n【完成条件】\n${done}\n\n【今回の指示】\n${body.prompt}\n\n【attempt】\n${retryCount + 1}\n\nルール:\n- 完了済み作業を推測で繰り返さず、与えられた情報から必要な次工程を進める。\n- エラーがある場合は原因を分析し、同じ失敗を漫然と繰り返さない。\n- 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様変更など本人判断が必要な内容は明示する。\n- 実際にアクセスできない外部システムを操作したと偽らない。\n- 最後に通常の説明に加えて、必ず最終行付近へ次の形式を1つだけ出す。JSONは正しいJSONにする。\n\nDEVDECK_REPORT_JSON: {"summary":"短い完了要約","steps":["実施手順1","実施手順2"],"reachedStage":"現在の到達地点","remaining":["残作業"],"humanRequired":["本人が必要なこと"],"done":false}\n\ndoneは最終目標と完成条件を本当に満たした場合だけtrue。`;
 }
 
 function extractOutputText(response: OpenAIResponseRecord): string {
@@ -260,6 +363,30 @@ function extractOutputText(response: OpenAIResponseRecord): string {
     }
   }
   return chunks.join('\n').trim();
+}
+
+function parseCompletionReport(output: string): CompletionReport | undefined {
+  const marker = 'DEVDECK_REPORT_JSON:';
+  const index = output.lastIndexOf(marker);
+  if (index < 0) return undefined;
+  const candidate = output.slice(index + marker.length).trim();
+  const firstBrace = candidate.indexOf('{');
+  const lastBrace = candidate.lastIndexOf('}');
+  if (firstBrace < 0 || lastBrace <= firstBrace) return undefined;
+
+  try {
+    const parsed = JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+    return {
+      summary: stringValue(parsed.summary).slice(0, 1200),
+      steps: stringArray(parsed.steps, 20),
+      reachedStage: stringValue(parsed.reachedStage).slice(0, 500),
+      remaining: stringArray(parsed.remaining, 20),
+      humanRequired: stringArray(parsed.humanRequired, 20),
+      done: parsed.done === true,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function checkpointSummary(output: string, error: string | undefined, status: JobStatus): string {
@@ -351,6 +478,20 @@ async function readJson<T>(request: Request): Promise<T | null> {
   } catch {
     return null;
   }
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  const integer = Number.isFinite(value) ? Math.trunc(value) : min;
+  return Math.max(min, Math.min(max, integer));
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : '';
+}
+
+function stringArray(value: unknown, max: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string').slice(0, max).map((item) => item.slice(0, 1000));
 }
 
 function isObject(value: unknown): value is Record<string, any> {
