@@ -7,6 +7,7 @@ import DeveloperAgentLauncher from './DeveloperAgentLauncher';
 import EvidenceCenter from './EvidenceCenter';
 import HandoffCenter from './HandoffCenter';
 import NotificationCenter from './NotificationCenter';
+import OperatingPlanCenter from './OperatingPlanCenter';
 import RuntimeProjectSync from './RuntimeProjectSync';
 import SmartActionCenter from './SmartActionCenter';
 import WatchdogRuntime from './WatchdogRuntime';
@@ -17,6 +18,7 @@ import './background-worker.css';
 import './recovery.css';
 import './handoff-notice.css';
 import './developer-agent.css';
+import './operating-plan.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -27,6 +29,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <HandoffCenter />
     <SmartActionCenter />
     <BackgroundWorkerCenter />
+    <OperatingPlanCenter />
     <DeveloperAgentLauncher />
     <DeveloperAgentCenter />
     <EvidenceCenter />
