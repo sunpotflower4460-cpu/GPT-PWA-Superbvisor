@@ -87,7 +87,10 @@ export async function sendSupervisorPush(env: PushEnv, payload: SupervisorPushPa
             data: { url: payload.url || './', projectId: payload.projectId, kind: payload.kind },
           },
           adminContact: subject,
-          options: { ttl: 3600, urgency: payload.kind === 'error' || payload.kind === 'human' ? 'high' : 'normal', topic: payload.tag },
+          options: {
+            ttl: 3600,
+            urgency: payload.kind === 'error' || payload.kind === 'human' ? 'high' : 'normal',
+          },
         },
       });
       const response = await fetch(request.endpoint, { method: 'POST', headers: request.headers, body: request.body });
