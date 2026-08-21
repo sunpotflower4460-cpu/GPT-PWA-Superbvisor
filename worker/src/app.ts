@@ -102,7 +102,7 @@ export default {
     const guardianRun = url.pathname.match(/^\/api\/guardian-runs\/([^/]+)$/);
     if (guardianRun && request.method === 'GET') {
       try {
-        const run = await advanceGuardianRun(env, decodeURIComponent(guardianRun[1]));
+        const run = await advanceGuardianRun(env, decodeURIComponent(guardianRun[1]), { force: true });
         return json({ run }, 200, env, request);
       } catch (error) {
         const existing = await getGuardianRun(env, decodeURIComponent(guardianRun[1]));
@@ -117,7 +117,7 @@ export default {
       const latest = await getLatestGuardianRun(env, projectId);
       if (!latest) return json({ error: 'guardian_run_not_found' }, 404, env, request);
       try {
-        const run = await advanceGuardianRun(env, latest.id);
+        const run = await advanceGuardianRun(env, latest.id, { force: true });
         return json({ run }, 200, env, request);
       } catch (error) {
         return json({ run: latest, warning: error instanceof Error ? error.message : 'guardian_refresh_failed' }, 200, env, request);
@@ -163,7 +163,7 @@ async function maybeHandleDeveloperWebhook(request: Request, env: Env): Promise<
   try {
     await handleDeveloperResponse(env, responseId);
     const guardianRunId = await getGuardianRunIdForDeveloperJob(env, developerJobId);
-    if (guardianRunId) await advanceGuardianRun(env, guardianRunId);
+    if (guardianRunId) await advanceGuardianRun(env, guardianRunId, { force: true });
     await env.SUPERVISOR_STATE.put(dedupe, event.type, { expirationTtl: DEV_EVENT_TTL });
     return Response.json({ ok: true, developer: true, guardian: Boolean(guardianRunId) });
   } catch (error) {
