@@ -20,6 +20,7 @@ import './handoff-notice.css';
 import './developer-agent.css';
 import './operating-plan.css';
 import './dashboard-plan.css';
+import './execution-router.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
