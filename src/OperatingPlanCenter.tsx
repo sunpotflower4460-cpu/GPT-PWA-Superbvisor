@@ -1,5 +1,7 @@
-import { useMemo, useState } from 'react';
-import { DevProject, loadProjects } from './core';
+import { useEffect, useMemo, useState } from 'react';
+import { DevProject, QuickAction, buildActionPrompt, loadProjects } from './core';
+import { loadWorkerConnection } from './backgroundWorker';
+import { GuardianRun, startGuardianRun } from './guardianRunner';
 import {
   OperatingPlan,
   OperatingPlanTarget,
@@ -10,26 +12,46 @@ import {
   targetLabels,
 } from './operatingPlan';
 
+const planRunAction: QuickAction = {
+  id: 'operating-plan-run',
+  label: 'Operating Planどおりに進める',
+  intent: '保存済みOperating Planの到達地点・標準手順・案件固有ルールを優先し、その地点まで安全に進める',
+};
+
 export default function OperatingPlanCenter() {
   const [open, setOpen] = useState(false);
   const [projects, setProjects] = useState<DevProject[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [plan, setPlan] = useState<OperatingPlan>(() => defaultOperatingPlan());
   const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState('');
+  const [guardian, setGuardian] = useState<GuardianRun | null>(null);
 
   const selected = useMemo(
     () => projects.find((project) => project.id === selectedId) ?? projects[0] ?? null,
     [projects, selectedId],
   );
 
-  function openCenter() {
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const projectId = (event as CustomEvent<{ projectId?: string }>).detail?.projectId;
+      openCenter(projectId);
+    };
+    window.addEventListener('devdeck:open-operating-plan', handler);
+    return () => window.removeEventListener('devdeck:open-operating-plan', handler);
+  }, []);
+
+  function openCenter(preferredProjectId?: string) {
     const nextProjects = loadProjects();
-    const nextId = selectedId && nextProjects.some((project) => project.id === selectedId)
-      ? selectedId
-      : nextProjects[0]?.id ?? '';
+    const nextId = preferredProjectId && nextProjects.some((project) => project.id === preferredProjectId)
+      ? preferredProjectId
+      : selectedId && nextProjects.some((project) => project.id === selectedId)
+        ? selectedId
+        : nextProjects[0]?.id ?? '';
     setProjects(nextProjects);
     setSelectedId(nextId);
     setPlan(nextId ? getOperatingPlan(nextId) : defaultOperatingPlan());
+    setGuardian(null);
     setMessage('');
     setOpen(true);
   }
@@ -37,6 +59,7 @@ export default function OperatingPlanCenter() {
   function changeProject(id: string) {
     setSelectedId(id);
     setPlan(getOperatingPlan(id));
+    setGuardian(null);
     setMessage('');
   }
 
@@ -45,12 +68,51 @@ export default function OperatingPlanCenter() {
     setMessage('');
   }
 
-  function save() {
-    if (!selected) return;
+  function persistPlan() {
+    if (!selected) return false;
     saveOperatingPlan(selected.id, plan);
     setPlan(getOperatingPlan(selected.id));
-    setMessage('Operating Planを保存しました。今後の標準指示・Background・GitHub Agent・Guardianに反映されます。');
     window.dispatchEvent(new CustomEvent('devdeck:operating-plan-changed', { detail: { projectId: selected.id } }));
+    return true;
+  }
+
+  function save() {
+    if (!persistPlan()) return;
+    setMessage('Operating Planを保存しました。今後の標準指示・Background・GitHub Agent・Guardianに反映されます。');
+  }
+
+  async function copyChatPrompt() {
+    if (!selected || !persistPlan()) return;
+    setBusy('copy');
+    try {
+      const prompt = buildActionPrompt(selected, planRunAction);
+      await navigator.clipboard.writeText(prompt);
+      setMessage('Planを保存し、ChatGPTへ貼る標準指示をコピーしました。API費用は発生しません。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '指示をコピーできませんでした。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function runGuardian() {
+    if (!selected || !persistPlan()) return;
+    if (!selected.githubUrl) {
+      setMessage('Guardian実行には案件のGitHub URL登録が必要です。Chat用コピーはそのまま使えます。');
+      return;
+    }
+    setBusy('guardian');
+    setMessage('');
+    try {
+      const prompt = buildActionPrompt(selected, planRunAction);
+      const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection());
+      setGuardian(run);
+      setMessage('Operating Planを標準設定（最大3 cycle / 3時間）でGuardianへ渡しました。端末を閉じてもWebhook/Cronが監督します。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Guardianを開始できませんでした。');
+    } finally {
+      setBusy('');
+    }
   }
 
   function preset(target: OperatingPlanTarget) {
@@ -70,7 +132,7 @@ export default function OperatingPlanCenter() {
 
   return (
     <>
-      <button className="plan-fab" onClick={openCenter} aria-label="Operating Plan">☷</button>
+      <button className="plan-fab" onClick={() => openCenter()} aria-label="Operating Plan">☷</button>
       {open && (
         <div className="plan-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="plan-sheet">
@@ -81,7 +143,7 @@ export default function OperatingPlanCenter() {
 
             <div className="plan-note">
               <b>一度決めた「進め方」を毎回説明し直さない。</b>
-              <span>このPlanは標準プロンプトへ自動で入り、Chat / Background / GitHub Agent / Guardianで共通利用されます。実行モードの昇格自体は引き続き明示操作が必要です。</span>
+              <span>標準はChat-first。Planは実行方針を共有しますが、API Background / Guardianへは明示ボタンを押した時だけ昇格します。</span>
             </div>
 
             {projects.length === 0 ? (
@@ -97,7 +159,7 @@ export default function OperatingPlanCenter() {
                 {selected && (
                   <div className="plan-body">
                     <article className="plan-project-card">
-                      <strong>{selected.name}</strong>
+                      <div><strong>{selected.name}</strong><b>{plan.target === 'CUSTOM' ? plan.customTarget || targetLabels.CUSTOM : targetLabels[plan.target]}</b></div>
                       <span>{selected.goal}</span>
                     </article>
 
@@ -143,6 +205,19 @@ export default function OperatingPlanCenter() {
                     </details>
 
                     <button className="plan-save" onClick={save}>この案件のPlanを保存</button>
+                    <div className="plan-run-actions">
+                      <button disabled={Boolean(busy)} onClick={copyChatPrompt}>{busy === 'copy' ? 'コピー中…' : '💬 Chat用指示をコピー'}</button>
+                      <button className="guardian" disabled={Boolean(busy) || !selected.githubUrl} onClick={runGuardian}>{busy === 'guardian' ? '開始中…' : '🛡 GuardianでPlan実行'}</button>
+                    </div>
+                    <p className="plan-cost-note">ChatコピーはAPI費用なし。GuardianはOpenAI APIを利用し、最大3 cycle / 3時間で停止します。自動mergeはしません。</p>
+
+                    {guardian && (
+                      <article className={`plan-run-status ${guardian.status}`}>
+                        <div><b>{guardian.status}</b><span>cycle {guardian.cycle}/{guardian.maxCycles}</span></div>
+                        <p>{guardian.message || 'GuardianへPlanを引き継ぎました。'}</p>
+                        {guardian.pullRequest && <button onClick={() => window.open(guardian.pullRequest!.url, '_blank', 'noopener,noreferrer')}>Draft PR #{guardian.pullRequest.number} ↗</button>}
+                      </article>
+                    )}
                     {message && <div className="plan-message">{message}</div>}
                   </div>
                 )}
