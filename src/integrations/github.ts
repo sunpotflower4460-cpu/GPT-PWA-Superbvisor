@@ -3,6 +3,8 @@ export interface GitHubRepositoryRef {
   repo: string;
 }
 
+export type GitHubCiState = 'SUCCESS' | 'FAILURE' | 'PENDING' | 'UNKNOWN';
+
 export interface GitHubProjectSnapshot {
   repository: GitHubRepositoryRef;
   defaultBranch?: string;
@@ -10,14 +12,15 @@ export interface GitHubProjectSnapshot {
   latestCommitAt?: string;
   openPullRequests?: number;
   openIssues?: number;
-  ciState?: 'SUCCESS' | 'FAILURE' | 'PENDING' | 'UNKNOWN';
+  ciState?: GitHubCiState;
+  rateLimitRemaining?: number;
   fetchedAt: string;
 }
 
 export function parseGitHubRepositoryUrl(value: string): GitHubRepositoryRef | null {
   try {
     const url = new URL(value);
-    if (url.hostname !== 'github.com') return null;
+    if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com') return null;
     const [owner, repoRaw] = url.pathname.split('/').filter(Boolean);
     if (!owner || !repoRaw) return null;
     return { owner, repo: repoRaw.replace(/\.git$/, '') };
@@ -31,51 +34,80 @@ export function repositoryFullName(ref: GitHubRepositoryRef) {
 }
 
 /**
- * v0.1 intentionally does not put GitHub credentials in the browser.
- * A later server/connector adapter will implement this interface for private repositories.
+ * Browser credentials are intentionally not supported here.
+ * Public repositories can use this read-only provider. Private repositories
+ * will use a later backend/connector adapter so tokens never live in the PWA.
  */
 export interface GitHubSnapshotProvider {
   fetchSnapshot(repository: GitHubRepositoryRef): Promise<GitHubProjectSnapshot>;
+}
+
+function countFromLinkHeader(response: Response, fallback: number) {
+  const link = response.headers.get('link');
+  const lastPageMatch = link?.match(/[?&]page=(\d+)>; rel="last"/);
+  return lastPageMatch ? Number(lastPageMatch[1]) : fallback;
+}
+
+function mapWorkflowState(run: { status?: string; conclusion?: string | null } | undefined): GitHubCiState {
+  if (!run) return 'UNKNOWN';
+  if (run.status !== 'completed') return 'PENDING';
+  if (run.conclusion === 'success' || run.conclusion === 'neutral' || run.conclusion === 'skipped') return 'SUCCESS';
+  if (run.conclusion) return 'FAILURE';
+  return 'UNKNOWN';
 }
 
 export class PublicGitHubSnapshotProvider implements GitHubSnapshotProvider {
   async fetchSnapshot(repository: GitHubRepositoryRef): Promise<GitHubProjectSnapshot> {
     const fullName = repositoryFullName(repository);
     const headers = { Accept: 'application/vnd.github+json' };
-
-    const [repoResponse, pullsResponse, issuesResponse] = await Promise.all([
-      fetch(`https://api.github.com/repos/${fullName}`, { headers }),
-      fetch(`https://api.github.com/repos/${fullName}/pulls?state=open&per_page=1`, { headers }),
-      fetch(`https://api.github.com/repos/${fullName}/issues?state=open&per_page=100`, { headers }),
-    ]);
+    const repoResponse = await fetch(`https://api.github.com/repos/${fullName}`, { headers });
 
     if (!repoResponse.ok) {
-      throw new Error(`GitHub repository request failed: ${repoResponse.status}`);
+      throw new Error(
+        repoResponse.status === 404
+          ? 'Repository not found or it is private. Private repositories require the secure backend adapter.'
+          : `GitHub repository request failed: ${repoResponse.status}`,
+      );
     }
 
     const repoData = await repoResponse.json();
+    const branch = repoData.default_branch as string | undefined;
+    const rateLimitRemaining = Number(repoResponse.headers.get('x-ratelimit-remaining'));
+
+    if (!branch) {
+      return {
+        repository,
+        rateLimitRemaining: Number.isFinite(rateLimitRemaining) ? rateLimitRemaining : undefined,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    const [pullsResponse, commitResponse, runsResponse] = await Promise.all([
+      fetch(`https://api.github.com/repos/${fullName}/pulls?state=open&per_page=1`, { headers }),
+      fetch(`https://api.github.com/repos/${fullName}/commits/${encodeURIComponent(branch)}`, { headers }),
+      fetch(`https://api.github.com/repos/${fullName}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=1`, { headers }),
+    ]);
+
     const pulls = pullsResponse.ok ? await pullsResponse.json() : [];
-    const issues = issuesResponse.ok ? await issuesResponse.json() : [];
+    const commit = commitResponse.ok ? await commitResponse.json() : undefined;
+    const runsData = runsResponse.ok ? await runsResponse.json() : undefined;
 
-    const openIssueCount = Array.isArray(issues)
-      ? issues.filter((item: { pull_request?: unknown }) => !item.pull_request).length
+    const pullCount = Array.isArray(pulls) ? countFromLinkHeader(pullsResponse, pulls.length) : undefined;
+    const repoOpenCount = typeof repoData.open_issues_count === 'number' ? repoData.open_issues_count : undefined;
+    const issueCount = repoOpenCount !== undefined && pullCount !== undefined
+      ? Math.max(0, repoOpenCount - pullCount)
       : undefined;
-
-    const link = pullsResponse.headers.get('link');
-    const lastPageMatch = link?.match(/[?&]page=(\d+)>; rel="last"/);
-    const pullCount = Array.isArray(pulls)
-      ? lastPageMatch
-        ? Number(lastPageMatch[1])
-        : pulls.length
-      : undefined;
+    const latestRun = Array.isArray(runsData?.workflow_runs) ? runsData.workflow_runs[0] : undefined;
 
     return {
       repository,
-      defaultBranch: repoData.default_branch,
-      latestCommitAt: repoData.pushed_at,
+      defaultBranch: branch,
+      latestCommitSha: typeof commit?.sha === 'string' ? commit.sha : undefined,
+      latestCommitAt: commit?.commit?.committer?.date ?? repoData.pushed_at,
       openPullRequests: pullCount,
-      openIssues: openIssueCount,
-      ciState: 'UNKNOWN',
+      openIssues: issueCount,
+      ciState: mapWorkflowState(latestRun),
+      rateLimitRemaining: Number.isFinite(rateLimitRemaining) ? rateLimitRemaining : undefined,
       fetchedAt: new Date().toISOString(),
     };
   }

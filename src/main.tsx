@@ -1,11 +1,14 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import EvidenceCenter from './EvidenceCenter';
 import './styles.css';
+import './evidence.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
+    <EvidenceCenter />
   </React.StrictMode>,
 );
 
