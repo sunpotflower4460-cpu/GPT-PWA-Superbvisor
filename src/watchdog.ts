@@ -1,13 +1,17 @@
 import { DevProject } from './core';
 import { SupervisorEvidence, buildRecoveryPrompt, evaluateProject } from './supervisor';
 
+export type WatchdogAction = 'NONE' | 'NUDGE' | 'RETRY' | 'ALTERNATIVE' | 'HANDOFF' | 'HUMAN';
+
 export interface WatchdogState {
   projectId: string;
   retryCount: number;
   alternativeCount: number;
   lastObservedAt: string;
   lastActionAt?: string;
-  lastAction?: string;
+  lastAction?: WatchdogAction;
+  lastNotifiedAt?: string;
+  lastNotificationKey?: string;
 }
 
 export interface WatchdogFinding {
@@ -15,7 +19,7 @@ export interface WatchdogFinding {
   severity: 'INFO' | 'WARNING' | 'ERROR' | 'HUMAN';
   title: string;
   detail: string;
-  recommendedAction: 'NONE' | 'NUDGE' | 'RETRY' | 'ALTERNATIVE' | 'HANDOFF' | 'HUMAN';
+  recommendedAction: WatchdogAction;
   prompt?: string;
   nextState: WatchdogState;
 }
@@ -56,7 +60,7 @@ export function inspectProject(
     retryCount: evidence.retryCount ?? previous.retryCount + previous.alternativeCount,
   });
   const now = new Date().toISOString();
-  const baseState: WatchdogState = { ...previous, lastObservedAt: now };
+  const nextState: WatchdogState = { ...previous, lastObservedAt: now };
 
   if (decision.action === 'ASK_HUMAN') {
     return {
@@ -65,7 +69,7 @@ export function inspectProject(
       title: 'あなたの操作が必要',
       detail: decision.reason,
       recommendedAction: 'HUMAN',
-      nextState: { ...baseState, lastAction: 'HUMAN', lastActionAt: now },
+      nextState,
     };
   }
 
@@ -76,7 +80,7 @@ export function inspectProject(
       title: 'チャット引き継ぎ推奨',
       detail: decision.reason,
       recommendedAction: 'HANDOFF',
-      nextState: { ...baseState, lastAction: 'HANDOFF', lastActionAt: now },
+      nextState,
     };
   }
 
@@ -88,17 +92,11 @@ export function inspectProject(
       detail: decision.reason,
       recommendedAction: 'NUDGE',
       prompt: buildRecoveryPrompt(project, decision),
-      nextState: { ...baseState, lastAction: 'NUDGE', lastActionAt: now },
+      nextState,
     };
   }
 
   if (decision.action === 'RETRY') {
-    const nextState = {
-      ...baseState,
-      retryCount: previous.retryCount + 1,
-      lastAction: 'RETRY',
-      lastActionAt: now,
-    };
     return {
       needsAttention: true,
       severity: 'WARNING',
@@ -111,12 +109,6 @@ export function inspectProject(
   }
 
   if (decision.action === 'TRY_ALTERNATIVE') {
-    const nextState = {
-      ...baseState,
-      alternativeCount: previous.alternativeCount + 1,
-      lastAction: 'ALTERNATIVE',
-      lastActionAt: now,
-    };
     return {
       needsAttention: true,
       severity: 'ERROR',
@@ -136,7 +128,7 @@ export function inspectProject(
       detail: 'Supervisorの復旧判断が必要です。',
       recommendedAction: 'RETRY',
       prompt: buildRecoveryPrompt(project, decision),
-      nextState: baseState,
+      nextState,
     };
   }
 
@@ -146,13 +138,36 @@ export function inspectProject(
     title: '正常',
     detail: decision.reason,
     recommendedAction: 'NONE',
-    nextState: baseState,
+    nextState,
   };
+}
+
+export function recordWatchdogAction(previous: WatchdogState, action: WatchdogAction): WatchdogState {
+  const now = new Date().toISOString();
+  return {
+    ...previous,
+    retryCount: action === 'RETRY' ? previous.retryCount + 1 : previous.retryCount,
+    alternativeCount: action === 'ALTERNATIVE' ? previous.alternativeCount + 1 : previous.alternativeCount,
+    lastAction: action,
+    lastActionAt: now,
+  };
+}
+
+export function notificationKey(finding: WatchdogFinding) {
+  return `${finding.severity}:${finding.recommendedAction}:${finding.title}`;
 }
 
 export function shouldNotify(finding: WatchdogFinding, previous?: WatchdogState) {
   if (!finding.needsAttention) return false;
-  if (!previous?.lastActionAt) return true;
-  const elapsed = Date.now() - new Date(previous.lastActionAt).getTime();
-  return elapsed > 15 * 60_000 || previous.lastAction !== finding.recommendedAction;
+  if (!previous?.lastNotifiedAt) return true;
+  const elapsed = Date.now() - new Date(previous.lastNotifiedAt).getTime();
+  return elapsed > 15 * 60_000 || previous.lastNotificationKey !== notificationKey(finding);
+}
+
+export function recordNotification(previous: WatchdogState, finding: WatchdogFinding): WatchdogState {
+  return {
+    ...previous,
+    lastNotifiedAt: new Date().toISOString(),
+    lastNotificationKey: notificationKey(finding),
+  };
 }
