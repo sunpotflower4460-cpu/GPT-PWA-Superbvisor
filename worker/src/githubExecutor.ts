@@ -149,14 +149,25 @@ export async function compareWorkspace(env: GitHubEnv, workspace: GitHubWorkspac
 export async function createPullRequest(env: GitHubEnv, workspace: GitHubWorkspace, title: string, body: string) {
   assertSafeBranch(workspace.branch);
   const repo = assertAllowedRepo(env, workspace.repository);
-  const result = await githubJson<{ number: number; html_url: string; state: string }>(env, repo, 'POST', '/pulls', {
-    title: title.slice(0, 200),
-    head: workspace.branch,
-    base: workspace.defaultBranch,
-    body: body.slice(0, 20_000),
-    draft: true,
-  });
-  return { number: result.number, url: result.html_url, state: result.state, draft: true };
+  const existing = await findOpenPullRequest(env, repo, workspace);
+  if (existing) return { number: existing.number, url: existing.html_url, state: existing.state, draft: true };
+
+  try {
+    const result = await githubJson<{ number: number; html_url: string; state: string }>(env, repo, 'POST', '/pulls', {
+      title: title.slice(0, 200),
+      head: workspace.branch,
+      base: workspace.defaultBranch,
+      body: body.slice(0, 20_000),
+      draft: true,
+    });
+    return { number: result.number, url: result.html_url, state: result.state, draft: true };
+  } catch (error) {
+    if (error instanceof GitHubHttpError && error.status === 422) {
+      const raced = await findOpenPullRequest(env, repo, workspace);
+      if (raced) return { number: raced.number, url: raced.html_url, state: raced.state, draft: true };
+    }
+    throw error;
+  }
 }
 
 export async function getBranchWorkflowRuns(env: GitHubEnv, repository: string, branch: string) {
@@ -179,6 +190,17 @@ function isSafePath(path: string) {
 
 function assertSafePath(path: string) {
   if (!isSafePath(path)) throw new Error(`Unsafe or blocked path: ${path}`);
+}
+
+async function findOpenPullRequest(env: GitHubEnv, repo: RepoRef, workspace: GitHubWorkspace) {
+  const head = `${repo.owner}:${workspace.branch}`;
+  const items = await githubJson<Array<{ number: number; html_url: string; state: string; draft?: boolean }>>(
+    env,
+    repo,
+    'GET',
+    `/pulls?state=open&head=${encodeURIComponent(head)}&base=${encodeURIComponent(workspace.defaultBranch)}&per_page=5`,
+  );
+  return items[0] ?? null;
 }
 
 async function githubJson<T>(env: GitHubEnv, repo: RepoRef, method: string, path: string, body?: unknown): Promise<T> {
