@@ -211,7 +211,7 @@ export default function DeveloperAgentCenter() {
         {message && <div className="developer-message">{message}</div>}
         <p className="developer-footnote">
           {mode === 'guardian'
-            ? 'GuardianはWebhookに加えて5分ごとのWatchdogで再確認します。上限到達・エラー・CI成功で停止し、自動mergeはしません。'
+            ? 'GuardianはWebhookに加えて5分ごとのWatchdogで再確認します。上限到達・エラー・CI成功、またはCI未検出のレビュー待ちで停止し、自動mergeはしません。'
             : 'GitHub Actionsは非同期なので、単発AgentはCIを無限ポーリングしません。Draft PR作成後はGitHub Reality CheckでCIを確認できます。'}
         </p>
       </section>
@@ -231,7 +231,7 @@ function DeveloperJobCard({ job }: { job: DeveloperJob }) {
 }
 
 function GuardianCard({ run }: { run: GuardianRun }) {
-  const final = run.status === 'completed' || run.status === 'failed' || run.status === 'expired';
+  const final = run.status === 'review_ready' || run.status === 'completed' || run.status === 'failed' || run.status === 'expired';
   return <article className={`guardian-card ${run.status}`}>
     <div className="section-heading">
       <span>{guardianStatusLabel(run.status)}</span>
@@ -259,14 +259,16 @@ function GuardianCard({ run }: { run: GuardianRun }) {
 
 function guardianStatusLabel(status: GuardianRun['status']) {
   if (status === 'waiting_ci') return 'CI待ち';
-  if (status === 'completed') return '✅ 完了';
+  if (status === 'review_ready') return '👤 レビュー待ち';
+  if (status === 'completed') return '✅ CI確認済み';
   if (status === 'failed') return '⚠ 停止';
   if (status === 'expired') return '⏱ 時間上限';
   return '🛡 稼働中';
 }
 
 function guardianMessage(run: GuardianRun) {
-  if (run.status === 'completed') return 'Guardianが完了しました。Draft PRとCIを確認できます。';
+  if (run.status === 'completed') return 'GuardianがCI成功まで確認しました。Draft PRをレビューできます。';
+  if (run.status === 'review_ready') return 'コード作業は終わりましたがCIを確認できませんでした。完成扱いにはせず、人間レビュー待ちです。';
   if (run.status === 'failed') return 'Guardianが設定したサイクル上限またはエラーで停止しました。';
   if (run.status === 'expired') return 'Guardianが最大経過時間に到達して停止しました。';
   if (run.status === 'waiting_ci') return 'GitHub Actionsの完了を待っています。';
