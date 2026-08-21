@@ -1,4 +1,4 @@
-const CACHE = 'ai-dev-deck-v2';
+const CACHE = 'ai-dev-deck-v3';
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -38,13 +38,13 @@ self.addEventListener('push', (event) => {
     icon: data.icon || './icon.svg',
     badge: data.badge || './icon.svg',
     tag: data.tag,
-    data: data.data || { url: './' },
+    data: data.data || {},
   }));
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const target = event.notification.data?.url || './';
+  const target = buildInboxTarget(event.notification.data || {});
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
@@ -57,3 +57,11 @@ self.addEventListener('notificationclick', (event) => {
     }),
   );
 });
+
+function buildInboxTarget(data) {
+  const target = new URL('./', self.registration.scope);
+  target.searchParams.set('supervisor', 'inbox');
+  if (typeof data.projectId === 'string' && data.projectId) target.searchParams.set('projectId', data.projectId);
+  if (typeof data.kind === 'string' && data.kind) target.searchParams.set('kind', data.kind);
+  return target.href;
+}
