@@ -37,18 +37,20 @@ export default function DataBackupCenter() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const handler = () => {
-      setOpen(true);
-      setMessage('');
-      setError('');
-      setPending(null);
-      setFileName('');
-    };
+    const handler = () => openCenter();
     window.addEventListener('devdeck:open-backup', handler);
     return () => window.removeEventListener('devdeck:open-backup', handler);
   }, []);
 
   const currentCounts = useMemo(() => snapshotCounts(createBackup()), [open]);
+
+  function openCenter() {
+    setOpen(true);
+    setMessage('');
+    setError('');
+    setPending(null);
+    setFileName('');
+  }
 
   function exportBackup() {
     const backup = createBackup();
@@ -103,6 +105,12 @@ export default function DataBackupCenter() {
 
   return (
     <>
+      <button className="backup-settings-launcher" onClick={openCenter}>
+        <span>↧</span>
+        <div><b>データバックアップ</b><small>案件・Plan・履歴をJSON保存 / 復元</small></div>
+        <i>›</i>
+      </button>
+
       {open && (
         <div className="backup-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="backup-sheet">
