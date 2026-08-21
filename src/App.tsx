@@ -12,6 +12,7 @@ import {
   saveProjects,
   statusLabel,
 } from './core';
+import { OperatingPlan, getOperatingPlan, targetLabels } from './operatingPlan';
 
 type Tab = 'projects' | 'human' | 'activity' | 'settings';
 
@@ -35,6 +36,10 @@ function formatRelative(iso: string) {
   return `${Math.round(hours / 24)}日前`;
 }
 
+function planTargetLabel(plan: OperatingPlan) {
+  return plan.target === 'CUSTOM' ? plan.customTarget.trim() || targetLabels.CUSTOM : targetLabels[plan.target];
+}
+
 export default function App() {
   const [projects, setProjects] = useState<DevProject[]>(() => loadProjects());
   const [tab, setTab] = useState<Tab>('projects');
@@ -46,10 +51,15 @@ export default function App() {
   useEffect(() => {
     const reload = () => setProjects(loadProjects());
     window.addEventListener('devdeck:projects-changed', reload);
-    return () => window.removeEventListener('devdeck:projects-changed', reload);
+    window.addEventListener('devdeck:operating-plan-changed', reload);
+    return () => {
+      window.removeEventListener('devdeck:projects-changed', reload);
+      window.removeEventListener('devdeck:operating-plan-changed', reload);
+    };
   }, []);
 
   const selected = projects.find((project) => project.id === selectedId) ?? null;
+  const selectedPlan = selected ? getOperatingPlan(selected.id) : null;
   const runningCount = projects.filter((project) => ['RUNNING', 'WAITING_AI'].includes(project.status)).length;
   const humanCount = projects.filter((project) => project.status === 'WAITING_USER' || project.humanBlockers.length > 0).length;
   const completedCount = projects.filter((project) => project.status === 'COMPLETED').length;
@@ -86,6 +96,7 @@ export default function App() {
     const stalled = isLikelyStalled(project);
     const visibleStatus: ProjectStatus = stalled ? 'STALLED' : project.status;
     const activeMilestone = project.milestones.find((m) => m.state === 'ACTIVE');
+    const plan = getOperatingPlan(project.id);
 
     return (
       <button className="project-card" key={project.id} onClick={() => setSelectedId(project.id)}>
@@ -101,6 +112,7 @@ export default function App() {
           <b>{project.progress}%</b>
         </div>
         <p className="phase">{activeMilestone?.title ?? project.currentPhase}</p>
+        <div className="plan-chip">☷ {planTargetLabel(plan)}</div>
         <div className="card-meta">
           <span>{project.executionMode}</span>
           <span>{project.automationLevel}</span>
@@ -134,6 +146,20 @@ export default function App() {
             <div className="progress-track large"><span style={{ width: `${selected.progress}%` }} /></div>
             <p className="muted">現在：{selected.currentPhase} ・ 最終活動 {formatRelative(selected.lastActivityAt)}</p>
           </article>
+
+          {selectedPlan && (
+            <article className="panel dashboard-plan-panel">
+              <div className="section-heading"><span>☷ Operating Plan</span><b>{planTargetLabel(selectedPlan)}</b></div>
+              <p>{selectedPlan.workflow}</p>
+              <div className="dashboard-plan-meta">
+                {selectedPlan.continueWithoutConfirmation && <span>連続実行</span>}
+                {selectedPlan.validateAndTest && <span>検証あり</span>}
+                {selectedPlan.recoverFromFailure && <span>失敗時復旧</span>}
+                {selectedPlan.selfReview && <span>自己レビュー</span>}
+              </div>
+              <button className="secondary-action" onClick={() => window.dispatchEvent(new CustomEvent('devdeck:open-operating-plan', { detail: { projectId: selected.id } }))}>Planを開く / 実行</button>
+            </article>
+          )}
 
           <article className="panel">
             <div className="section-heading"><span>工程</span><span>{selected.automationLevel}</span></div>
@@ -325,12 +351,13 @@ function Settings() {
 
   return (
     <section className="content-section">
-      <div className="section-heading"><h2>設定</h2><span>v0.10</span></div>
+      <div className="section-heading"><h2>設定</h2><span>v0.13</span></div>
       <article className="panel settings-list">
         <div><b>基本実行</b><span>CHAT</span></div>
         <div><b>Work切替</b><span>手動のみ</span></div>
         <div><b>Background</b><span>任意昇格</span></div>
         <div><b>Guardian</b><span>上限付き自動監督</span></div>
+        <div><b>Operating Plan</b><span>案件ごとに保存</span></div>
         <div><b>状態同期</b><span>起動 / 復帰 / 2分ごと</span></div>
         <div><b>データ保存</b><span>案件はこの端末</span></div>
       </article>
