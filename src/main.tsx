@@ -2,6 +2,8 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import BackgroundWorkerCenter from './BackgroundWorkerCenter';
+import DeveloperAgentCenter from './DeveloperAgentCenter';
+import DeveloperAgentLauncher from './DeveloperAgentLauncher';
 import EvidenceCenter from './EvidenceCenter';
 import HandoffCenter from './HandoffCenter';
 import NotificationCenter from './NotificationCenter';
@@ -13,6 +15,7 @@ import './smart-actions.css';
 import './background-worker.css';
 import './recovery.css';
 import './handoff-notice.css';
+import './developer-agent.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -22,6 +25,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <HandoffCenter />
     <SmartActionCenter />
     <BackgroundWorkerCenter />
+    <DeveloperAgentLauncher />
+    <DeveloperAgentCenter />
     <EvidenceCenter />
   </React.StrictMode>,
 );
