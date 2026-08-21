@@ -25,6 +25,7 @@ export default function NotificationCenter() {
   const [items, setItems] = useState<SupervisorNotification[]>(() => loadNotifications());
   const [syncing, setSyncing] = useState(false);
   const [message, setMessage] = useState('');
+  const [actionMessage, setActionMessage] = useState('');
   const [pushState, setPushState] = useState<PushState>(initialPushState);
   const [pushBusy, setPushBusy] = useState('');
   const [pushMessage, setPushMessage] = useState('');
@@ -39,6 +40,7 @@ export default function NotificationCenter() {
   async function openCenter() {
     setOpen(true);
     setItems(loadNotifications());
+    setActionMessage('');
     await Promise.all([syncStatus(), refreshPushState()]);
   }
 
@@ -103,7 +105,16 @@ export default function NotificationCenter() {
     for (const project of projects) {
       const localInputs: Array<Omit<SupervisorNotification, 'id' | 'createdAt'>> = [];
       if (project.status === 'CONTEXT_LIMIT') {
-        localInputs.push({ dedupeKey: `project:${project.id}:handoff:${project.lastActivityAt}`, projectId: project.id, projectName: project.name, kind: 'handoff', title: `${project.name}: 引き継ぎ推奨`, detail: '会話が長くなっています。Checkpointを作成して新しいChatへ移る準備ができます。' });
+        localInputs.push({
+          dedupeKey: `project:${project.id}:handoff:${project.lastActivityAt}`,
+          projectId: project.id,
+          projectName: project.name,
+          kind: 'handoff',
+          title: `${project.name}: 引き継ぎ推奨`,
+          detail: '会話が長くなっています。Checkpointを作成して新しいChatへ移る準備ができます。',
+          action: 'OPEN_HANDOFF',
+          actionLabel: '引き継ぎを開く',
+        });
       }
       if (project.humanBlockers.length) {
         localInputs.push({ dedupeKey: `project:${project.id}:human:${project.humanBlockers.join('|')}`, projectId: project.id, projectName: project.name, kind: 'human', title: `${project.name}: あなたが必要`, detail: project.humanBlockers.join(' / ') });
@@ -155,6 +166,39 @@ export default function NotificationCenter() {
     setItems(loadNotifications());
   }
 
+  async function runItemAction(item: SupervisorNotification) {
+    setActionMessage('');
+    if (!item.action) return;
+
+    if (item.action === 'OPEN_HANDOFF') {
+      markNotificationRead(item.id);
+      setItems(loadNotifications());
+      setOpen(false);
+      window.dispatchEvent(new CustomEvent('devdeck:open-handoff', { detail: { projectId: item.projectId } }));
+      return;
+    }
+
+    if (item.action === 'RECOVER_CHAT') {
+      if (!item.actionPrompt) {
+        setActionMessage('再開指示が保存されていません。Smart Supervisorから再生成してください。');
+        return;
+      }
+      const project = loadProjects().find((candidate) => candidate.id === item.projectId);
+      const target = project?.chatUrl || 'https://chatgpt.com/';
+      const nextWindow = window.open(target, '_blank', 'noopener,noreferrer');
+      try {
+        await navigator.clipboard.writeText(item.actionPrompt);
+        markNotificationRead(item.id);
+        setItems(loadNotifications());
+        setActionMessage(nextWindow
+          ? '再開指示をコピーしてChatを開きました。貼り付けて送信してください。'
+          : '再開指示をコピーしました。ポップアップがブロックされたためChatは手動で開いてください。');
+      } catch (error) {
+        setActionMessage(error instanceof Error ? error.message : '再開指示をコピーできませんでした。');
+      }
+    }
+  }
+
   function readAll() {
     markAllNotificationsRead();
     setItems(loadNotifications());
@@ -198,13 +242,21 @@ export default function NotificationCenter() {
               <button onClick={clearRead}>既読を消す</button>
             </div>
             {message && <div className="notice-message">{message}</div>}
+            {actionMessage && <div className="notice-message notice-action-message">{actionMessage}</div>}
             <div className="notice-list">
               {items.length === 0 ? <div className="empty-state compact"><div>🌿</div><h2>通知はありません</h2><p>完了・停止・本人待ちなど重要なものだけここに残します。</p></div> : items.map((item) => (
-                <button key={item.id} className={`notice-item ${item.kind} ${item.readAt ? 'read' : ''}`} onClick={() => read(item)}>
-                  <span className="notice-icon">{icon(item.kind)}</span>
-                  <div><strong>{item.title}</strong><p>{item.detail}</p><time>{new Date(item.createdAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time></div>
-                  {!item.readAt && <i />}
-                </button>
+                <article key={item.id} className={`notice-item ${item.kind} ${item.readAt ? 'read' : ''}`}>
+                  <button className="notice-item-main" onClick={() => read(item)}>
+                    <span className="notice-icon">{icon(item.kind)}</span>
+                    <div><strong>{item.title}</strong><p>{item.detail}</p><time>{new Date(item.createdAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time></div>
+                    {!item.readAt && <i />}
+                  </button>
+                  {item.action && (
+                    <button className={`notice-item-action ${item.action.toLowerCase()}`} onClick={() => runItemAction(item)}>
+                      {item.actionLabel || '開く'}
+                    </button>
+                  )}
+                </article>
               ))}
             </div>
           </section>
