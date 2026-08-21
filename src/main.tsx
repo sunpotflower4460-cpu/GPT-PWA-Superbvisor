@@ -2,12 +2,15 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import EvidenceCenter from './EvidenceCenter';
+import SmartActionCenter from './SmartActionCenter';
 import './styles.css';
 import './evidence.css';
+import './smart-actions.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
+    <SmartActionCenter />
     <EvidenceCenter />
   </React.StrictMode>,
 );
