@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  app-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -20,7 +20,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install dependencies
+      - name: Install app dependencies
         run: npm install
-      - name: Build
+      - name: Build app
         run: npm run build
+
+  worker-typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm install
+      - name: Typecheck worker
+        working-directory: worker
+        run: npm run typecheck
