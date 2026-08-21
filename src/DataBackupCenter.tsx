@@ -8,12 +8,16 @@ import {
 } from './cloudStateSync';
 import { DevProject, loadProjects, saveProjects } from './core';
 import { HandoffCheckpoint, loadHandoffCheckpoints } from './handoff';
-import { SupervisorNotification, loadNotifications, saveNotifications } from './notifications';
+import { SupervisorNotification, addNotification, loadNotifications, saveNotifications } from './notifications';
 import { OperatingPlan, loadOperatingPlans } from './operatingPlan';
 import { WatchdogState, loadWatchdogStates, saveWatchdogStates } from './watchdog';
 
 const BACKUP_SCHEMA = 'gpt-pwa-supervisor.backup';
 const BACKUP_VERSION = 1;
+const AUTO_SYNC_KEY = 'gpt-pwa-supervisor.cloud-auto-sync.v1';
+const AUTO_SYNC_LAST_KEY = 'gpt-pwa-supervisor.cloud-auto-sync-last.v1';
+const AUTO_SYNC_INTERVAL_MS = 5 * 60_000;
+const AUTO_SYNC_DEBOUNCE_MS = 45_000;
 const STORAGE_KEYS = {
   plans: 'gpt-pwa-supervisor.operating-plans.v1',
   handoffs: 'gpt-pwa-supervisor.handoffs.v1',
@@ -21,6 +25,7 @@ const STORAGE_KEYS = {
 
 type BackupMode = 'MERGE' | 'REPLACE';
 type CloudBusy = '' | 'check' | 'push' | 'pull' | 'force' | 'delete';
+type AutoSyncStatus = 'idle' | 'syncing' | 'ok' | 'conflict' | 'error';
 
 interface BackupEnvelope {
   schema: typeof BACKUP_SCHEMA;
@@ -46,13 +51,56 @@ export default function DataBackupCenter() {
   const [cloudBusy, setCloudBusy] = useState<CloudBusy>('');
   const [cloudMessage, setCloudMessage] = useState('');
   const [cloudError, setCloudError] = useState('');
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(() => localStorage.getItem(AUTO_SYNC_KEY) === 'true');
+  const [autoSyncStatus, setAutoSyncStatus] = useState<AutoSyncStatus>('idle');
+  const [lastAutoSyncAt, setLastAutoSyncAt] = useState(() => localStorage.getItem(AUTO_SYNC_LAST_KEY) || '');
   const inputRef = useRef<HTMLInputElement>(null);
+  const autoSyncRunning = useRef(false);
 
   useEffect(() => {
     const handler = () => openCenter();
     window.addEventListener('devdeck:open-backup', handler);
     return () => window.removeEventListener('devdeck:open-backup', handler);
   }, []);
+
+  useEffect(() => {
+    if (!autoSyncEnabled) return;
+    let debounceTimer = 0;
+    const configured = () => {
+      const value = loadWorkerConnection();
+      return Boolean(value.baseUrl.trim() && value.token.trim());
+    };
+    const runSoon = () => {
+      if (autoSyncRunning.current || document.visibilityState === 'hidden' || !configured()) return;
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(() => void autoSyncOnce(), AUTO_SYNC_DEBOUNCE_MS);
+    };
+    const runOnVisible = () => {
+      if (document.visibilityState === 'visible') runSoon();
+    };
+
+    const startup = window.setTimeout(() => {
+      if (configured()) void autoSyncOnce();
+    }, 2500);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && configured()) void autoSyncOnce();
+    }, AUTO_SYNC_INTERVAL_MS);
+
+    window.addEventListener('devdeck:projects-changed', runSoon);
+    window.addEventListener('devdeck:operating-plan-changed', runSoon);
+    window.addEventListener('focus', runSoon);
+    document.addEventListener('visibilitychange', runOnVisible);
+
+    return () => {
+      window.clearTimeout(startup);
+      window.clearTimeout(debounceTimer);
+      window.clearInterval(interval);
+      window.removeEventListener('devdeck:projects-changed', runSoon);
+      window.removeEventListener('devdeck:operating-plan-changed', runSoon);
+      window.removeEventListener('focus', runSoon);
+      document.removeEventListener('visibilitychange', runOnVisible);
+    };
+  }, [autoSyncEnabled]);
 
   const currentCounts = useMemo(() => snapshotCounts(createBackup()), [open]);
   const connection = loadWorkerConnection();
@@ -198,18 +246,103 @@ export default function DataBackupCenter() {
   async function deleteCloudCopy() {
     const ok = window.confirm('Cloudflare KV上の同期コピーだけを削除します。この端末の案件データは消えません。続けますか？');
     if (!ok) return;
+    setAutoSyncPreference(false);
     setCloudBusy('delete');
     setCloudMessage('');
     setCloudError('');
     try {
       await deleteRemoteCloudState();
       setCloudState(null);
-      setCloudMessage('Cloud同期コピーを削除しました。この端末のデータは残っています。');
+      setCloudMessage('Cloud同期コピーを削除しました。この端末のデータは残っています。Auto SyncもOFFにしました。');
     } catch (reason) {
       setCloudError(reason instanceof Error ? reason.message : 'Cloud同期コピーを削除できませんでした。');
     } finally {
       setCloudBusy('');
     }
+  }
+
+  function changeAutoSync(enabled: boolean) {
+    if (enabled) {
+      const currentConnection = loadWorkerConnection();
+      if (!currentConnection.baseUrl.trim() || !currentConnection.token.trim()) {
+        setCloudError('Auto Syncを使うには先にBackground Worker接続を保存してください。');
+        return;
+      }
+      const ok = window.confirm('Auto Syncを有効にすると、PWAを開いている間に案件・Plan・履歴などの非秘密データをCloudflare KVと同期します。Chat URLや履歴も含まれます。続けますか？');
+      if (!ok) return;
+    }
+    setAutoSyncPreference(enabled);
+    setCloudError('');
+    setCloudMessage(enabled ? 'Auto Syncを有効にしました。PWA起動中・復帰時・約5分ごとに安全同期します。' : 'Auto SyncをOFFにしました。');
+    if (enabled) window.setTimeout(() => void autoSyncOnce(), 0);
+  }
+
+  function setAutoSyncPreference(enabled: boolean) {
+    localStorage.setItem(AUTO_SYNC_KEY, enabled ? 'true' : 'false');
+    setAutoSyncEnabled(enabled);
+    if (!enabled) setAutoSyncStatus('idle');
+  }
+
+  async function autoSyncOnce() {
+    if (autoSyncRunning.current) return;
+    const currentConnection = loadWorkerConnection();
+    if (!currentConnection.baseUrl.trim() || !currentConnection.token.trim()) return;
+
+    autoSyncRunning.current = true;
+    setAutoSyncStatus('syncing');
+    try {
+      const local = createBackup();
+      const remote = await getCloudState<BackupEnvelope>();
+
+      if (!remote) {
+        const first = await pushCloudState(local, { baseRevision: null });
+        if (!first.ok) {
+          recordAutoSyncConflict(first.current?.revision, first.current?.updatedAt);
+          return;
+        }
+        setCloudState(first.state);
+        recordAutoSyncSuccess();
+        return;
+      }
+
+      const incoming = parseBackup(JSON.stringify(remote.data));
+      const merged = mergeNewestBackup(local, incoming);
+      if (!sameBackupData(local, merged)) writeBackup(merged);
+
+      const saved = await pushCloudState(merged, { baseRevision: remote.revision });
+      if (!saved.ok) {
+        recordAutoSyncConflict(saved.current?.revision, saved.current?.updatedAt);
+        return;
+      }
+      setCloudState(saved.state);
+      recordAutoSyncSuccess();
+    } catch (reason) {
+      setAutoSyncStatus('error');
+      if (open) setCloudError(reason instanceof Error ? reason.message : 'Auto Syncに失敗しました。');
+    } finally {
+      autoSyncRunning.current = false;
+    }
+  }
+
+  function recordAutoSyncSuccess() {
+    const at = new Date().toISOString();
+    localStorage.setItem(AUTO_SYNC_LAST_KEY, at);
+    setLastAutoSyncAt(at);
+    setAutoSyncStatus('ok');
+  }
+
+  function recordAutoSyncConflict(revision?: string, updatedAt?: string) {
+    setAutoSyncStatus('conflict');
+    const detail = updatedAt
+      ? `別端末が ${new Date(updatedAt).toLocaleString('ja-JP')} にCloudを更新しました。自動上書きはせず停止しました。設定 → データバックアップでCloudから安全にマージしてください。`
+      : '別端末のCloud更新と競合しました。自動上書きはせず停止しました。設定 → データバックアップで確認してください。';
+    addNotification({
+      dedupeKey: `cloud-sync-conflict:${revision || updatedAt || 'unknown'}`,
+      kind: 'error',
+      title: 'Cloud Sync: 競合を検出',
+      detail,
+    });
+    if (open) setCloudError(detail);
   }
 
   const preview = pending ? snapshotCounts(pending) : null;
@@ -245,13 +378,19 @@ export default function DataBackupCenter() {
 
             <section className="backup-cloud">
               <div className="backup-cloud-head">
-                <div><b>☁ Cloud Sync</b><span>手動同期・revision競合検知あり</span></div>
+                <div><b>☁ Cloud Sync</b><span>revision競合検知あり</span></div>
                 <i className={cloudAvailable ? 'ready' : 'off'}>{cloudAvailable ? 'Worker接続あり' : 'Worker未設定'}</i>
               </div>
               {!cloudAvailable ? (
                 <p>Cloud Syncは任意です。利用する場合は先に⚡ Background Workerで接続設定を保存してください。Chat-only利用には不要です。</p>
               ) : (
                 <>
+                  <label className="backup-auto-sync">
+                    <input type="checkbox" checked={autoSyncEnabled} onChange={(event) => changeAutoSync(event.target.checked)} />
+                    <span><b>Auto Sync</b><small>初期OFF。PWA起動中・復帰時・約5分ごとに新しい側を安全マージ。OpenAI APIは使いません。</small></span>
+                    <i className={autoSyncStatus}>{autoSyncStatus === 'syncing' ? '同期中' : autoSyncStatus === 'conflict' ? '競合' : autoSyncEnabled ? 'ON' : 'OFF'}</i>
+                  </label>
+                  {lastAutoSyncAt && <p className="backup-auto-sync-last">最終Auto Sync: {new Date(lastAutoSyncAt).toLocaleString('ja-JP')}</p>}
                   {cloudState ? (
                     <div className="backup-cloud-state">
                       <div><strong>Cloud更新</strong><span>{new Date(cloudState.updatedAt).toLocaleString('ja-JP')}</span></div>
@@ -386,6 +525,78 @@ function mergeBackup(current: BackupEnvelope, incoming: BackupEnvelope): BackupE
       watchdog: { ...current.data.watchdog, ...incoming.data.watchdog },
     },
   };
+}
+
+function mergeNewestBackup(current: BackupEnvelope, incoming: BackupEnvelope): BackupEnvelope {
+  const projectMap = new Map(current.data.projects.map((item) => [item.id, item]));
+  for (const item of incoming.data.projects) {
+    const existing = projectMap.get(item.id);
+    if (!existing || timestamp(item.lastActivityAt) > timestamp(existing.lastActivityAt)) projectMap.set(item.id, item);
+  }
+
+  const planKeys = new Set([...Object.keys(current.data.operatingPlans), ...Object.keys(incoming.data.operatingPlans)]);
+  const operatingPlans: Record<string, OperatingPlan> = {};
+  for (const key of planKeys) {
+    const local = current.data.operatingPlans[key];
+    const remote = incoming.data.operatingPlans[key];
+    operatingPlans[key] = !local ? remote : !remote ? local : timestamp(remote.updatedAt) > timestamp(local.updatedAt) ? remote : local;
+  }
+
+  const notifications = mergeNotifications(current.data.notifications, incoming.data.notifications);
+  const watchdogKeys = new Set([...Object.keys(current.data.watchdog), ...Object.keys(incoming.data.watchdog)]);
+  const watchdog: Record<string, WatchdogState> = {};
+  for (const key of watchdogKeys) {
+    const local = current.data.watchdog[key];
+    const remote = incoming.data.watchdog[key];
+    watchdog[key] = !local ? remote : !remote ? local : timestamp(remote.lastObservedAt) > timestamp(local.lastObservedAt) ? remote : local;
+  }
+
+  return {
+    schema: BACKUP_SCHEMA,
+    version: BACKUP_VERSION,
+    createdAt: new Date().toISOString(),
+    sourceOrigin: window.location.origin,
+    data: {
+      projects: Array.from(projectMap.values()),
+      operatingPlans,
+      handoffs: mergeByKey(current.data.handoffs, incoming.data.handoffs, (item) => item.id)
+        .sort((a, b) => timestamp(b.createdAt) - timestamp(a.createdAt)).slice(0, 40),
+      notifications,
+      watchdog,
+    },
+  };
+}
+
+function mergeNotifications(current: SupervisorNotification[], incoming: SupervisorNotification[]) {
+  const items = new Map(current.map((item) => [item.dedupeKey || item.id, item]));
+  for (const remote of incoming) {
+    const key = remote.dedupeKey || remote.id;
+    const local = items.get(key);
+    if (!local) {
+      items.set(key, remote);
+      continue;
+    }
+    const newer = timestamp(remote.createdAt) > timestamp(local.createdAt) ? remote : local;
+    const readAt = latestDate(local.readAt, remote.readAt);
+    items.set(key, readAt ? { ...newer, readAt } : newer);
+  }
+  return Array.from(items.values()).sort((a, b) => timestamp(b.createdAt) - timestamp(a.createdAt)).slice(0, 100);
+}
+
+function latestDate(a?: string, b?: string) {
+  if (!a) return b;
+  if (!b) return a;
+  return timestamp(b) > timestamp(a) ? b : a;
+}
+
+function timestamp(value?: string) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sameBackupData(a: BackupEnvelope, b: BackupEnvelope) {
+  return JSON.stringify(a.data) === JSON.stringify(b.data);
 }
 
 function mergeByKey<T>(current: T[], incoming: T[], key: (item: T) => string) {
