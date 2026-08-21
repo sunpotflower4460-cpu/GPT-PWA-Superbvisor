@@ -9,6 +9,7 @@ import './styles.css';
 import './evidence.css';
 import './smart-actions.css';
 import './background-worker.css';
+import './recovery.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
