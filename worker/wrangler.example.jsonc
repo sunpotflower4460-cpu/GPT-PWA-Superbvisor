@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gpt-pwa-supervisor-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "OPENAI_MODEL": "gpt-5.6-luna",
+    "ALLOWED_ORIGIN": "https://YOUR_GITHUB_PAGES_ORIGIN.example"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SUPERVISOR_STATE",
+      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+    }
+  ]
+}

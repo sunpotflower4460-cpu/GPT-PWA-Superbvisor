@@ -4,3 +4,5 @@ dist/
 .env
 .env.*
 !.env.example
+worker/wrangler.jsonc
+worker/.wrangler/
