@@ -1,0 +1,87 @@
+name: Deploy PWA to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package.json'
+      - 'vite.config.ts'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  detect-pages:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.detect.outputs.enabled }}
+    steps:
+      - name: Detect GitHub Pages Actions source
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build_type="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type // "legacy"' 2>/dev/null || true)"
+          if [ "$build_type" = "workflow" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "GitHub Pages is enabled with Source: GitHub Actions; deployment will continue."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            if [ -z "$build_type" ]; then
+              echo "GitHub Pages is not enabled yet."
+            else
+              echo "GitHub Pages is enabled, but the publishing source is not GitHub Actions (build_type=$build_type)."
+            fi
+            echo "One-time setup: Settings > Pages > Build and deployment > Source > GitHub Actions."
+            echo "This workflow exits successfully and skips deployment until that setting is enabled."
+          fi
+
+  build:
+    needs: detect-pages
+    if: needs.detect-pages.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build PWA
+        run: npm run build
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
