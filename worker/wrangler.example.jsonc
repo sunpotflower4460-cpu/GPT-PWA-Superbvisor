@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "gpt-pwa-supervisor-worker",
-  "main": "src/index.ts",
+  "main": "src/app.ts",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
@@ -9,7 +9,8 @@
     "SMART_REPLY_MODEL": "gpt-5.4-nano",
     "ALLOWED_ORIGIN": "https://YOUR_GITHUB_PAGES_ORIGIN.example",
     "VAPID_PUBLIC_KEY": "REPLACE_WITH_VAPID_PUBLIC_KEY",
-    "VAPID_SUBJECT": "mailto:you@example.com"
+    "VAPID_SUBJECT": "mailto:you@example.com",
+    "GITHUB_ALLOWED_REPOS": "owner/repository"
   },
   "kv_namespaces": [
     {
