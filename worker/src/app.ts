@@ -30,6 +30,8 @@ interface WebhookEvent {
 
 const DEV_EVENT_TTL = 60 * 60 * 24;
 
+type BaseWorkerFetch = typeof baseWorker.fetch;
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -37,7 +39,7 @@ export default {
     if (url.pathname === '/webhooks/openai' && request.method === 'POST') {
       const handled = await maybeHandleDeveloperWebhook(request.clone(), env);
       if (handled) return handled;
-      return baseWorker.fetch(request, env);
+      return (baseWorker.fetch as BaseWorkerFetch)(request as never, env as never);
     }
 
     if (url.pathname.startsWith('/api/developer-') || url.pathname.startsWith('/api/github-agent')) {
@@ -73,7 +75,7 @@ export default {
       return json({ configured: Boolean(env.GITHUB_TOKEN?.trim()) && repositories.length > 0, repositories }, 200, env, request);
     }
 
-    return baseWorker.fetch(request, env);
+    return (baseWorker.fetch as BaseWorkerFetch)(request as never, env as never);
   },
 };
 
