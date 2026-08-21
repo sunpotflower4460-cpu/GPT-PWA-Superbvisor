@@ -1,4 +1,5 @@
 export type SupervisorNotificationKind = 'complete' | 'human' | 'error' | 'handoff' | 'info';
+export type SupervisorNotificationAction = 'RECOVER_CHAT' | 'OPEN_HANDOFF';
 
 export interface SupervisorNotification {
   id: string;
@@ -10,6 +11,9 @@ export interface SupervisorNotification {
   detail: string;
   createdAt: string;
   readAt?: string;
+  action?: SupervisorNotificationAction;
+  actionLabel?: string;
+  actionPrompt?: string;
 }
 
 const STORAGE_KEY = 'gpt-pwa-supervisor.notifications.v1';
