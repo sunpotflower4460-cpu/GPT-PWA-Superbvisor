@@ -64,7 +64,11 @@ export function saveOperatingPlan(projectId: string, plan: OperatingPlan) {
 }
 
 export function buildOperatingPlanPrompt(projectId: string) {
-  const plan = getOperatingPlan(projectId);
+  return formatOperatingPlanPrompt(getOperatingPlan(projectId));
+}
+
+export function formatOperatingPlanPrompt(input: OperatingPlan) {
+  const plan = normalizeOperatingPlan(input);
   const target = plan.target === 'CUSTOM'
     ? plan.customTarget.trim() || targetLabels.CUSTOM
     : targetLabels[plan.target];
