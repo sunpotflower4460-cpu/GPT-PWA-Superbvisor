@@ -7,6 +7,7 @@ import DeveloperAgentLauncher from './DeveloperAgentLauncher';
 import EvidenceCenter from './EvidenceCenter';
 import HandoffCenter from './HandoffCenter';
 import NotificationCenter from './NotificationCenter';
+import RuntimeProjectSync from './RuntimeProjectSync';
 import SmartActionCenter from './SmartActionCenter';
 import WatchdogRuntime from './WatchdogRuntime';
 import './styles.css';
@@ -20,6 +21,7 @@ import './developer-agent.css';
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
+    <RuntimeProjectSync />
     <WatchdogRuntime />
     <NotificationCenter />
     <HandoffCenter />
