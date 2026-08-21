@@ -1,8 +1,11 @@
 import { useEffect } from 'react';
 import { loadProjects } from './core';
+import { addNotification } from './notifications';
 import {
+  WatchdogFinding,
   inspectProject,
   loadWatchdogStates,
+  notificationKey,
   recordNotification,
   saveWatchdogStates,
   shouldNotify,
@@ -21,6 +24,25 @@ export default function WatchdogRuntime() {
         const previous = states[project.id];
         const finding = inspectProject(project, previous);
         let nextState = finding.nextState;
+
+        if (finding.needsAttention) {
+          const action = finding.recommendedAction === 'HANDOFF'
+            ? 'OPEN_HANDOFF' as const
+            : finding.prompt
+              ? 'RECOVER_CHAT' as const
+              : undefined;
+          addNotification({
+            dedupeKey: `watchdog:${project.id}:${project.lastActivityAt}:${notificationKey(finding)}`,
+            projectId: project.id,
+            projectName: project.name,
+            kind: notificationKind(finding),
+            title: `${project.name}: ${finding.title}`,
+            detail: finding.detail,
+            action,
+            actionLabel: action === 'OPEN_HANDOFF' ? '引き継ぎを開く' : action === 'RECOVER_CHAT' ? '再開してChatを開く' : undefined,
+            actionPrompt: action === 'RECOVER_CHAT' ? finding.prompt : undefined,
+          });
+        }
 
         if (
           finding.needsAttention &&
@@ -49,4 +71,11 @@ export default function WatchdogRuntime() {
   }, []);
 
   return null;
+}
+
+function notificationKind(finding: WatchdogFinding) {
+  if (finding.recommendedAction === 'HUMAN') return 'human' as const;
+  if (finding.recommendedAction === 'HANDOFF') return 'handoff' as const;
+  if (finding.severity === 'INFO') return 'info' as const;
+  return 'error' as const;
 }
