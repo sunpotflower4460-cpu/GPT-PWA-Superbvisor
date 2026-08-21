@@ -27,17 +27,22 @@ jobs:
     outputs:
       enabled: ${{ steps.detect.outputs.enabled }}
     steps:
-      - name: Detect whether GitHub Pages is enabled
+      - name: Detect GitHub Pages Actions source
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api "repos/${GITHUB_REPOSITORY}/pages" >/dev/null 2>&1; then
+          build_type="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type // "legacy"' 2>/dev/null || true)"
+          if [ "$build_type" = "workflow" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "GitHub Pages is enabled; deployment will continue."
+            echo "GitHub Pages is enabled with Source: GitHub Actions; deployment will continue."
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "GitHub Pages is not enabled yet."
+            if [ -z "$build_type" ]; then
+              echo "GitHub Pages is not enabled yet."
+            else
+              echo "GitHub Pages is enabled, but the publishing source is not GitHub Actions (build_type=$build_type)."
+            fi
             echo "One-time setup: Settings > Pages > Build and deployment > Source > GitHub Actions."
             echo "This workflow exits successfully and skips deployment until that setting is enabled."
           fi
