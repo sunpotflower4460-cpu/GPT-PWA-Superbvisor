@@ -1,4 +1,4 @@
-const CACHE = 'ai-dev-deck-v3';
+const CACHE = 'ai-dev-deck-v4';
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -16,18 +16,56 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') return;
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE).then((cache) => cache.put(event.request, copy));
-        return response;
-      }).catch(() => caches.match('./index.html'));
-    }),
-  );
+  const request = event.request;
+  if (request.method !== 'GET') return;
+
+  const url = new URL(request.url);
+  const scope = new URL(self.registration.scope);
+
+  // Never cache/intercept Cloudflare Worker, OpenAI, GitHub, or any other
+  // cross-origin API request. Supervisor state must always come from network.
+  if (url.origin !== scope.origin) return;
+
+  // HTML/navigation should prefer the network so a newly deployed app shell is
+  // visible immediately after reload. Offline mode falls back to cached index.
+  if (request.mode === 'navigate') {
+    event.respondWith(networkFirstNavigation(request));
+    return;
+  }
+
+  // Only same-origin static assets reach this cache path. Vite's hashed assets
+  // are safe to cache-first because a new build gets a new URL.
+  event.respondWith(cacheFirstStatic(request));
 });
+
+async function networkFirstNavigation(request) {
+  try {
+    const response = await fetch(request);
+    if (response.ok) {
+      const cache = await caches.open(CACHE);
+      await cache.put(new URL('./index.html', self.registration.scope).href, response.clone());
+    }
+    return response;
+  } catch {
+    return (await caches.match(new URL('./index.html', self.registration.scope).href)) || Response.error();
+  }
+}
+
+async function cacheFirstStatic(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+
+  try {
+    const response = await fetch(request);
+    if (response.ok && response.type === 'basic') {
+      const cache = await caches.open(CACHE);
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    return Response.error();
+  }
+}
 
 self.addEventListener('push', (event) => {
   let data = {};
