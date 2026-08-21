@@ -1,3 +1,5 @@
+import { buildOperatingPlanPrompt } from './operatingPlan';
+
 export type ProjectStatus =
   | 'RUNNING'
   | 'WAITING_AI'
@@ -143,8 +145,9 @@ export function buildActionPrompt(project: DevProject, action: QuickAction) {
   const blockers = project.humanBlockers.length
     ? project.humanBlockers.map((item) => `- ${item}`).join('\n')
     : '- 現時点で登録なし';
+  const operatingPlan = buildOperatingPlanPrompt(project.id);
 
-  return `以下の開発プロジェクトを継続してください。\n\n【最終目標】\n${project.goal}\n\n【現在地点】\n${project.currentPhase}\n\n【今回の意図】\n${action.intent}\n\n【完成条件】\n${done}\n\n【既知の本人待ち】\n${blockers}\n\n進め方:\n1. まず現在の成果物・状態を確認し、完了済み作業を重複しない。\n2. AIだけで安全に実行できる作業は、単なる「続けますか？」確認で止まらず連続して進める。\n3. エラーが出たら原因を分析し、同じ操作を漫然と繰り返さず、修正または別アプローチを試す。\n4. テスト・デバッグ・自己レビューを行い、必要なら修正→再テストする。\n5. 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様判断など本人が必要な地点だけ明示して停止する。\n6. 最後に「実施した手順」「現在地点」「残作業」「本人が必要なこと」を短く報告する。\n\n可能な範囲で最終目標に近づくところまで、そのまま作業してください。`;
+  return `以下の開発プロジェクトを継続してください。\n\n【最終目標】\n${project.goal}\n\n【現在地点】\n${project.currentPhase}\n\n${operatingPlan}\n\n【今回の意図】\n${action.intent}\n\n【完成条件】\n${done}\n\n【既知の本人待ち】\n${blockers}\n\n共通ガードレール:\n1. AIだけで安全に実行できる作業は、Operating Planの到達地点まで可能な範囲で連続して進める。\n2. 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様判断など本人が必要な地点では止める。\n3. Workへの切替、API Background、GitHub Guardianなどコストや権限が増える実行モードへは、アプリ上の明示操作なしに勝手に昇格しない。\n4. 完成・成功は、実際に確認できたテスト、CI、差分などの根拠に基づいて判定する。\n\nOperating Planと今回の意図が衝突する場合は、安全制約を優先しつつ今回の明示指示を優先してください。`;
 }
 
 export function statusLabel(status: ProjectStatus) {
