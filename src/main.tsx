@@ -9,6 +9,7 @@ import HandoffCenter from './HandoffCenter';
 import NotificationCenter from './NotificationCenter';
 import OperatingPlanCenter from './OperatingPlanCenter';
 import RuntimeProjectSync from './RuntimeProjectSync';
+import SetupDoctorCenter from './SetupDoctorCenter';
 import SmartActionCenter from './SmartActionCenter';
 import WatchdogRuntime from './WatchdogRuntime';
 import './styles.css';
@@ -22,6 +23,7 @@ import './developer-agent.css';
 import './operating-plan.css';
 import './dashboard-plan.css';
 import './execution-router.css';
+import './setup-doctor.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -36,6 +38,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <DeveloperAgentLauncher />
     <DeveloperAgentCenter />
     <EvidenceCenter />
+    <SetupDoctorCenter />
   </React.StrictMode>,
 );
 
