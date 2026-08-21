@@ -159,9 +159,7 @@ export async function createDeveloperJob(env: AgentEnv, body: CreateDeveloperJob
   };
   await saveJob(env, job);
 
-  const launched = await createResponse(env, job, {
-    input: buildInitialInput(job),
-  });
+  const launched = await createResponse(env, job, { input: buildInitialInput(job) });
   if (!launched.ok || !launched.response?.id) {
     job = { ...job, status: 'failed', error: launched.error || 'OpenAI developer response failed to start', updatedAt: new Date().toISOString() };
     await saveJob(env, job);
@@ -385,7 +383,13 @@ function extractText(response: ResponseRecord) {
   const chunks: string[] = [];
   for (const item of response.output ?? []) {
     if (item.type !== 'message') continue;
-    for (const content of item.content ?? []) if (content.type === 'output_text' && typeof content.text === 'string') chunks.push(content.text);
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (!part || typeof part !== 'object') continue;
+      const typed = part as { type?: unknown; text?: unknown };
+      if (typed.type === 'output_text' && typeof typed.text === 'string') chunks.push(typed.text);
+    }
   }
   return chunks.join('\n').trim();
 }
