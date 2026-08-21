@@ -37,7 +37,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/webhooks/openai' && request.method === 'POST') {
-      const handled = await maybeHandleDeveloperWebhook(request.clone(), env);
+      const handled = await maybeHandleDeveloperWebhook(request.clone() as unknown as Request, env);
       if (handled) return handled;
       return (baseWorker.fetch as BaseWorkerFetch)(request as never, env as never);
     }
