@@ -49,6 +49,7 @@ export interface DeveloperJob {
   error?: string;
   changedFiles?: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }>;
   pullRequest?: { number: number; url: string; draft: true };
+  managedByGoalRunId?: string;
 }
 
 interface ResponseRecord {
@@ -136,11 +137,46 @@ const tools = [
 ] as const;
 
 export async function createDeveloperJob(env: AgentEnv, body: CreateDeveloperJobBody): Promise<DeveloperJob> {
+  return createDeveloperJobInternal(env, body);
+}
+
+export async function createManagedDeveloperJob(
+  env: AgentEnv,
+  body: CreateDeveloperJobBody,
+  goalRunId: string,
+  workspace?: GitHubWorkspace,
+): Promise<DeveloperJob> {
+  return createDeveloperJobInternal(env, body, workspace, goalRunId);
+}
+
+export async function continueDeveloperJob(
+  env: AgentEnv,
+  previous: DeveloperJob,
+  prompt: string,
+  goalRunId?: string,
+): Promise<DeveloperJob> {
+  return createDeveloperJobInternal(env, {
+    projectId: previous.projectId,
+    projectName: previous.projectName,
+    repository: previous.repository,
+    goal: previous.goal,
+    prompt,
+    model: previous.model,
+    maxToolTurns: previous.maxToolTurns,
+  }, previous.workspace, goalRunId ?? previous.managedByGoalRunId);
+}
+
+async function createDeveloperJobInternal(
+  env: AgentEnv,
+  body: CreateDeveloperJobBody,
+  existingWorkspace?: GitHubWorkspace,
+  managedByGoalRunId?: string,
+): Promise<DeveloperJob> {
   if (!body.repository?.trim() || !body.goal?.trim() || !body.prompt?.trim()) throw new Error('repository, goal and prompt are required');
   const id = crypto.randomUUID();
   const model = body.model?.trim() || env.OPENAI_MODEL?.trim() || 'gpt-5.6-luna';
   const maxToolTurns = clamp(body.maxToolTurns ?? 10, 1, MAX_TOOL_TURNS);
-  const workspace = await createWorkspace(env, body.repository, body.projectName || body.goal.slice(0, 32));
+  const workspace = existingWorkspace ?? await createWorkspace(env, body.repository, body.projectName || body.goal.slice(0, 32));
   const now = new Date().toISOString();
   let job: DeveloperJob = {
     id,
@@ -156,6 +192,7 @@ export async function createDeveloperJob(env: AgentEnv, body: CreateDeveloperJob
     maxToolTurns,
     createdAt: now,
     updatedAt: now,
+    managedByGoalRunId,
   };
   await saveJob(env, job);
 
@@ -180,6 +217,13 @@ export async function getLatestDeveloperJob(env: AgentEnv, projectId: string): P
   return id ? readJob(env, id) : null;
 }
 
+export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<DeveloperJob | null> {
+  const job = await readJob(env, id);
+  if (!job || job.status !== 'running' || !job.currentResponseId) return job;
+  await handleDeveloperResponse(env, job.currentResponseId);
+  return readJob(env, id);
+}
+
 export async function handleDeveloperResponse(env: AgentEnv, responseId: string): Promise<boolean> {
   const jobId = await env.SUPERVISOR_STATE.get(`developer-response:${responseId}`);
   if (!jobId) return false;
@@ -198,6 +242,7 @@ export async function handleDeveloperResponse(env: AgentEnv, responseId: string)
     await notifyFinal(env, job);
     return true;
   }
+  if (record.status && record.status !== 'completed') return true;
 
   const calls = (record.output ?? []).filter((item): item is Extract<ResponseOutputItem, { type: 'function_call' }> => item.type === 'function_call');
   if (calls.length) {
@@ -320,6 +365,7 @@ async function failJob(env: AgentEnv, job: DeveloperJob, error: string) {
 }
 
 async function notifyFinal(env: AgentEnv, job: DeveloperJob) {
+  if (job.managedByGoalRunId) return;
   const name = job.projectName || job.repository;
   if (job.status === 'completed') {
     await sendSupervisorPush(env, {
