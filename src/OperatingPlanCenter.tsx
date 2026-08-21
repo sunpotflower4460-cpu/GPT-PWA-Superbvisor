@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { DevProject, buildActionPrompt, loadProjects, quickActions } from './core';
+import { DevProject, QuickAction, buildActionPrompt, loadProjects } from './core';
 import { loadWorkerConnection } from './backgroundWorker';
 import { GuardianRun, startGuardianRun } from './guardianRunner';
 import {
@@ -12,7 +12,11 @@ import {
   targetLabels,
 } from './operatingPlan';
 
-const runAction = quickActions.find((action) => action.id === 'manual-only') ?? quickActions[0];
+const planRunAction: QuickAction = {
+  id: 'operating-plan-run',
+  label: 'Operating Planどおりに進める',
+  intent: '保存済みOperating Planの到達地点・標準手順・案件固有ルールを優先し、その地点まで安全に進める',
+};
 
 export default function OperatingPlanCenter() {
   const [open, setOpen] = useState(false);
@@ -81,7 +85,7 @@ export default function OperatingPlanCenter() {
     if (!selected || !persistPlan()) return;
     setBusy('copy');
     try {
-      const prompt = buildActionPrompt(selected, runAction);
+      const prompt = buildActionPrompt(selected, planRunAction);
       await navigator.clipboard.writeText(prompt);
       setMessage('Planを保存し、ChatGPTへ貼る標準指示をコピーしました。API費用は発生しません。');
     } catch (error) {
@@ -100,7 +104,7 @@ export default function OperatingPlanCenter() {
     setBusy('guardian');
     setMessage('');
     try {
-      const prompt = buildActionPrompt(selected, runAction);
+      const prompt = buildActionPrompt(selected, planRunAction);
       const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection());
       setGuardian(run);
       setMessage('Operating Planを標準設定（最大3 cycle / 3時間）でGuardianへ渡しました。端末を閉じてもWebhook/Cronが監督します。');
