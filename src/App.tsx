@@ -40,6 +40,12 @@ function planTargetLabel(plan: OperatingPlan) {
   return plan.target === 'CUSTOM' ? plan.customTarget.trim() || targetLabels.CUSTOM : targetLabels[plan.target];
 }
 
+function executionRouteLabel(project: DevProject) {
+  if (project.executionMode === 'CHAT') return '💬 Chat';
+  if (project.executionMode === 'WORK') return '🟣 Work';
+  return project.automationLevel === 'GUARDIAN' ? '🛡 Guardian' : '⚡ Background';
+}
+
 export default function App() {
   const [projects, setProjects] = useState<DevProject[]>(() => loadProjects());
   const [tab, setTab] = useState<Tab>('projects');
@@ -95,7 +101,6 @@ export default function App() {
   function renderProjectCard(project: DevProject) {
     const stalled = isLikelyStalled(project);
     const visibleStatus: ProjectStatus = stalled ? 'STALLED' : project.status;
-    const activeMilestone = project.milestones.find((m) => m.state === 'ACTIVE');
     const plan = getOperatingPlan(project.id);
 
     return (
@@ -111,10 +116,10 @@ export default function App() {
           <div className="progress-track"><span style={{ width: `${project.progress}%` }} /></div>
           <b>{project.progress}%</b>
         </div>
-        <p className="phase">{activeMilestone?.title ?? project.currentPhase}</p>
+        <p className="phase">{project.currentPhase}</p>
         <div className="plan-chip">☷ {planTargetLabel(plan)}</div>
         <div className="card-meta">
-          <span>{project.executionMode}</span>
+          <span>{executionRouteLabel(project)}</span>
           <span>{project.automationLevel}</span>
           <span>{formatRelative(project.lastActivityAt)}</span>
         </div>
@@ -144,7 +149,7 @@ export default function App() {
             <div className="section-heading"><span>目標</span><b>{selected.progress}%</b></div>
             <h2>{selected.goal}</h2>
             <div className="progress-track large"><span style={{ width: `${selected.progress}%` }} /></div>
-            <p className="muted">現在：{selected.currentPhase} ・ 最終活動 {formatRelative(selected.lastActivityAt)}</p>
+            <p className="muted">現在：{selected.currentPhase} ・ {executionRouteLabel(selected)} ・ 最終活動 {formatRelative(selected.lastActivityAt)}</p>
           </article>
 
           {selectedPlan && (
@@ -351,7 +356,7 @@ function Settings() {
 
   return (
     <section className="content-section">
-      <div className="section-heading"><h2>設定</h2><span>v0.13</span></div>
+      <div className="section-heading"><h2>設定</h2><span>v0.15</span></div>
       <article className="panel settings-list">
         <div><b>基本実行</b><span>CHAT</span></div>
         <div><b>Work切替</b><span>手動のみ</span></div>
