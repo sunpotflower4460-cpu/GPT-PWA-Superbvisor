@@ -1,0 +1,337 @@
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+import {
+  AutomationLevel,
+  DevProject,
+  ExecutionMode,
+  ProjectStatus,
+  buildActionPrompt,
+  createProject,
+  isLikelyStalled,
+  loadProjects,
+  quickActions,
+  saveProjects,
+  statusLabel,
+} from './core';
+
+type Tab = 'projects' | 'human' | 'activity' | 'settings';
+
+const statusTone: Record<ProjectStatus, string> = {
+  RUNNING: 'running',
+  WAITING_AI: 'neutral',
+  WAITING_USER: 'human',
+  STALLED: 'warning',
+  ERROR: 'danger',
+  RATE_LIMITED: 'warning',
+  CONTEXT_LIMIT: 'warning',
+  COMPLETED: 'success',
+};
+
+function formatRelative(iso: string) {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
+  if (minutes < 1) return 'たった今';
+  if (minutes < 60) return `${minutes}分前`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}時間前`;
+  return `${Math.round(hours / 24)}日前`;
+}
+
+export default function App() {
+  const [projects, setProjects] = useState<DevProject[]>(() => loadProjects());
+  const [tab, setTab] = useState<Tab>('projects');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [copied, setCopied] = useState('');
+
+  useEffect(() => saveProjects(projects), [projects]);
+
+  const selected = projects.find((project) => project.id === selectedId) ?? null;
+  const runningCount = projects.filter((project) => ['RUNNING', 'WAITING_AI'].includes(project.status)).length;
+  const humanCount = projects.filter((project) => project.status === 'WAITING_USER' || project.humanBlockers.length > 0).length;
+  const completedCount = projects.filter((project) => project.status === 'COMPLETED').length;
+  const alertCount = projects.filter((project) => ['STALLED', 'ERROR', 'RATE_LIMITED', 'CONTEXT_LIMIT'].includes(project.status) || isLikelyStalled(project)).length;
+
+  const activity = useMemo(
+    () =>
+      projects
+        .flatMap((project) => project.timeline.map((event) => ({ ...event, projectName: project.name })))
+        .sort((a, b) => +new Date(b.at) - +new Date(a.at)),
+    [projects],
+  );
+
+  function patchProject(id: string, patch: Partial<DevProject>) {
+    setProjects((items) =>
+      items.map((item) =>
+        item.id === id
+          ? { ...item, ...patch, lastActivityAt: patch.lastActivityAt ?? new Date().toISOString() }
+          : item,
+      ),
+    );
+  }
+
+  async function copyAction(project: DevProject, actionId: string) {
+    const action = quickActions.find((item) => item.id === actionId);
+    if (!action) return;
+    const prompt = buildActionPrompt(project, action);
+    await navigator.clipboard.writeText(prompt);
+    setCopied(action.label);
+    window.setTimeout(() => setCopied(''), 1800);
+  }
+
+  function renderProjectCard(project: DevProject) {
+    const stalled = isLikelyStalled(project);
+    const visibleStatus: ProjectStatus = stalled ? 'STALLED' : project.status;
+    const activeMilestone = project.milestones.find((m) => m.state === 'ACTIVE');
+
+    return (
+      <button className="project-card" key={project.id} onClick={() => setSelectedId(project.id)}>
+        <div className="project-card-top">
+          <div>
+            <span className={`status-dot ${statusTone[visibleStatus]}`} />
+            <strong>{project.name}</strong>
+          </div>
+          <span className={`status-pill ${statusTone[visibleStatus]}`}>{statusLabel(visibleStatus)}</span>
+        </div>
+        <div className="progress-row">
+          <div className="progress-track"><span style={{ width: `${project.progress}%` }} /></div>
+          <b>{project.progress}%</b>
+        </div>
+        <p className="phase">{activeMilestone?.title ?? project.currentPhase}</p>
+        <div className="card-meta">
+          <span>{project.executionMode}</span>
+          <span>{project.automationLevel}</span>
+          <span>{formatRelative(project.lastActivityAt)}</span>
+        </div>
+        {project.humanBlockers.length > 0 && (
+          <div className="human-callout">👤 あなたが必要：{project.humanBlockers[0]}</div>
+        )}
+      </button>
+    );
+  }
+
+  if (selected) {
+    return (
+      <main className="app-shell">
+        <header className="topbar detail-topbar">
+          <button className="icon-button" onClick={() => setSelectedId(null)}>←</button>
+          <div>
+            <p className="eyebrow">PROJECT</p>
+            <h1>{selected.name}</h1>
+          </div>
+          <span className={`status-pill ${statusTone[isLikelyStalled(selected) ? 'STALLED' : selected.status]}`}>
+            {statusLabel(isLikelyStalled(selected) ? 'STALLED' : selected.status)}
+          </span>
+        </header>
+
+        <section className="detail-stack">
+          <article className="panel hero-panel">
+            <div className="section-heading"><span>目標</span><b>{selected.progress}%</b></div>
+            <h2>{selected.goal}</h2>
+            <div className="progress-track large"><span style={{ width: `${selected.progress}%` }} /></div>
+            <p className="muted">現在：{selected.currentPhase} ・ 最終活動 {formatRelative(selected.lastActivityAt)}</p>
+          </article>
+
+          <article className="panel">
+            <div className="section-heading"><span>工程</span><span>{selected.automationLevel}</span></div>
+            <div className="milestones">
+              {selected.milestones.map((milestone) => (
+                <div className={`milestone ${milestone.state.toLowerCase()}`} key={milestone.id}>
+                  <span>{milestone.state === 'DONE' ? '✓' : milestone.state === 'ACTIVE' ? '●' : milestone.state === 'BLOCKED' ? '!' : '○'}</span>
+                  <span>{milestone.title}</span>
+                </div>
+              ))}
+            </div>
+          </article>
+
+          {selected.humanBlockers.length > 0 && (
+            <article className="panel human-panel">
+              <div className="section-heading"><span>👤 あなた待ち</span><b>{selected.humanBlockers.length}件</b></div>
+              {selected.humanBlockers.map((item) => <p key={item}>• {item}</p>)}
+            </article>
+          )}
+
+          <article className="panel">
+            <div className="section-heading"><span>次の指示</span><span>タップでコピー</span></div>
+            <div className="quick-actions">
+              {quickActions.map((action, index) => (
+                <button
+                  key={action.id}
+                  className={index === 0 ? 'primary-action' : 'secondary-action'}
+                  onClick={() => copyAction(selected, action.id)}
+                >
+                  {copied === action.label ? '✓ コピーしました' : action.label}
+                </button>
+              ))}
+            </div>
+            <div className="launch-row">
+              {selected.chatUrl ? (
+                <button className="launch-button" onClick={() => window.open(selected.chatUrl, '_blank', 'noopener,noreferrer')}>ChatGPTを開く ↗</button>
+              ) : <span className="muted">Chat URL未登録</span>}
+              {selected.githubUrl && (
+                <button className="ghost-button" onClick={() => window.open(selected.githubUrl, '_blank', 'noopener,noreferrer')}>GitHub ↗</button>
+              )}
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="section-heading"><span>運転モード</span><span>Workは明示選択のみ</span></div>
+            <div className="segmented">
+              {(['CHAT', 'WORK', 'API_WORKER'] as ExecutionMode[]).map((mode) => (
+                <button className={selected.executionMode === mode ? 'active' : ''} key={mode} onClick={() => patchProject(selected.id, { executionMode: mode })}>{mode}</button>
+              ))}
+            </div>
+            <div className="segmented automation">
+              {(['OFF', 'ASSIST', 'AUTO', 'GUARDIAN'] as AutomationLevel[]).map((level) => (
+                <button className={selected.automationLevel === level ? 'active' : ''} key={level} onClick={() => patchProject(selected.id, { automationLevel: level })}>{level}</button>
+              ))}
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="section-heading"><span>最近の履歴</span><span>{selected.timeline.length}件</span></div>
+            <div className="timeline">
+              {selected.timeline.slice().reverse().slice(0, 8).map((event) => (
+                <div className="timeline-row" key={event.id}>
+                  <time>{new Date(event.at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</time>
+                  <span>{event.message}</span>
+                </div>
+              ))}
+            </div>
+          </article>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div>
+          <p className="eyebrow">AI DEVELOPMENT COCKPIT</p>
+          <h1>AI DEV DECK</h1>
+        </div>
+        <button className="add-button" onClick={() => setShowCreate(true)}>＋</button>
+      </header>
+
+      {tab === 'projects' && (
+        <>
+          <section className="summary-grid">
+            <div><b>{runningCount}</b><span>稼働中</span></div>
+            <div><b>{humanCount}</b><span>あなた待ち</span></div>
+            <div><b>{alertCount}</b><span>要確認</span></div>
+            <div><b>{completedCount}</b><span>完了</span></div>
+          </section>
+          <section className="content-section">
+            <div className="section-heading"><h2>プロジェクト</h2><span>{projects.length}件</span></div>
+            <div className="project-list">
+              {projects.length ? projects.map(renderProjectCard) : (
+                <div className="empty-state">
+                  <div>🛰️</div>
+                  <h2>最初の案件を登録</h2>
+                  <p>ChatGPTの開発チャットとGitHubを、スマホから見渡せる状態にします。</p>
+                  <button className="primary-action" onClick={() => setShowCreate(true)}>プロジェクトを追加</button>
+                </div>
+              )}
+            </div>
+          </section>
+        </>
+      )}
+
+      {tab === 'human' && (
+        <section className="content-section">
+          <div className="section-heading"><h2>👤 あなた待ち</h2><span>{humanCount}件</span></div>
+          <div className="project-list">
+            {projects.filter((p) => p.status === 'WAITING_USER' || p.humanBlockers.length).map(renderProjectCard)}
+            {humanCount === 0 && <div className="empty-state"><div>🌿</div><h2>今は操作不要</h2><p>人間にしかできない作業は登録されていません。</p></div>}
+          </div>
+        </section>
+      )}
+
+      {tab === 'activity' && (
+        <section className="content-section">
+          <div className="section-heading"><h2>Activity</h2><span>{activity.length}件</span></div>
+          <div className="panel timeline">
+            {activity.length ? activity.slice(0, 30).map((event) => (
+              <div className="timeline-row activity-row" key={`${event.projectName}-${event.id}`}>
+                <time>{new Date(event.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
+                <span><b>{event.projectName}</b><br />{event.message}</span>
+              </div>
+            )) : <p className="muted">まだ履歴がありません。</p>}
+          </div>
+        </section>
+      )}
+
+      {tab === 'settings' && <Settings />}
+
+      {showCreate && (
+        <CreateProjectModal
+          onClose={() => setShowCreate(false)}
+          onCreate={(project) => {
+            setProjects((items) => [project, ...items]);
+            setShowCreate(false);
+            setSelectedId(project.id);
+          }}
+        />
+      )}
+
+      <nav className="bottom-nav">
+        <button className={tab === 'projects' ? 'active' : ''} onClick={() => setTab('projects')}><span>⌂</span>案件</button>
+        <button className={tab === 'human' ? 'active' : ''} onClick={() => setTab('human')}><span>👤</span>自分待ち</button>
+        <button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}><span>⚡</span>履歴</button>
+        <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}><span>⚙</span>設定</button>
+      </nav>
+    </main>
+  );
+}
+
+function CreateProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate: (project: DevProject) => void }) {
+  const [name, setName] = useState('');
+  const [goal, setGoal] = useState('');
+  const [chatUrl, setChatUrl] = useState('');
+  const [githubUrl, setGithubUrl] = useState('');
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!name.trim() || !goal.trim()) return;
+    onCreate(createProject({ name: name.trim(), goal: goal.trim(), chatUrl: chatUrl.trim() || undefined, githubUrl: githubUrl.trim() || undefined }));
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <form className="modal" onSubmit={submit}>
+        <div className="section-heading"><h2>プロジェクト追加</h2><button type="button" className="icon-button" onClick={onClose}>×</button></div>
+        <label>名前<input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="例：SNS-AI" /></label>
+        <label>最終目標<textarea value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="例：本人しかできない外部設定だけの状態まで仕上げる" rows={4} /></label>
+        <label>ChatGPT URL<input value={chatUrl} onChange={(e) => setChatUrl(e.target.value)} placeholder="https://chatgpt.com/c/..." /></label>
+        <label>GitHub URL<input value={githubUrl} onChange={(e) => setGithubUrl(e.target.value)} placeholder="https://github.com/owner/repo" /></label>
+        <button className="primary-action" type="submit">登録する</button>
+      </form>
+    </div>
+  );
+}
+
+function Settings() {
+  const [notificationState, setNotificationState] = useState(Notification.permission);
+
+  async function requestNotifications() {
+    if (!('Notification' in window)) return;
+    const result = await Notification.requestPermission();
+    setNotificationState(result);
+  }
+
+  return (
+    <section className="content-section">
+      <div className="section-heading"><h2>設定</h2><span>v0.1</span></div>
+      <article className="panel settings-list">
+        <div><b>基本実行</b><span>CHAT</span></div>
+        <div><b>Work切替</b><span>手動のみ</span></div>
+        <div><b>Supervisor</b><span>ローカル基盤</span></div>
+        <div><b>データ保存</b><span>この端末</span></div>
+      </article>
+      <article className="panel">
+        <div className="section-heading"><span>通知</span><span>{notificationState}</span></div>
+        <p className="muted">v0.1では通知権限だけ準備します。バックグラウンド完了通知はサーバー実装フェーズで接続します。</p>
+        <button className="secondary-action" onClick={requestNotifications}>通知を許可</button>
+      </article>
+    </section>
+  );
+}
