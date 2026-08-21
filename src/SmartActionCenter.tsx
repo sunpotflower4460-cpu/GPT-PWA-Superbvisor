@@ -6,6 +6,7 @@ import {
   WatchdogState,
   inspectProject,
   loadWatchdogStates,
+  recordWatchdogAction,
   saveWatchdogStates,
 } from './watchdog';
 
@@ -49,6 +50,15 @@ export default function SmartActionCenter() {
     await navigator.clipboard.writeText(text);
     setCopiedId(id);
     window.setTimeout(() => setCopiedId(''), 1600);
+  }
+
+  async function copyRecovery(project: DevProject, finding: WatchdogFinding) {
+    if (!finding.prompt) return;
+    await copy(`watchdog-${project.id}`, finding.prompt);
+    const states = loadWatchdogStates();
+    const current = states[project.id] ?? finding.nextState;
+    states[project.id] = recordWatchdogAction(current, finding.recommendedAction);
+    saveWatchdogStates(states);
   }
 
   return (
@@ -101,6 +111,7 @@ export default function SmartActionCenter() {
                     onLastMessage={setLastMessage}
                     copiedId={copiedId}
                     onCopy={copy}
+                    onRecoveryCopy={copyRecovery}
                     suggestions={suggestions}
                   />
                 )}
@@ -120,6 +131,7 @@ function SmartProject({
   onLastMessage,
   copiedId,
   onCopy,
+  onRecoveryCopy,
   suggestions,
 }: {
   project: DevProject;
@@ -128,6 +140,7 @@ function SmartProject({
   onLastMessage: (value: string) => void;
   copiedId: string;
   onCopy: (id: string, text: string) => Promise<void>;
+  onRecoveryCopy: (project: DevProject, finding: WatchdogFinding) => Promise<void>;
   suggestions: ReturnType<typeof suggestReplies>;
 }) {
   return (
@@ -148,7 +161,7 @@ function SmartProject({
               <p>{finding.detail}</p>
             </div>
             {finding.prompt && (
-              <button onClick={() => onCopy(`watchdog-${project.id}`, finding.prompt!)}>
+              <button onClick={() => onRecoveryCopy(project, finding)}>
                 {copiedId === `watchdog-${project.id}` ? '✓ コピー済み' : '再開指示をコピー'}
               </button>
             )}
