@@ -20,7 +20,7 @@ export interface CreateGuardianRunBody extends CreateDeveloperJobBody {
   maxMinutes?: number;
 }
 
-export type GuardianRunStatus = 'starting' | 'running' | 'waiting_ci' | 'completed' | 'failed' | 'expired';
+export type GuardianRunStatus = 'starting' | 'running' | 'waiting_ci' | 'review_ready' | 'completed' | 'failed' | 'expired';
 
 export interface GuardianCiCheck {
   name: string;
@@ -82,7 +82,7 @@ export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRu
     goal: body.goal,
     prompt: body.prompt,
     model: developer.model,
-    status: developer.status === 'failed' ? 'running' : 'running',
+    status: 'running',
     cycle: 1,
     maxCycles,
     maxToolTurns,
@@ -95,7 +95,7 @@ export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRu
 
   await saveRun(env, run);
   await mapDeveloperJob(env, developer.id, run.id);
-  return advanceGuardianRun(env, run.id);
+  return advanceGuardianRun(env, run.id, { force: true });
 }
 
 export async function getGuardianRun(env: GuardianEnv, id: string): Promise<GuardianRun | null> {
@@ -111,18 +111,21 @@ export async function getGuardianRunIdForDeveloperJob(env: GuardianEnv, develope
   return env.SUPERVISOR_STATE.get(`guardian-developer:${developerJobId}`);
 }
 
-export async function advanceGuardianRun(env: GuardianEnv, id: string): Promise<GuardianRun> {
+export async function advanceGuardianRun(
+  env: GuardianEnv,
+  id: string,
+  options: { force?: boolean } = {},
+): Promise<GuardianRun> {
   let run = await readRun(env, id);
   if (!run) throw new Error('Guardian run not found');
   if (isFinal(run.status)) return run;
 
   const nowMs = Date.now();
   if (nowMs - new Date(run.createdAt).getTime() > run.maxMinutes * 60_000) {
-    run = await finalize(env, run, 'expired', `Guardian time limit reached (${run.maxMinutes} min).`);
-    return run;
+    return finalize(env, run, 'expired', `Guardian time limit reached (${run.maxMinutes} min).`);
   }
 
-  if (run.lastAdvanceAt && nowMs - new Date(run.lastAdvanceAt).getTime() < PROCESSING_GRACE_MS) return run;
+  if (!options.force && run.lastAdvanceAt && nowMs - new Date(run.lastAdvanceAt).getTime() < PROCESSING_GRACE_MS) return run;
   run = { ...run, lastAdvanceAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() };
   await saveRun(env, run);
 
@@ -159,7 +162,7 @@ export async function advanceGuardianRun(env: GuardianEnv, id: string): Promise<
       await saveRun(env, run);
       return run;
     }
-    return finalize(env, run, 'completed', 'Developer work completed. No GitHub Actions run was detected for the branch head; human review is still required.');
+    return finalize(env, run, 'review_ready', 'Developer work completed, but no GitHub Actions run was detected for the current branch head. Human review is required; CI success is not being assumed.');
   }
 
   run = { ...run, ciChecks: relevant, updatedAt: new Date().toISOString() };
@@ -224,16 +227,32 @@ async function recoverOrFail(env: GuardianEnv, run: GuardianRun, job: DeveloperJ
   return updated;
 }
 
-async function finalize(env: GuardianEnv, run: GuardianRun, status: 'completed' | 'failed' | 'expired', message: string): Promise<GuardianRun> {
-  let updated: GuardianRun = { ...run, status, message, error: status === 'completed' ? undefined : message, updatedAt: new Date().toISOString() };
+async function finalize(
+  env: GuardianEnv,
+  run: GuardianRun,
+  status: 'review_ready' | 'completed' | 'failed' | 'expired',
+  message: string,
+): Promise<GuardianRun> {
+  let updated: GuardianRun = {
+    ...run,
+    status,
+    message,
+    error: status === 'failed' || status === 'expired' ? message : undefined,
+    updatedAt: new Date().toISOString(),
+  };
   if (!run.notifiedAt) {
     const name = run.projectName || run.repository;
+    const title = status === 'completed'
+      ? `${name}: Guardian完了`
+      : status === 'review_ready'
+        ? `${name}: Guardianレビュー待ち`
+        : `${name}: Guardian停止`;
     await sendSupervisorPush(env, {
-      title: status === 'completed' ? `${name}: Guardian完了` : `${name}: Guardian停止`,
+      title,
       body: message.slice(0, 240),
       tag: `guardian-${run.id}`,
       projectId: run.projectId,
-      kind: status === 'completed' ? 'complete' : 'error',
+      kind: status === 'completed' ? 'complete' : status === 'review_ready' ? 'human' : 'error',
       url: run.pullRequest?.url || './',
     });
     updated = { ...updated, notifiedAt: new Date().toISOString() };
@@ -268,7 +287,7 @@ function isSuccessfulConclusion(value: string | null) {
 }
 
 function isFinal(status: GuardianRunStatus) {
-  return status === 'completed' || status === 'failed' || status === 'expired';
+  return status === 'review_ready' || status === 'completed' || status === 'failed' || status === 'expired';
 }
 
 function clamp(value: number, min: number, max: number) {
