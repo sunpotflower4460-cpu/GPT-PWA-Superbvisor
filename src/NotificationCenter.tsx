@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { loadProjects } from './core';
 import { getLatestBackgroundJob, loadWorkerConnection } from './backgroundWorker';
+import { DeveloperJob, getLatestDeveloperJob } from './developerAgent';
+import { GuardianRun, getLatestGuardianRun } from './guardianRunner';
 import {
   SupervisorNotification,
   addNotification,
@@ -19,6 +21,8 @@ import {
 } from './pushNotifications';
 
 const initialPushState: PushState = { supported: false, permission: 'unsupported', subscribed: false };
+
+type NotificationInput = Omit<SupervisorNotification, 'id' | 'createdAt'>;
 
 export default function NotificationCenter() {
   const [open, setOpen] = useState(false);
@@ -58,7 +62,7 @@ export default function NotificationCenter() {
     try {
       await enablePushNotifications(loadWorkerConnection());
       await refreshPushState();
-      setPushMessage('Push通知を有効にしました。PWAを閉じていてもBackground完了を受け取れます。');
+      setPushMessage('Push通知を有効にしました。PWAを閉じていてもBackground/Guardianの重要な状態を受け取れます。');
     } catch (error) {
       setPushMessage(error instanceof Error ? error.message : 'Push通知を有効にできませんでした。');
     } finally {
@@ -103,7 +107,7 @@ export default function NotificationCenter() {
     let added = 0;
 
     for (const project of projects) {
-      const localInputs: Array<Omit<SupervisorNotification, 'id' | 'createdAt'>> = [];
+      const localInputs: NotificationInput[] = [];
       if (project.status === 'CONTEXT_LIMIT') {
         localInputs.push({
           dedupeKey: `project:${project.id}:handoff:${project.lastActivityAt}`,
@@ -122,37 +126,48 @@ export default function NotificationCenter() {
       if (project.status === 'ERROR' || project.status === 'STALLED') {
         localInputs.push({ dedupeKey: `project:${project.id}:attention:${project.status}:${project.lastActivityAt}`, projectId: project.id, projectName: project.name, kind: 'error', title: `${project.name}: ${project.status === 'ERROR' ? 'エラー' : '停止疑い'}`, detail: `${project.currentPhase} でSupervisorの確認が必要です。` });
       }
-      for (const input of localInputs) {
-        const created = addNotification(input);
-        if (created) { added += 1; showSystemNotification(created); }
-      }
+      for (const input of localInputs) added += persist(input);
 
       if (!connection.baseUrl || !connection.token) continue;
-      try {
-        const job = await getLatestBackgroundJob(project.id, connection);
+
+      const [backgroundResult, guardianResult, developerResult] = await Promise.allSettled([
+        getLatestBackgroundJob(project.id, connection),
+        getLatestGuardianRun(project.id, connection),
+        getLatestDeveloperJob(project.id, connection),
+      ]);
+
+      if (backgroundResult.status === 'fulfilled') {
+        const job = backgroundResult.value;
         if (job.status === 'completed') {
-          const created = addNotification({
-            dedupeKey: `job:${job.id}:completed`, projectId: project.id, projectName: project.name, kind: 'complete',
+          added += persist({
+            dedupeKey: `job:${job.id}:completed`, projectId: project.id, projectName: project.name, kind: job.report?.humanRequired.length ? 'human' : 'complete',
             title: `${project.name}: Background完了`, detail: job.report?.summary || job.checkpoint?.summary || 'Background処理が完了しました。',
           });
-          if (created) { added += 1; showSystemNotification(created); }
         }
         if (job.status === 'failed' || job.status === 'incomplete' || job.status === 'cancelled') {
-          const created = addNotification({
+          added += persist({
             dedupeKey: `job:${job.id}:${job.status}`, projectId: project.id, projectName: project.name, kind: 'error',
             title: `${project.name}: Background ${job.status}`, detail: job.error || job.checkpoint?.summary || 'Background処理を確認してください。',
           });
-          if (created) { added += 1; showSystemNotification(created); }
         }
         if (job.report?.humanRequired.length) {
-          const created = addNotification({
+          added += persist({
             dedupeKey: `job:${job.id}:human`, projectId: project.id, projectName: project.name, kind: 'human',
             title: `${project.name}: あなたが必要`, detail: job.report.humanRequired.join(' / '),
           });
-          if (created) { added += 1; showSystemNotification(created); }
         }
-      } catch {
-        // No job or temporarily unavailable Worker must not break the inbox sync.
+      }
+
+      const guardian = guardianResult.status === 'fulfilled' ? guardianResult.value : null;
+      if (guardian) added += persistGuardian(project.id, project.name, guardian);
+
+      if (developerResult.status === 'fulfilled') {
+        const developer = developerResult.value;
+        const coveredByGuardian = guardian && (
+          guardian.currentDeveloperJobId === developer.id ||
+          +new Date(guardian.updatedAt) >= +new Date(developer.updatedAt)
+        );
+        if (!coveredByGuardian) added += persistDeveloper(project.id, project.name, developer);
       }
     }
 
@@ -175,6 +190,18 @@ export default function NotificationCenter() {
       setItems(loadNotifications());
       setOpen(false);
       window.dispatchEvent(new CustomEvent('devdeck:open-handoff', { detail: { projectId: item.projectId } }));
+      return;
+    }
+
+    if (item.action === 'OPEN_URL') {
+      const safeUrl = safeExternalUrl(item.actionUrl);
+      if (!safeUrl) {
+        setActionMessage('安全に開けるリンクを確認できませんでした。');
+        return;
+      }
+      markNotificationRead(item.id);
+      setItems(loadNotifications());
+      window.open(safeUrl, '_blank', 'noopener,noreferrer');
       return;
     }
 
@@ -222,7 +249,7 @@ export default function NotificationCenter() {
 
             <div className="push-card">
               <div>
-                <b>📲 Background Push</b>
+                <b>📲 Supervisor Push</b>
                 <small>{!pushState.supported ? 'この環境では未対応' : pushState.subscribed ? '有効・PWAを閉じても受信' : `未登録・権限 ${pushState.permission}`}</small>
               </div>
               <div className="push-actions">
@@ -237,7 +264,7 @@ export default function NotificationCenter() {
             {pushMessage && <div className="notice-message">{pushMessage}</div>}
 
             <div className="notice-actions">
-              <button onClick={syncStatus} disabled={syncing}>{syncing ? '同期中…' : '↻ 状態を同期'}</button>
+              <button onClick={syncStatus} disabled={syncing}>{syncing ? '同期中…' : '↻ 全実行状態を同期'}</button>
               <button onClick={readAll}>すべて既読</button>
               <button onClick={clearRead}>既読を消す</button>
             </div>
@@ -264,6 +291,77 @@ export default function NotificationCenter() {
       )}
     </>
   );
+}
+
+function persist(input: NotificationInput) {
+  const created = addNotification(input);
+  if (!created) return 0;
+  showSystemNotification(created);
+  return 1;
+}
+
+function persistGuardian(projectId: string, projectName: string, run: GuardianRun) {
+  if (run.status === 'review_ready') {
+    return persist({
+      dedupeKey: `guardian:${run.id}:review_ready:${run.cycle}`,
+      projectId, projectName, kind: 'human',
+      title: `${projectName}: Guardianレビュー待ち`,
+      detail: run.message || run.finalSummary || 'コード作業は終了しましたが、CIを確認できないためレビューが必要です。',
+      ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${run.pullRequest.number} を開く`, actionUrl: run.pullRequest.url } : {}),
+    });
+  }
+  if (run.status === 'completed') {
+    return persist({
+      dedupeKey: `guardian:${run.id}:completed`,
+      projectId, projectName, kind: run.pullRequest ? 'human' : 'complete',
+      title: run.pullRequest ? `${projectName}: CI成功・最終レビュー待ち` : `${projectName}: Guardian完了`,
+      detail: run.message || run.finalSummary || 'Guardianが設定した工程を完了しました。',
+      ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${run.pullRequest.number} を開く`, actionUrl: run.pullRequest.url } : {}),
+    });
+  }
+  if (run.status === 'failed' || run.status === 'expired') {
+    return persist({
+      dedupeKey: `guardian:${run.id}:${run.status}:${run.cycle}`,
+      projectId, projectName, kind: 'error',
+      title: `${projectName}: Guardian ${run.status === 'expired' ? '時間上限' : '停止'}`,
+      detail: run.error || run.message || 'Guardianが上限または復旧不能エラーで停止しました。',
+      ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${run.pullRequest.number} を確認`, actionUrl: run.pullRequest.url } : {}),
+    });
+  }
+  return 0;
+}
+
+function persistDeveloper(projectId: string, projectName: string, job: DeveloperJob) {
+  if (job.status === 'completed') {
+    return persist({
+      dedupeKey: `developer:${job.id}:completed`,
+      projectId, projectName, kind: 'human',
+      title: `${projectName}: GitHub Agent完了`,
+      detail: job.outputText || (job.pullRequest ? `Draft PR #${job.pullRequest.number} を作成しました。` : 'Developer Agentの結果を確認してください。'),
+      ...(job.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${job.pullRequest.number} を開く`, actionUrl: job.pullRequest.url } : {}),
+    });
+  }
+  if (job.status === 'failed') {
+    return persist({
+      dedupeKey: `developer:${job.id}:failed`,
+      projectId, projectName, kind: 'error',
+      title: `${projectName}: GitHub Agent停止`,
+      detail: job.error || job.outputText || 'Developer Agentが停止しました。',
+      ...(job.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${job.pullRequest.number} を確認`, actionUrl: job.pullRequest.url } : {}),
+    });
+  }
+  return 0;
+}
+
+function safeExternalUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname !== 'github.com') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function icon(kind: SupervisorNotification['kind']) {
