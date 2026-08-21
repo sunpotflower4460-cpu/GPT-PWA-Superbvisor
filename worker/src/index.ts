@@ -1,5 +1,11 @@
 import { Webhook } from 'standardwebhooks';
 import { generateSmartReplies, SmartReplyRequest } from './smartReplies';
+import {
+  getVapidPublicKey,
+  registerPushSubscription,
+  sendSupervisorPush,
+  unregisterPushSubscription,
+} from './push';
 
 interface Env {
   OPENAI_API_KEY: string;
@@ -8,6 +14,9 @@ interface Env {
   OPENAI_MODEL?: string;
   SMART_REPLY_MODEL?: string;
   ALLOWED_ORIGIN?: string;
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_JWK?: string;
+  VAPID_SUBJECT?: string;
   SUPERVISOR_STATE: KVNamespace;
 }
 
@@ -113,6 +122,39 @@ export default {
       return createSmartReplies(request, env);
     }
 
+    if (url.pathname === '/api/push/public-key' && request.method === 'GET') {
+      const publicKey = getVapidPublicKey(env);
+      if (!publicKey) return json({ error: 'push_not_configured' }, 503, env, request);
+      return json({ publicKey }, 200, env, request);
+    }
+
+    if (url.pathname === '/api/push/subscriptions' && request.method === 'POST') {
+      const body = await readJson<unknown>(request);
+      try {
+        const subscription = await registerPushSubscription(env, body);
+        return json({ ok: true, endpoint: subscription.endpoint }, 201, env, request);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : 'invalid_subscription' }, 400, env, request);
+      }
+    }
+
+    if (url.pathname === '/api/push/subscriptions' && request.method === 'DELETE') {
+      const body = await readJson<{ endpoint?: string }>(request);
+      if (body?.endpoint) await unregisterPushSubscription(env, body.endpoint);
+      return json({ ok: true }, 200, env, request);
+    }
+
+    if (url.pathname === '/api/push/test' && request.method === 'POST') {
+      const result = await sendSupervisorPush(env, {
+        title: 'AI DEV DECK',
+        body: 'Push通知の接続テストに成功しました。',
+        tag: 'devdeck-test',
+        kind: 'info',
+        url: './',
+      });
+      return json(result, 200, env, request);
+    }
+
     const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
     if (jobMatch && request.method === 'GET') {
       return getJob(decodeURIComponent(jobMatch[1]), request, env);
@@ -141,19 +183,10 @@ async function createJob(request: Request, env: Env): Promise<Response> {
     return json({ error: 'projectId, goal and prompt are required' }, 400, env, request);
   }
 
-  const launched = await launchJob(env, body, {
-    retryCount: 0,
-  });
-
+  const launched = await launchJob(env, body, { retryCount: 0 });
   if (!launched.ok) {
-    return json(
-      { error: 'openai_create_failed', detail: launched.error },
-      launched.status,
-      env,
-      request,
-    );
+    return json({ error: 'openai_create_failed', detail: launched.error }, launched.status, env, request);
   }
-
   return json({ job: launched.job }, 202, env, request);
 }
 
@@ -164,9 +197,7 @@ async function launchJob(
 ): Promise<{ ok: true; job: StoredJob } | { ok: false; status: number; error: string }> {
   const model = body.model?.trim() || env.OPENAI_MODEL?.trim() || 'gpt-5.6-luna';
   const autoRecover = body.autoRecover === true;
-  const maxAutoRetries = autoRecover
-    ? clampInteger(body.maxAutoRetries ?? 2, 0, MAX_ALLOWED_AUTO_RETRIES)
-    : 0;
+  const maxAutoRetries = autoRecover ? clampInteger(body.maxAutoRetries ?? 2, 0, MAX_ALLOWED_AUTO_RETRIES) : 0;
 
   const response = await openAI<OpenAIResponseRecord>(env, '/responses', {
     method: 'POST',
@@ -217,8 +248,13 @@ async function getJob(id: string, request: Request, env: Env): Promise<Response>
   let job = await readJob(env, id);
   if (!job) return json({ error: 'job_not_found' }, 404, env, request);
 
-  if (!FINAL_STATUSES.has(job.status)) {
-    job = await refreshJobFromOpenAI(env, job);
+  if (!FINAL_STATUSES.has(job.status)) job = await refreshJobFromOpenAI(env, job);
+
+  if (job.status === 'failed' || job.status === 'incomplete') {
+    const recovered = await maybeAutoRecover(env, job);
+    if (!recovered) await maybePushJobStatus(env, job);
+  } else if (job.status === 'completed' || job.status === 'cancelled') {
+    await maybePushJobStatus(env, job);
   }
 
   return json({ job }, 200, env, request);
@@ -237,10 +273,7 @@ async function handleOpenAIWebhook(request: Request, env: Env): Promise<Response
   const webhookId = request.headers.get('webhook-id');
   const webhookTimestamp = request.headers.get('webhook-timestamp');
   const webhookSignature = request.headers.get('webhook-signature');
-
-  if (!webhookId || !webhookTimestamp || !webhookSignature) {
-    return new Response('Missing webhook signature headers', { status: 400 });
-  }
+  if (!webhookId || !webhookTimestamp || !webhookSignature) return new Response('Missing webhook signature headers', { status: 400 });
 
   let event: WebhookEvent;
   try {
@@ -255,17 +288,18 @@ async function handleOpenAIWebhook(request: Request, env: Env): Promise<Response
   }
 
   const dedupeKey = `event:${webhookId}`;
-  if (await env.SUPERVISOR_STATE.get(dedupeKey)) {
-    return Response.json({ ok: true, duplicate: true });
-  }
+  if (await env.SUPERVISOR_STATE.get(dedupeKey)) return Response.json({ ok: true, duplicate: true });
 
   const responseId = event.data?.id;
   if (responseId && event.type.startsWith('response.')) {
     const existing = await readJob(env, responseId);
     if (existing) {
       const refreshed = await refreshJobFromOpenAI(env, existing);
-      if (event.type === 'response.failed' || event.type === 'response.incomplete') {
-        await maybeAutoRecover(env, refreshed);
+      if (refreshed.status === 'failed' || refreshed.status === 'incomplete') {
+        const recovered = await maybeAutoRecover(env, refreshed);
+        if (!recovered) await maybePushJobStatus(env, refreshed);
+      } else if (FINAL_STATUSES.has(refreshed.status)) {
+        await maybePushJobStatus(env, refreshed);
       }
     }
   }
@@ -274,11 +308,9 @@ async function handleOpenAIWebhook(request: Request, env: Env): Promise<Response
   return Response.json({ ok: true });
 }
 
-async function maybeAutoRecover(env: Env, failedJob: StoredJob): Promise<void> {
-  if (!failedJob.autoRecover) return;
-  if (failedJob.nextJobId) return;
-  if (failedJob.retryCount >= failedJob.maxAutoRetries) return;
-  if (failedJob.status !== 'failed' && failedJob.status !== 'incomplete') return;
+async function maybeAutoRecover(env: Env, failedJob: StoredJob): Promise<boolean> {
+  if (!failedJob.autoRecover || failedJob.nextJobId || failedJob.retryCount >= failedJob.maxAutoRetries) return false;
+  if (failedJob.status !== 'failed' && failedJob.status !== 'incomplete') return false;
 
   const nextRetry = failedJob.retryCount + 1;
   const recoveryPrompt = `前回のBackground attempt #${failedJob.retryCount + 1} は ${failedJob.status} で終了しました。\n原因: ${failedJob.error || '詳細不明'}\n\n元の依頼:\n${failedJob.prompt}\n\n同じ失敗を漫然と繰り返さず、原因を踏まえて修正した進め方または別アプローチで再試行してください。完了済みの内容がある場合は重複せず、最終目標へ近づけてください。`;
@@ -299,23 +331,39 @@ async function maybeAutoRecover(env: Env, failedJob: StoredJob): Promise<void> {
     previousJobId: failedJob.id,
   });
 
-  if (launched.ok) {
-    await persistJob(env, {
-      ...failedJob,
-      nextJobId: launched.job.id,
-      updatedAt: new Date().toISOString(),
-    });
+  if (!launched.ok) return false;
+  await persistJob(env, { ...failedJob, nextJobId: launched.job.id, updatedAt: new Date().toISOString() });
+  return true;
+}
+
+async function maybePushJobStatus(env: Env, job: StoredJob) {
+  if (!FINAL_STATUSES.has(job.status)) return;
+  const key = `push-job:${job.id}:${job.status}`;
+  if (await env.SUPERVISOR_STATE.get(key)) return;
+
+  const projectName = job.projectName || 'AI DEV DECK';
+  const human = job.report?.humanRequired ?? [];
+  let title = `${projectName}: ${job.status}`;
+  let body = job.report?.summary || job.checkpoint?.summary || job.error || 'Background処理の状態が更新されました。';
+  let kind: 'complete' | 'error' | 'human' | 'info' = 'info';
+
+  if (job.status === 'completed') {
+    kind = human.length ? 'human' : 'complete';
+    title = human.length ? `${projectName}: 完了・あなたの操作あり` : `${projectName}: 完了`;
+    if (human.length) body = `${body} / 必要: ${human.join(' / ')}`;
+  } else if (job.status === 'failed' || job.status === 'incomplete') {
+    kind = 'error';
+    title = `${projectName}: ${job.status === 'failed' ? 'エラー' : '未完了で停止'}`;
   }
+
+  await sendSupervisorPush(env, { title, body: body.slice(0, 900), tag: `job-${job.id}`, projectId: job.projectId, kind, url: './' });
+  await env.SUPERVISOR_STATE.put(key, new Date().toISOString(), { expirationTtl: JOB_TTL_SECONDS });
 }
 
 async function refreshJobFromOpenAI(env: Env, job: StoredJob): Promise<StoredJob> {
   const response = await openAI<OpenAIResponseRecord>(env, `/responses/${encodeURIComponent(job.id)}`, { method: 'GET' });
   if (!response.ok || !response.data) {
-    const failed: StoredJob = {
-      ...job,
-      updatedAt: new Date().toISOString(),
-      error: response.error || `OpenAI retrieve failed (${response.status})`,
-    };
+    const failed: StoredJob = { ...job, updatedAt: new Date().toISOString(), error: response.error || `OpenAI retrieve failed (${response.status})` };
     await persistJob(env, failed);
     return failed;
   }
@@ -334,34 +382,20 @@ async function refreshJobFromOpenAI(env: Env, job: StoredJob): Promise<StoredJob
     outputText: outputText || job.outputText,
     error: error || undefined,
     report: report || job.report,
-    checkpoint: final
-      ? {
-          at: now,
-          status,
-          summary: report?.summary || checkpointSummary(outputText, error, status),
-        }
-      : job.checkpoint,
+    checkpoint: final ? { at: now, status, summary: report?.summary || checkpointSummary(outputText, error, status) } : job.checkpoint,
   };
-
   await persistJob(env, updated);
   return updated;
 }
 
 function buildWorkerInput(body: CreateJobBody, retryCount: number): string {
-  const done = body.definitionOfDone?.length
-    ? body.definitionOfDone.map((item) => `- ${item}`).join('\n')
-    : '- ユーザーが指定した最終目標を満たす';
-
+  const done = body.definitionOfDone?.length ? body.definitionOfDone.map((item) => `- ${item}`).join('\n') : '- ユーザーが指定した最終目標を満たす';
   return `あなたはAI DEV DECKのBackground Workerです。\n\n【プロジェクト】\n${body.projectName || body.projectId}\n\n【最終目標】\n${body.goal}\n\n【現在地点】\n${body.currentPhase || '未指定'}\n\n【完成条件】\n${done}\n\n【今回の指示】\n${body.prompt}\n\n【attempt】\n${retryCount + 1}\n\nルール:\n- 完了済み作業を推測で繰り返さず、与えられた情報から必要な次工程を進める。\n- エラーがある場合は原因を分析し、同じ失敗を漫然と繰り返さない。\n- 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様変更など本人判断が必要な内容は明示する。\n- 実際にアクセスできない外部システムを操作したと偽らない。\n- 最後に通常の説明に加えて、必ず最終行付近へ次の形式を1つだけ出す。JSONは正しいJSONにする。\n\nDEVDECK_REPORT_JSON: {"summary":"短い完了要約","steps":["実施手順1","実施手順2"],"reachedStage":"現在の到達地点","remaining":["残作業"],"humanRequired":["本人が必要なこと"],"done":false}\n\ndoneは最終目標と完成条件を本当に満たした場合だけtrue。`;
 }
 
 function extractOutputText(response: OpenAIResponseRecord): string {
   const chunks: string[] = [];
-  for (const item of response.output ?? []) {
-    for (const content of item.content ?? []) {
-      if (content.type === 'output_text' && typeof content.text === 'string') chunks.push(content.text);
-    }
-  }
+  for (const item of response.output ?? []) for (const content of item.content ?? []) if (content.type === 'output_text' && typeof content.text === 'string') chunks.push(content.text);
   return chunks.join('\n').trim();
 }
 
@@ -373,7 +407,6 @@ function parseCompletionReport(output: string): CompletionReport | undefined {
   const firstBrace = candidate.indexOf('{');
   const lastBrace = candidate.lastIndexOf('}');
   if (firstBrace < 0 || lastBrace <= firstBrace) return undefined;
-
   try {
     const parsed = JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
     return {
@@ -384,9 +417,7 @@ function parseCompletionReport(output: string): CompletionReport | undefined {
       humanRequired: stringArray(parsed.humanRequired, 20),
       done: parsed.done === true,
     };
-  } catch {
-    return undefined;
-  }
+  } catch { return undefined; }
 }
 
 function checkpointSummary(output: string, error: string | undefined, status: JobStatus): string {
@@ -396,9 +427,7 @@ function checkpointSummary(output: string, error: string | undefined, status: Jo
 }
 
 function normalizeStatus(value?: string): JobStatus {
-  if (value === 'completed' || value === 'failed' || value === 'incomplete' || value === 'cancelled' || value === 'in_progress') {
-    return value;
-  }
+  if (value === 'completed' || value === 'failed' || value === 'incomplete' || value === 'cancelled' || value === 'in_progress') return value;
   return 'queued';
 }
 
@@ -409,42 +438,23 @@ async function persistJob(env: Env, job: StoredJob) {
 async function readJob(env: Env, id: string): Promise<StoredJob | null> {
   const raw = await env.SUPERVISOR_STATE.get(`job:${id}`);
   if (!raw) return null;
-  try {
-    return JSON.parse(raw) as StoredJob;
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(raw) as StoredJob; } catch { return null; }
 }
 
-async function openAI<T>(
-  env: Env,
-  path: string,
-  options: { method: 'GET' | 'POST'; body?: unknown },
-): Promise<{ ok: boolean; status: number; data?: T; error?: string }> {
+async function openAI<T>(env: Env, path: string, options: { method: 'GET' | 'POST'; body?: unknown }): Promise<{ ok: boolean; status: number; data?: T; error?: string }> {
   try {
     const response = await fetch(`https://api.openai.com/v1${path}`, {
       method: options.method,
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
     const text = await response.text();
     let parsed: unknown;
-    try {
-      parsed = text ? JSON.parse(text) : undefined;
-    } catch {
-      parsed = undefined;
-    }
-
+    try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = undefined; }
     if (!response.ok) {
-      const message = isObject(parsed) && isObject(parsed.error) && typeof parsed.error.message === 'string'
-        ? parsed.error.message
-        : text || `OpenAI request failed (${response.status})`;
+      const message = isObject(parsed) && isObject(parsed.error) && typeof parsed.error.message === 'string' ? parsed.error.message : text || `OpenAI request failed (${response.status})`;
       return { ok: false, status: response.status, error: message };
     }
-
     return { ok: true, status: response.status, data: parsed as T };
   } catch (error) {
     return { ok: false, status: 502, error: error instanceof Error ? error.message : 'Network error' };
@@ -463,7 +473,7 @@ function corsHeaders(env: Env, request: Request): HeadersInit {
   return {
     'Access-Control-Allow-Origin': allowedOrigin,
     'Access-Control-Allow-Headers': 'authorization, content-type',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     Vary: 'Origin',
   };
 }
@@ -473,27 +483,16 @@ function json(payload: unknown, status: number, env: Env, request: Request) {
 }
 
 async function readJson<T>(request: Request): Promise<T | null> {
-  try {
-    return await request.json<T>();
-  } catch {
-    return null;
-  }
+  try { return await request.json<T>(); } catch { return null; }
 }
 
 function clampInteger(value: number, min: number, max: number) {
   const integer = Number.isFinite(value) ? Math.trunc(value) : min;
   return Math.max(min, Math.min(max, integer));
 }
-
-function stringValue(value: unknown) {
-  return typeof value === 'string' ? value : '';
-}
-
+function stringValue(value: unknown) { return typeof value === 'string' ? value : ''; }
 function stringArray(value: unknown, max: number): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string').slice(0, max).map((item) => item.slice(0, 1000));
 }
-
-function isObject(value: unknown): value is Record<string, any> {
-  return typeof value === 'object' && value !== null;
-}
+function isObject(value: unknown): value is Record<string, any> { return typeof value === 'object' && value !== null; }
