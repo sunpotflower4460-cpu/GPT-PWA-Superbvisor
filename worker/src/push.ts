@@ -77,14 +77,14 @@ export async function sendSupervisorPush(env: PushEnv, payload: SupervisorPushPa
     if (payload.projectId) data.projectId = payload.projectId;
     if (payload.kind) data.kind = payload.kind;
 
-    const pushPayload: Record<string, unknown> = {
+    const pushPayload = {
       title: payload.title,
       body: payload.body,
       icon: './icon.svg',
       badge: './icon.svg',
       data,
+      ...(payload.tag ? { tag: payload.tag } : {}),
     };
-    if (payload.tag) pushPayload.tag = payload.tag;
 
     try {
       const request = await buildPushHTTPRequest({
