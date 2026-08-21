@@ -1,0 +1,150 @@
+.evidence-fab {
+  position: fixed;
+  z-index: 18;
+  right: 18px;
+  bottom: calc(92px + env(safe-area-inset-bottom));
+  width: 46px;
+  height: 46px;
+  border: 1px solid rgba(124, 156, 255, .35);
+  border-radius: 15px;
+  background: rgba(17, 25, 43, .94);
+  color: #a9beff;
+  font-size: 22px;
+  box-shadow: 0 14px 34px rgba(0,0,0,.3);
+  backdrop-filter: blur(18px);
+  cursor: pointer;
+}
+
+.evidence-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  align-items: end;
+  background: rgba(0,0,0,.62);
+  backdrop-filter: blur(9px);
+}
+
+.evidence-sheet {
+  width: min(100%, 760px);
+  max-height: 90dvh;
+  margin: 0 auto;
+  padding: 20px 16px calc(24px + env(safe-area-inset-bottom));
+  overflow: auto;
+  border: 1px solid rgba(255,255,255,.08);
+  border-bottom: 0;
+  border-radius: 28px 28px 0 0;
+  background: #0d1425;
+  box-shadow: 0 -28px 70px rgba(0,0,0,.38);
+}
+
+.evidence-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.evidence-header h2 { margin: 0; font-size: 22px; }
+.evidence-intro { margin: 14px 0 18px; }
+.evidence-projects { display: grid; gap: 12px; }
+
+.evidence-card {
+  padding: 15px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 19px;
+  background: rgba(19,27,48,.88);
+}
+
+.evidence-card .section-heading > div:first-child { min-width: 0; }
+.evidence-card strong { font-size: 15px; }
+.repo-name { margin-top: 4px; overflow: hidden; color: #8e9ab5; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
+.evidence-refresh {
+  min-height: 35px;
+  padding: 0 11px;
+  border: 1px solid rgba(124,156,255,.24);
+  border-radius: 10px;
+  background: rgba(124,156,255,.1);
+  color: #dce5ff;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.evidence-refresh:disabled { opacity: .55; cursor: progress; }
+
+.evidence-error {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid rgba(255,111,132,.22);
+  border-radius: 11px;
+  background: rgba(255,111,132,.08);
+  color: #ff9bac;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.evidence-metric {
+  min-width: 0;
+  padding: 10px 7px;
+  border-radius: 12px;
+  background: rgba(255,255,255,.04);
+  text-align: center;
+}
+.evidence-metric span { display: block; margin-bottom: 5px; color: #8e9ab5; font-size: 9px; }
+.evidence-metric b { display: block; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.evidence-metric.success b { color: #78e8bc; }
+.evidence-metric.failure b { color: #ff91a3; }
+.evidence-metric.pending b { color: #ffd478; }
+
+.evidence-commit {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+  margin-top: 10px;
+  padding: 10px 11px;
+  border-radius: 12px;
+  background: rgba(255,255,255,.035);
+}
+.evidence-commit span { color: #8e9ab5; font-size: 10px; }
+.evidence-commit b { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.evidence-commit small { grid-column: 1 / -1; color: #8e9ab5; font-size: 9px; }
+
+.judge-row {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 11px;
+  border: 1px solid rgba(85,230,193,.15);
+  border-radius: 13px;
+  background: rgba(85,230,193,.055);
+}
+.judge-row > div { display: flex; align-items: center; justify-content: space-between; }
+.judge-row span { color: #a9b4cb; font-size: 10px; }
+.judge-row strong { color: #79eac2; font-size: 16px; }
+.judge-row p { margin: 0; color: #bcc8df; font-size: 10px; line-height: 1.5; }
+
+.evidence-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 9px;
+  color: #75819a;
+  font-size: 9px;
+}
+
+.empty-state.compact { padding: 30px 16px; }
+.empty-state.compact > div { font-size: 27px; }
+
+@media (min-width: 700px) {
+  .evidence-backdrop { align-items: center; padding: 20px; }
+  .evidence-sheet { border-bottom: 1px solid rgba(255,255,255,.08); border-radius: 28px; }
+  .evidence-fab { right: max(22px, calc((100vw - 760px) / 2 + 22px)); }
+}
