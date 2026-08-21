@@ -17,6 +17,7 @@ import './smart-actions.css';
 import './background-worker.css';
 import './recovery.css';
 import './handoff-notice.css';
+import './watchdog-inbox.css';
 import './developer-agent.css';
 import './operating-plan.css';
 import './dashboard-plan.css';
