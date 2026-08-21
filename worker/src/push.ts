@@ -73,19 +73,25 @@ export async function sendSupervisorPush(env: PushEnv, payload: SupervisorPushPa
     try { subscription = JSON.parse(raw) as StoredPushSubscription; }
     catch { await env.SUPERVISOR_STATE.delete(name); return; }
 
+    const data: Record<string, string> = { url: payload.url || './' };
+    if (payload.projectId) data.projectId = payload.projectId;
+    if (payload.kind) data.kind = payload.kind;
+
+    const pushPayload: Record<string, unknown> = {
+      title: payload.title,
+      body: payload.body,
+      icon: './icon.svg',
+      badge: './icon.svg',
+      data,
+    };
+    if (payload.tag) pushPayload.tag = payload.tag;
+
     try {
       const request = await buildPushHTTPRequest({
         privateJWK,
         subscription,
         message: {
-          payload: {
-            title: payload.title,
-            body: payload.body,
-            tag: payload.tag,
-            icon: './icon.svg',
-            badge: './icon.svg',
-            data: { url: payload.url || './', projectId: payload.projectId, kind: payload.kind },
-          },
+          payload: pushPayload,
           adminContact: subject,
           options: {
             ttl: 3600,
