@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { DevProject, loadProjects } from './core';
 import { createHandoffCheckpoint, loadHandoffCheckpoints } from './handoff';
 import { addNotification } from './notifications';
@@ -16,10 +16,24 @@ export default function HandoffCenter() {
     [projects, selectedId],
   );
 
-  function openCenter() {
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const projectId = (event as CustomEvent<{ projectId?: string }>).detail?.projectId;
+      openCenter(projectId);
+    };
+    window.addEventListener('devdeck:open-handoff', handler);
+    return () => window.removeEventListener('devdeck:open-handoff', handler);
+  }, []);
+
+  function openCenter(preferredProjectId?: string) {
     const next = loadProjects().sort((a, b) => Number(b.status === 'CONTEXT_LIMIT') - Number(a.status === 'CONTEXT_LIMIT'));
+    const nextId = preferredProjectId && next.some((project) => project.id === preferredProjectId)
+      ? preferredProjectId
+      : selectedId && next.some((project) => project.id === selectedId)
+        ? selectedId
+        : next[0]?.id ?? '';
     setProjects(next);
-    setSelectedId((current) => current && next.some((project) => project.id === current) ? current : next[0]?.id ?? '');
+    setSelectedId(nextId);
     setPacket('');
     setCopied(false);
     setHistoryCount(loadHandoffCheckpoints().length);
@@ -62,7 +76,7 @@ export default function HandoffCenter() {
 
   return (
     <>
-      <button className="handoff-fab" onClick={openCenter} aria-label="Chat handoff center">↗</button>
+      <button className="handoff-fab" onClick={() => openCenter()} aria-label="Chat handoff center">↗</button>
       {open && (
         <div className="handoff-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="handoff-sheet">
