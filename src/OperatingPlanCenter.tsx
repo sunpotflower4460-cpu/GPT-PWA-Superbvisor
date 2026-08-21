@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { DevProject, QuickAction, buildActionPrompt, loadProjects } from './core';
-import { loadWorkerConnection } from './backgroundWorker';
+import {
+  BackgroundJob,
+  loadWorkerConnection,
+  startBackgroundJob,
+} from './backgroundWorker';
 import { GuardianRun, startGuardianRun } from './guardianRunner';
 import {
   OperatingPlan,
@@ -12,10 +16,12 @@ import {
   targetLabels,
 } from './operatingPlan';
 
-const planRunAction: QuickAction = {
+type ExecutionRoute = 'CHAT' | 'BACKGROUND' | 'GUARDIAN';
+
+const runAction: QuickAction = {
   id: 'operating-plan-run',
   label: 'Operating Planどおりに進める',
-  intent: '保存済みOperating Planの到達地点・標準手順・案件固有ルールを優先し、その地点まで安全に進める',
+  intent: '保存済みOperating Planの到達地点・標準手順・実行ルールに従い、その範囲で安全に前進する',
 };
 
 export default function OperatingPlanCenter() {
@@ -26,11 +32,18 @@ export default function OperatingPlanCenter() {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState('');
   const [guardian, setGuardian] = useState<GuardianRun | null>(null);
+  const [background, setBackground] = useState<BackgroundJob | null>(null);
+  const [deviceIndependent, setDeviceIndependent] = useState(false);
 
   const selected = useMemo(
     () => projects.find((project) => project.id === selectedId) ?? projects[0] ?? null,
     [projects, selectedId],
   );
+
+  const recommendedRoute: ExecutionRoute = useMemo(() => {
+    if (!deviceIndependent) return 'CHAT';
+    return selected?.githubUrl ? 'GUARDIAN' : 'BACKGROUND';
+  }, [deviceIndependent, selected?.githubUrl]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -52,6 +65,8 @@ export default function OperatingPlanCenter() {
     setSelectedId(nextId);
     setPlan(nextId ? getOperatingPlan(nextId) : defaultOperatingPlan());
     setGuardian(null);
+    setBackground(null);
+    setDeviceIndependent(false);
     setMessage('');
     setOpen(true);
   }
@@ -60,6 +75,8 @@ export default function OperatingPlanCenter() {
     setSelectedId(id);
     setPlan(getOperatingPlan(id));
     setGuardian(null);
+    setBackground(null);
+    setDeviceIndependent(false);
     setMessage('');
   }
 
@@ -85,11 +102,49 @@ export default function OperatingPlanCenter() {
     if (!selected || !persistPlan()) return;
     setBusy('copy');
     try {
-      const prompt = buildActionPrompt(selected, planRunAction);
+      const prompt = buildActionPrompt(selected, runAction);
       await navigator.clipboard.writeText(prompt);
-      setMessage('Planを保存し、ChatGPTへ貼る標準指示をコピーしました。API費用は発生しません。');
+      setMessage('Planを保存し、ChatGPTへ貼る標準指示をコピーしました。追加API費用は発生しません。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '指示をコピーできませんでした。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function copyAndOpenChat() {
+    if (!selected || !persistPlan()) return;
+    const target = selected.chatUrl || 'https://chatgpt.com/';
+    const nextWindow = window.open(target, '_blank', 'noopener,noreferrer');
+    setBusy('chat-open');
+    try {
+      const prompt = buildActionPrompt(selected, runAction);
+      await navigator.clipboard.writeText(prompt);
+      setMessage(nextWindow
+        ? 'Plan指示をコピーしてChatGPTを開きました。開いたチャットへ貼り付けて送信してください。'
+        : 'Plan指示はコピーしました。ポップアップがブロックされたためChatGPTは手動で開いてください。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Chat用指示を準備できませんでした。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function runBackground() {
+    if (!selected || !persistPlan()) return;
+    setBusy('background');
+    setMessage('');
+    try {
+      const prompt = buildActionPrompt(selected, runAction);
+      const job = await startBackgroundJob(selected, prompt, loadWorkerConnection(), {
+        autoRecover: true,
+        maxAutoRetries: 2,
+      });
+      setBackground(job);
+      setGuardian(null);
+      setMessage('Operating PlanをBackgroundへ渡しました。失敗/incomplete時は最大2回まで上限付きで自動復旧します。端末を閉じても処理は継続します。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Backgroundを開始できませんでした。');
     } finally {
       setBusy('');
     }
@@ -98,21 +153,28 @@ export default function OperatingPlanCenter() {
   async function runGuardian() {
     if (!selected || !persistPlan()) return;
     if (!selected.githubUrl) {
-      setMessage('Guardian実行には案件のGitHub URL登録が必要です。Chat用コピーはそのまま使えます。');
+      setMessage('Guardian実行には案件のGitHub URL登録が必要です。非GitHub案件はBackgroundを利用できます。');
       return;
     }
     setBusy('guardian');
     setMessage('');
     try {
-      const prompt = buildActionPrompt(selected, planRunAction);
+      const prompt = buildActionPrompt(selected, runAction);
       const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection());
       setGuardian(run);
-      setMessage('Operating Planを標準設定（最大3 cycle / 3時間）でGuardianへ渡しました。端末を閉じてもWebhook/Cronが監督します。');
+      setBackground(null);
+      setMessage('Operating PlanをGuardianへ渡しました。実装→CI確認→必要なら同一branchで修正を、最大3 cycle / 3時間まで監督します。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Guardianを開始できませんでした。');
     } finally {
       setBusy('');
     }
+  }
+
+  async function runRecommended() {
+    if (recommendedRoute === 'CHAT') return copyAndOpenChat();
+    if (recommendedRoute === 'GUARDIAN') return runGuardian();
+    return runBackground();
   }
 
   function preset(target: OperatingPlanTarget) {
@@ -205,15 +267,60 @@ export default function OperatingPlanCenter() {
                     </details>
 
                     <button className="plan-save" onClick={save}>この案件のPlanを保存</button>
-                    <div className="plan-run-actions">
-                      <button disabled={Boolean(busy)} onClick={copyChatPrompt}>{busy === 'copy' ? 'コピー中…' : '💬 Chat用指示をコピー'}</button>
-                      <button className="guardian" disabled={Boolean(busy) || !selected.githubUrl} onClick={runGuardian}>{busy === 'guardian' ? '開始中…' : '🛡 GuardianでPlan実行'}</button>
-                    </div>
-                    <p className="plan-cost-note">ChatコピーはAPI費用なし。GuardianはOpenAI APIを利用し、最大3 cycle / 3時間で停止します。自動mergeはしません。</p>
+
+                    <section className="execution-router">
+                      <div className="execution-router-head">
+                        <div><b>実行先</b><small>通常はChat。必要な時だけターボ。</small></div>
+                        <label className="execution-persist-toggle">
+                          <input type="checkbox" checked={deviceIndependent} onChange={(event) => setDeviceIndependent(event.target.checked)} />
+                          <span>端末を閉じても続けたい</span>
+                        </label>
+                      </div>
+
+                      <div className="execution-route-grid">
+                        <RouteCard
+                          route="CHAT"
+                          recommended={recommendedRoute === 'CHAT'}
+                          disabled={Boolean(busy)}
+                          title="💬 Chat"
+                          detail="追加API費用なし。指示をコピーしてChatGPTで進める。"
+                          onClick={copyAndOpenChat}
+                        />
+                        <RouteCard
+                          route="BACKGROUND"
+                          recommended={recommendedRoute === 'BACKGROUND'}
+                          disabled={Boolean(busy)}
+                          title="⚡ Background"
+                          detail="非GitHub作業や長い分析を端末非依存で。Auto Recovery最大2回。"
+                          onClick={runBackground}
+                        />
+                        <RouteCard
+                          route="GUARDIAN"
+                          recommended={recommendedRoute === 'GUARDIAN'}
+                          disabled={Boolean(busy) || !selected.githubUrl}
+                          title="🛡 Guardian"
+                          detail={selected.githubUrl ? 'GitHub実装→CI→失敗時修正を最大3 cycle監督。' : 'GitHub URL登録済み案件のみ。'}
+                          onClick={runGuardian}
+                        />
+                      </div>
+
+                      <button className={`execution-recommended ${recommendedRoute.toLowerCase()}`} disabled={Boolean(busy)} onClick={runRecommended}>
+                        {busy ? '準備中…' : `推奨: ${routeLabel(recommendedRoute)} でPlanを開始`}
+                      </button>
+                      <button className="execution-copy-only" disabled={Boolean(busy)} onClick={copyChatPrompt}>Chat用指示だけコピー</button>
+                      <p className="plan-cost-note">Background / Guardianは明示クリック時だけOpenAI APIを利用します。Workへは自動切替しません。</p>
+                    </section>
+
+                    {background && (
+                      <article className={`plan-run-status background ${background.status}`}>
+                        <div><b>Background · {background.status}</b><span>attempt {(background.retryCount ?? 0) + 1}/{(background.maxAutoRetries ?? 0) + 1}</span></div>
+                        <p>{background.checkpoint?.summary || background.report?.summary || 'BackgroundへPlanを引き継ぎました。'}</p>
+                      </article>
+                    )}
 
                     {guardian && (
                       <article className={`plan-run-status ${guardian.status}`}>
-                        <div><b>{guardian.status}</b><span>cycle {guardian.cycle}/{guardian.maxCycles}</span></div>
+                        <div><b>Guardian · {guardian.status}</b><span>cycle {guardian.cycle}/{guardian.maxCycles}</span></div>
                         <p>{guardian.message || 'GuardianへPlanを引き継ぎました。'}</p>
                         {guardian.pullRequest && <button onClick={() => window.open(guardian.pullRequest!.url, '_blank', 'noopener,noreferrer')}>Draft PR #{guardian.pullRequest.number} ↗</button>}
                       </article>
@@ -230,6 +337,23 @@ export default function OperatingPlanCenter() {
   );
 }
 
+function RouteCard({ route, recommended, disabled, title, detail, onClick }: {
+  route: ExecutionRoute;
+  recommended: boolean;
+  disabled: boolean;
+  title: string;
+  detail: string;
+  onClick: () => void | Promise<void>;
+}) {
+  return (
+    <button className={`execution-route ${route.toLowerCase()} ${recommended ? 'recommended' : ''}`} disabled={disabled} onClick={onClick}>
+      <span>{recommended ? '推奨' : '選択'}</span>
+      <b>{title}</b>
+      <small>{detail}</small>
+    </button>
+  );
+}
+
 function PlanToggle({ checked, onChange, title, detail }: { checked: boolean; onChange: (value: boolean) => void; title: string; detail: string }) {
   return (
     <label className="plan-toggle">
@@ -237,4 +361,10 @@ function PlanToggle({ checked, onChange, title, detail }: { checked: boolean; on
       <span><b>{title}</b><small>{detail}</small></span>
     </label>
   );
+}
+
+function routeLabel(route: ExecutionRoute) {
+  if (route === 'GUARDIAN') return 'Guardian';
+  if (route === 'BACKGROUND') return 'Background';
+  return 'Chat';
 }
