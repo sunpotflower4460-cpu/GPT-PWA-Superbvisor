@@ -26,7 +26,15 @@ export interface GitHubFileResult {
 const API = 'https://api.github.com';
 const BRANCH_PREFIX = 'ai-dev-deck/';
 const MAX_FILE_BYTES = 250_000;
-const BLOCKED_PATHS = [/^\.env(?:\.|$)/i, /(^|\/)\.env(?:\.|$)/i, /(^|\/)(?:id_rsa|id_ed25519)$/i, /(^|\/)secrets?\//i];
+const BLOCKED_PATHS = [
+  /^\.env(?:\.|$)/i,
+  /(^|\/)\.env(?:\.|$)/i,
+  /(^|\/)(?:id_rsa|id_ed25519)$/i,
+  /(^|\/)secrets?\//i,
+  /(^|\/)\.github\/workflows\//i,
+  /\.(?:pem|key|p12|pfx)$/i,
+  /(^|\/)(?:credentials|service-account)(?:\.[^/]+)?$/i,
+];
 
 export function parseRepo(value: string): RepoRef | null {
   const normalized = value.trim().replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
@@ -73,7 +81,10 @@ export async function listTree(env: GitHubEnv, repository: string, ref: string, 
   const tree = await githubJson<{ tree: Array<{ path: string; type: string; size?: number; sha: string }>; truncated: boolean }>(env, repo, 'GET', `/git/trees/${commit.tree.sha}?recursive=1`);
   return {
     truncated: tree.truncated,
-    items: tree.tree.filter((item) => item.type === 'blob').slice(0, Math.max(1, Math.min(maxItems, 1000))).map((item) => ({ path: item.path, size: item.size, sha: item.sha })),
+    items: tree.tree
+      .filter((item) => item.type === 'blob' && isSafePath(item.path))
+      .slice(0, Math.max(1, Math.min(maxItems, 1000)))
+      .map((item) => ({ path: item.path, size: item.size, sha: item.sha })),
   };
 }
 
@@ -161,11 +172,13 @@ export function assertSafeBranch(branch: string) {
   }
 }
 
-function assertSafePath(path: string) {
+function isSafePath(path: string) {
   const normalized = path.replace(/^\/+/, '');
-  if (!normalized || normalized.includes('..') || normalized.includes('\\') || BLOCKED_PATHS.some((rule) => rule.test(normalized))) {
-    throw new Error(`Unsafe or blocked path: ${path}`);
-  }
+  return Boolean(normalized) && !normalized.includes('..') && !normalized.includes('\\') && !BLOCKED_PATHS.some((rule) => rule.test(normalized));
+}
+
+function assertSafePath(path: string) {
+  if (!isSafePath(path)) throw new Error(`Unsafe or blocked path: ${path}`);
 }
 
 async function githubJson<T>(env: GitHubEnv, repo: RepoRef, method: string, path: string, body?: unknown): Promise<T> {
