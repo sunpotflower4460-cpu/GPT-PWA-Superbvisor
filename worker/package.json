@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@pushforge/builder": "^2.0.5",
     "standardwebhooks": "^1.0.0"
   },
   "devDependencies": {

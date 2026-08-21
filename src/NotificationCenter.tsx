@@ -10,12 +10,24 @@ import {
   markNotificationRead,
   showSystemNotification,
 } from './notifications';
+import {
+  PushState,
+  disablePushNotifications,
+  enablePushNotifications,
+  getPushState,
+  sendTestPush,
+} from './pushNotifications';
+
+const initialPushState: PushState = { supported: false, permission: 'unsupported', subscribed: false };
 
 export default function NotificationCenter() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<SupervisorNotification[]>(() => loadNotifications());
   const [syncing, setSyncing] = useState(false);
   const [message, setMessage] = useState('');
+  const [pushState, setPushState] = useState<PushState>(initialPushState);
+  const [pushBusy, setPushBusy] = useState('');
+  const [pushMessage, setPushMessage] = useState('');
   const unread = items.filter((item) => !item.readAt).length;
 
   useEffect(() => {
@@ -27,7 +39,58 @@ export default function NotificationCenter() {
   async function openCenter() {
     setOpen(true);
     setItems(loadNotifications());
-    await syncStatus();
+    await Promise.all([syncStatus(), refreshPushState()]);
+  }
+
+  async function refreshPushState() {
+    try {
+      setPushState(await getPushState());
+    } catch {
+      setPushState(initialPushState);
+    }
+  }
+
+  async function enablePush() {
+    setPushBusy('enable');
+    setPushMessage('');
+    try {
+      await enablePushNotifications(loadWorkerConnection());
+      await refreshPushState();
+      setPushMessage('Push通知を有効にしました。PWAを閉じていてもBackground完了を受け取れます。');
+    } catch (error) {
+      setPushMessage(error instanceof Error ? error.message : 'Push通知を有効にできませんでした。');
+    } finally {
+      setPushBusy('');
+    }
+  }
+
+  async function disablePush() {
+    setPushBusy('disable');
+    setPushMessage('');
+    try {
+      await disablePushNotifications(loadWorkerConnection());
+      await refreshPushState();
+      setPushMessage('Push通知を解除しました。');
+    } catch (error) {
+      setPushMessage(error instanceof Error ? error.message : 'Push通知を解除できませんでした。');
+    } finally {
+      setPushBusy('');
+    }
+  }
+
+  async function testPush() {
+    setPushBusy('test');
+    setPushMessage('');
+    try {
+      const result = await sendTestPush(loadWorkerConnection());
+      setPushMessage(result.disabled
+        ? 'Worker側のVAPID設定がまだありません。'
+        : `テスト送信: ${result.sent}端末へ送信 / ${result.failed}件失敗`);
+    } catch (error) {
+      setPushMessage(error instanceof Error ? error.message : 'テストPushに失敗しました。');
+    } finally {
+      setPushBusy('');
+    }
   }
 
   async function syncStatus() {
@@ -112,6 +175,23 @@ export default function NotificationCenter() {
               <div><p className="eyebrow">SUPERVISOR INBOX</p><h2>通知</h2></div>
               <button className="icon-button" onClick={() => setOpen(false)}>×</button>
             </header>
+
+            <div className="push-card">
+              <div>
+                <b>📲 Background Push</b>
+                <small>{!pushState.supported ? 'この環境では未対応' : pushState.subscribed ? '有効・PWAを閉じても受信' : `未登録・権限 ${pushState.permission}`}</small>
+              </div>
+              <div className="push-actions">
+                {!pushState.subscribed
+                  ? <button onClick={enablePush} disabled={pushBusy === 'enable' || !pushState.supported}>{pushBusy === 'enable' ? '設定中…' : 'Pushを有効化'}</button>
+                  : <>
+                      <button onClick={testPush} disabled={pushBusy === 'test'}>{pushBusy === 'test' ? '送信中…' : 'テスト'}</button>
+                      <button onClick={disablePush} disabled={pushBusy === 'disable'}>{pushBusy === 'disable' ? '解除中…' : '解除'}</button>
+                    </>}
+              </div>
+            </div>
+            {pushMessage && <div className="notice-message">{pushMessage}</div>}
+
             <div className="notice-actions">
               <button onClick={syncStatus} disabled={syncing}>{syncing ? '同期中…' : '↻ 状態を同期'}</button>
               <button onClick={readAll}>すべて既読</button>
