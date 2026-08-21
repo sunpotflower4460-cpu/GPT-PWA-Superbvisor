@@ -7,6 +7,15 @@ import {
   getLatestDeveloperJob,
   handleDeveloperResponse,
 } from './developerAgent';
+import {
+  CreateGuardianRunBody,
+  advanceGuardianRun,
+  createGuardianRun,
+  getGuardianRun,
+  getGuardianRunIdForDeveloperJob,
+  getLatestGuardianRun,
+  sweepGuardianRuns,
+} from './guardianRunner';
 
 interface Env {
   OPENAI_API_KEY: string;
@@ -42,7 +51,11 @@ export default {
       return (baseWorker.fetch as BaseWorkerFetch)(request as never, env as never);
     }
 
-    if (url.pathname.startsWith('/api/developer-') || url.pathname.startsWith('/api/github-agent')) {
+    if (
+      url.pathname.startsWith('/api/developer-') ||
+      url.pathname.startsWith('/api/github-agent') ||
+      url.pathname.startsWith('/api/guardian-')
+    ) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(env, request) });
       if (!authorized(request, env)) return json({ error: 'unauthorized' }, 401, env, request);
     }
@@ -64,9 +77,9 @@ export default {
       return job ? json({ job }, 200, env, request) : json({ error: 'developer_job_not_found' }, 404, env, request);
     }
 
-    const latest = url.pathname.match(/^\/api\/developer-projects\/([^/]+)\/latest$/);
-    if (latest && request.method === 'GET') {
-      const job = await getLatestDeveloperJob(env, decodeURIComponent(latest[1]));
+    const latestDeveloper = url.pathname.match(/^\/api\/developer-projects\/([^/]+)\/latest$/);
+    if (latestDeveloper && request.method === 'GET') {
+      const job = await getLatestDeveloperJob(env, decodeURIComponent(latestDeveloper[1]));
       return job ? json({ job }, 200, env, request) : json({ error: 'developer_job_not_found' }, 404, env, request);
     }
 
@@ -75,7 +88,47 @@ export default {
       return json({ configured: Boolean(env.GITHUB_TOKEN?.trim()) && repositories.length > 0, repositories }, 200, env, request);
     }
 
+    if (url.pathname === '/api/guardian-runs' && request.method === 'POST') {
+      const body = await readJson<CreateGuardianRunBody>(request);
+      if (!body) return json({ error: 'invalid_json' }, 400, env, request);
+      try {
+        const run = await createGuardianRun(env, body);
+        return json({ run }, run.status === 'failed' ? 502 : 202, env, request);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : 'guardian_run_failed' }, 400, env, request);
+      }
+    }
+
+    const guardianRun = url.pathname.match(/^\/api\/guardian-runs\/([^/]+)$/);
+    if (guardianRun && request.method === 'GET') {
+      try {
+        const run = await advanceGuardianRun(env, decodeURIComponent(guardianRun[1]), { force: true });
+        return json({ run }, 200, env, request);
+      } catch (error) {
+        const existing = await getGuardianRun(env, decodeURIComponent(guardianRun[1]));
+        if (!existing) return json({ error: 'guardian_run_not_found' }, 404, env, request);
+        return json({ run: existing, warning: error instanceof Error ? error.message : 'guardian_refresh_failed' }, 200, env, request);
+      }
+    }
+
+    const latestGuardian = url.pathname.match(/^\/api\/guardian-projects\/([^/]+)\/latest$/);
+    if (latestGuardian && request.method === 'GET') {
+      const projectId = decodeURIComponent(latestGuardian[1]);
+      const latest = await getLatestGuardianRun(env, projectId);
+      if (!latest) return json({ error: 'guardian_run_not_found' }, 404, env, request);
+      try {
+        const run = await advanceGuardianRun(env, latest.id, { force: true });
+        return json({ run }, 200, env, request);
+      } catch (error) {
+        return json({ run: latest, warning: error instanceof Error ? error.message : 'guardian_refresh_failed' }, 200, env, request);
+      }
+    }
+
     return (baseWorker.fetch as BaseWorkerFetch)(request as never, env as never);
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(sweepGuardianRuns(env));
   },
 };
 
@@ -101,16 +154,18 @@ async function maybeHandleDeveloperWebhook(request: Request, env: Env): Promise<
 
   const responseId = event.data?.id;
   if (!responseId || !event.type.startsWith('response.')) return null;
-  const mapped = await env.SUPERVISOR_STATE.get(`developer-response:${responseId}`);
-  if (!mapped) return null;
+  const developerJobId = await env.SUPERVISOR_STATE.get(`developer-response:${responseId}`);
+  if (!developerJobId) return null;
 
   const dedupe = `developer-event:${webhookId}`;
   if (await env.SUPERVISOR_STATE.get(dedupe)) return Response.json({ ok: true, duplicate: true, developer: true });
 
   try {
     await handleDeveloperResponse(env, responseId);
+    const guardianRunId = await getGuardianRunIdForDeveloperJob(env, developerJobId);
+    if (guardianRunId) await advanceGuardianRun(env, guardianRunId, { force: true });
     await env.SUPERVISOR_STATE.put(dedupe, event.type, { expirationTtl: DEV_EVENT_TTL });
-    return Response.json({ ok: true, developer: true });
+    return Response.json({ ok: true, developer: true, guardian: Boolean(guardianRunId) });
   } catch (error) {
     return Response.json({ ok: false, error: error instanceof Error ? error.message : 'developer_webhook_failed' }, { status: 500 });
   }

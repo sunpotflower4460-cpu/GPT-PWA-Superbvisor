@@ -12,6 +12,9 @@
     "VAPID_SUBJECT": "mailto:you@example.com",
     "GITHUB_ALLOWED_REPOS": "owner/repository"
   },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "kv_namespaces": [
     {
       "binding": "SUPERVISOR_STATE",
