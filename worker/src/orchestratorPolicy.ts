@@ -56,6 +56,22 @@ export function isRetryableProviderStatus(status: number) {
   return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
 }
 
+function definitionOfDone(items?: string[]) {
+  return items?.length
+    ? items.map((item) => `- ${item}`).join('\n')
+    : '- Goalを満たすこと\n- 可能な検証を行うこと\n- 未確認事項と人間操作を明示すること';
+}
+
+export function buildGenericChatGptHandoff(input: {
+  projectName?: string;
+  goal: string;
+  currentPhase?: string;
+  task: string;
+  definitionOfDone?: string[];
+}) {
+  return `重要: この依頼の実行主体は、このChatGPTチャットです。Cloudflare WorkerやDeepSeek/MiniMax/OpenAI APIは監督・整理・次手生成だけを担当し、実作業を完了したふりをしてはいけません。\n\nPROJECT:\n${input.projectName || '未指定'}\n\nGOAL:\n${input.goal}\n\nCURRENT PHASE:\n${input.currentPhase || '未指定'}\n\nTASK:\n${input.task}\n\nDefinition of Done:\n${definitionOfDone(input.definitionOfDone)}\n\nこのChatGPTで利用可能なツール・接続先・現在の会話文脈を使って、実際にできる作業はここで進めてください。調査だけで終えず、安全に実行可能な実装・デバッグ・レビュー・検証は可能な範囲で実行してください。失敗した場合は同じ手順を漫然と繰り返さず、原因を確認して別手段または修正を試し、証拠を再確認してください。課金、秘密情報、本人確認、不可逆操作、本番公開など人間判断が必要なものだけ止めて明示してください。外部APIの要約だけを根拠に完成扱いせず、実際の結果・CI・取得できた証拠を優先してください。`;
+}
+
 export function buildChatGptHandoff(input: {
   repository: string;
   branch: string;
@@ -64,11 +80,7 @@ export function buildChatGptHandoff(input: {
   task: string;
   definitionOfDone?: string[];
 }) {
-  const dod = input.definitionOfDone?.length
-    ? input.definitionOfDone.map((item) => `- ${item}`).join('\n')
-    : '- Goalを満たすこと\n- 変更後に可能な検証を行うこと\n- 未確認事項を明示すること';
-
-  return `この作業の実装担当は、このChatGPTチャットです。外部APIは実装を行いません。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\nDefault branch: ${input.defaultBranch}\n\nGOAL:\n${input.goal}\n\nTASK:\n${input.task}\n\nDefinition of Done:\n${dod}\n\nGitHubを確認して必要な実装・デバッグ・テストをこのChatGPTから実際に行ってください。必ず指定branch上で作業し、main/default branchへ直接書き込まないでください。作業後はdiffとCIを確認し、失敗していたら原因を特定して修正→再確認まで進めてください。課金・秘密情報・本人確認・本番deploy・mergeなど人間判断が必要な操作は勝手に行わず、必要事項だけ明示してください。`;
+  return `この作業の実装担当は、このChatGPTチャットです。外部APIは実装を行いません。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\nDefault branch: ${input.defaultBranch}\n\nGOAL:\n${input.goal}\n\nTASK:\n${input.task}\n\nDefinition of Done:\n${definitionOfDone(input.definitionOfDone)}\n\nGitHubを確認して必要な実装・デバッグ・テストをこのChatGPTから実際に行ってください。必ず指定branch上で作業し、main/default branchへ直接書き込まないでください。作業後はdiffとCIを確認し、失敗していたら原因を特定して修正→再確認まで進めてください。課金・秘密情報・本人確認・本番deploy・mergeなど人間判断が必要な操作は勝手に行わず、必要事項だけ明示してください。`;
 }
 
 export function buildRecoveryPrompt(input: {
