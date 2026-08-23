@@ -2,6 +2,15 @@ import { DevProject } from './core';
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 
 export type ChatCommandStatus = 'queued' | 'claimed' | 'delivered' | 'failed' | 'cancelled';
+export type ChatProjectActivity =
+  | 'DELIVERING'
+  | 'RETRY_SCHEDULED'
+  | 'QUEUED'
+  | 'WAITING_BRIDGE'
+  | 'NEEDS_ATTENTION'
+  | 'DELIVERED'
+  | 'CONNECTED_IDLE'
+  | 'BRIDGE_OFFLINE';
 
 export interface ChatCommand {
   id: string;
@@ -30,12 +39,39 @@ export interface ChatBridgeStatus {
   capabilities: string[];
 }
 
+export interface ChatProjectOverview {
+  projectId: string;
+  activity: ChatProjectActivity;
+  bridgeConnected: boolean;
+  bridgeId?: string;
+  bridgeLastSeenAt?: string;
+  pendingRecentCount: number;
+  failedRecentCount: number;
+  latestCommandStatus?: ChatCommandStatus;
+  latestCommandAt?: string;
+  activeCommandId?: string;
+  nextAttemptAt?: string;
+  approximate: boolean;
+  error?: string;
+}
+
 export function chatCommandStatusLabel(status: ChatCommandStatus) {
   if (status === 'queued') return '送信待ち';
   if (status === 'claimed') return 'Bridge処理中';
   if (status === 'delivered') return '送信済み';
   if (status === 'failed') return '送信失敗';
   return '取消';
+}
+
+export function chatProjectActivityLabel(activity: ChatProjectActivity) {
+  if (activity === 'DELIVERING') return '配送中';
+  if (activity === 'RETRY_SCHEDULED') return '再試行待ち';
+  if (activity === 'QUEUED') return '送信待ち';
+  if (activity === 'WAITING_BRIDGE') return 'Bridge待ち';
+  if (activity === 'NEEDS_ATTENTION') return '要確認';
+  if (activity === 'DELIVERED') return '送信済み';
+  if (activity === 'CONNECTED_IDLE') return '接続中';
+  return 'Bridge offline';
 }
 
 export async function enqueueProjectChatCommand(
@@ -78,6 +114,18 @@ export async function getChatBridgeStatus(
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
   return workerFetch<ChatBridgeStatus>(connection, `/api/chat-bridge/status?projectId=${encodeURIComponent(projectId)}`, { method: 'GET' });
+}
+
+export async function getChatControlOverview(
+  projectIds: string[],
+  connection: WorkerConnection = loadWorkerConnection(),
+) {
+  const unique = [...new Set(projectIds.map((value) => value.trim()).filter(Boolean))].slice(0, 30);
+  if (!unique.length) return { projects: [] as ChatProjectOverview[] };
+  return workerFetch<{ projects: ChatProjectOverview[] }>(connection, '/api/chat-control/overview', {
+    method: 'POST',
+    body: JSON.stringify({ projectIds: unique }),
+  });
 }
 
 async function workerFetch<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
