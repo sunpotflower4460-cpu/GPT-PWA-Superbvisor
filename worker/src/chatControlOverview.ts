@@ -1,5 +1,10 @@
 import { ChatBridgeEnv, ChatBridgeStatus, getChatBridgeStatus } from './chatBridge';
-import { ChatCommand, ChatCommandEnv, listProjectChatCommands } from './chatCommandQueue';
+import {
+  ChatCommandEnv,
+  ChatCommandOverviewSnapshot,
+  ChatCommandStatus,
+  getProjectChatCommandOverview,
+} from './chatCommandQueue';
 
 export type ChatProjectActivity =
   | 'DELIVERING'
@@ -19,7 +24,7 @@ export interface ChatProjectOverview {
   bridgeLastSeenAt?: string;
   pendingRecentCount: number;
   failedRecentCount: number;
-  latestCommandStatus?: ChatCommand['status'];
+  latestCommandStatus?: ChatCommandStatus;
   latestCommandAt?: string;
   activeCommandId?: string;
   nextAttemptAt?: string;
@@ -29,17 +34,16 @@ export interface ChatProjectOverview {
 
 interface ChatControlOverviewEnv extends ChatCommandEnv, ChatBridgeEnv {}
 
-const OVERVIEW_COMMAND_LIMIT = 40;
 const RECENT_DELIVERY_MS = 90_000;
 
 export async function getChatControlOverview(env: ChatControlOverviewEnv, projectIds: string[]) {
   return Promise.all(projectIds.map(async (projectId): Promise<ChatProjectOverview> => {
     try {
-      const [commands, bridge] = await Promise.all([
-        listProjectChatCommands(env, projectId, OVERVIEW_COMMAND_LIMIT),
+      const [commandOverview, bridge] = await Promise.all([
+        getProjectChatCommandOverview(env, projectId),
         getChatBridgeStatus(env, projectId),
       ]);
-      return deriveChatProjectOverview(projectId, commands, bridge, Date.now(), commands.length >= OVERVIEW_COMMAND_LIMIT);
+      return deriveChatProjectOverview(projectId, commandOverview, bridge, Date.now());
     } catch (error) {
       return {
         projectId,
@@ -56,16 +60,11 @@ export async function getChatControlOverview(env: ChatControlOverviewEnv, projec
 
 export function deriveChatProjectOverview(
   projectId: string,
-  commands: ChatCommand[],
+  commandOverview: ChatCommandOverviewSnapshot,
   bridge: ChatBridgeStatus,
   nowMs = Date.now(),
-  approximate = false,
 ): ChatProjectOverview {
-  const newestFirst = [...commands].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const latest = newestFirst[0];
-  const unresolved = newestFirst.find((command) => command.status === 'claimed' || command.status === 'queued' || command.status === 'failed');
-  const pendingRecentCount = commands.filter((command) => command.status === 'queued' || command.status === 'claimed').length;
-  const failedRecentCount = commands.filter((command) => command.status === 'failed').length;
+  const { latest, unresolved } = commandOverview;
 
   let activity: ChatProjectActivity;
   if (unresolved?.status === 'claimed') {
@@ -93,12 +92,12 @@ export function deriveChatProjectOverview(
     bridgeConnected: bridge.connected,
     bridgeId: bridge.bridgeId,
     bridgeLastSeenAt: bridge.lastSeenAt,
-    pendingRecentCount,
-    failedRecentCount,
+    pendingRecentCount: commandOverview.pendingCount,
+    failedRecentCount: commandOverview.failedCount,
     latestCommandStatus: latest?.status,
     latestCommandAt: latest?.updatedAt || latest?.createdAt,
     activeCommandId: unresolved?.id,
     nextAttemptAt: unresolved?.nextAttemptAt,
-    approximate,
+    approximate: commandOverview.approximate,
   };
 }
