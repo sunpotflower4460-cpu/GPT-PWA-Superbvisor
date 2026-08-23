@@ -43,6 +43,8 @@ jobs:
         run: npm install
       - name: Build app
         run: npm run build
+      - name: Enforce mobile bundle budget
+        run: npm run bundle:budget
 
   worker-check:
     needs: concept-guard
