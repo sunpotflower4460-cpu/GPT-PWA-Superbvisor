@@ -30,6 +30,7 @@ import './setup-doctor.css';
 import './release-update.css';
 import './data-backup.css';
 import './chat-control.css';
+import './chat-bridge.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
