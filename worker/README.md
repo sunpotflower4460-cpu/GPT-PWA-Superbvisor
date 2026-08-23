@@ -9,6 +9,7 @@ AI DEV DECKの**外部オーケストレーション / durable control層**で�
 Cloudflare Workerと外部LLM APIは、次だけを担当します。
 
 - Chat Control Bus
+- compact all-chat overview
 - multi-device command coordination
 - 状態整理
 - ChatGPTへ渡す次手の生成
@@ -29,9 +30,13 @@ Cloudflare Workerと外部LLM APIは、次だけを担当します。
 PWA / Supervisor / Guardian
  ↓
 Cloudflare Worker
+ ├─ Multi Chat Overview
+ │    └─ compact batch summaries only
+ │
  ├─ ProjectCoordinator (SQLite Durable Object)
  │    ├─ atomic enqueue / dedupe
  │    ├─ one active Bridge claim owner
+ │    ├─ read-only command overview summary
  │    ├─ delivery retry / stale claim recovery
  │    ├─ Cloud State revision compare-and-update
  │    └─ Guardian advance execution lease
@@ -60,13 +65,52 @@ Coordinatorが担当する強整合境界:
 - 1 commandへ同時に複数Bridgeがclaimしない
 - stale/non-owner Bridgeからのresult overwriteを409で拒否
 - transient delivery failureを同じcommand IDでbackoff再試行
+- retry/requeue時に古いBridge ownershipを解放
 - terminal failureを明示retryで同じcommand IDのまま再queue
 - Cloud Stateのrevision conflictをatomicに判定
 - 同一Guardian runのCron/manual advance入口を短期execution leaseで1本に絞る
+- high-frequency UI overviewへcommand本文を返さずread-only summaryを提供
 
 Guardian leaseは通常の二重advanceを抑止するための入口ロックです。Guardian / Developerの全KV state writeをtransactional storageへ移したわけではなく、lease期限を超える異常に長い処理まで完全fencingできるとは扱いません。
 
 `PROJECT_COORDINATOR` がない場合は既存KV fallbackで基本動作しますが、**atomic multi-device guaranteeはありません**。`GET /health` の `atomicCoordinator` とPWAのSetup Doctorで確認できます。
+
+## Multi Chat overview
+
+PWAのChat Controlは、選択中だけでなく管理中の全ChatGPTのremote activityを同じ画面で表示します。
+
+PWAは次をbatch取得します。
+
+```http
+POST /api/chat-control/overview
+Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
+Content-Type: application/json
+
+{
+  "projectIds": ["project-a", "project-b"]
+}
+```
+
+1 requestあたり最大30 projectです。PWA側は30件を超える時に複数batchへ分割します。
+
+返却するのはcompact metadataだけです。
+
+- Bridge connected/offline
+- DELIVERING
+- RETRY_SCHEDULED
+- QUEUED
+- WAITING_BRIDGE
+- NEEDS_ATTENTION
+- DELIVERED
+- CONNECTED_IDLE
+- pending / failed count
+- latest status/timestamp
+- active command ID
+- next retry time
+
+Coordinator有効時、overviewは `/commands/overview` のread-only summaryを使います。**full prompt / command本文を取得せず、overview readだけを理由にKV history mirrorを書き直しません。**
+
+KV fallback時は最大100件からsummary化し、上限に達した場合は`approximate`として扱います。
 
 ## Failure resilience
 
@@ -74,6 +118,7 @@ Guardian leaseは通常の二重advanceを抑止するための入口ロック�
 - Provider失敗 → 次providerへfallback
 - 全provider失敗 → deterministic ChatGPT handoff
 - Bridge send failure → 同じcommand IDでbackoff再queue、上限後のみterminal failed
+- retry/requeue → 古いBridge ownershipを解除して次claimへ渡す
 - ChatGPT send成功 / Worker ack失敗 → Bridge delivery receiptを再同期し、本文の即再送を避ける
 - stale Bridge claim → 2分後に回収可能
 - Guardian Cron/manual refresh競合 → Coordinator有効時は同一runのadvance leaseを1実行だけ取得
@@ -235,6 +280,14 @@ GET /health
 
 PWAはここからChatGPT executor境界とAtomic Coordinator bindingを確認します。
 
+### Multi Chat overview
+
+```http
+POST /api/chat-control/overview
+```
+
+全案件のprimary rail用compact stateをbatch取得します。1 request最大30 projectです。
+
 ### Chat Control Bus
 
 ```http
@@ -315,6 +368,7 @@ POST /api/push/test
 
 **Strongly consistent / authoritative:**
 - Chat command ownership / dedupe / delivery retry
+- compact command overview summary
 - Cloud State revision compare-and-update
 - SQLite Durable Object `ProjectCoordinator`
 
@@ -331,6 +385,9 @@ POST /api/push/test
 
 ## Cost / safety
 
+- all-chat overviewはsummary-only + batch transport
+- overview pollでfull prompt/historyを繰り返し読まない
+- overview pollでKV mirror writeを増幅しない
 - 低コストproviderをprimaryにできる
 - 高価なmodelを毎回使わない
 - provider failureで別providerへfallback
