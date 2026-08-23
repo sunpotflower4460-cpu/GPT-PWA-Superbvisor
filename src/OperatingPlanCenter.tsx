@@ -95,20 +95,21 @@ export default function OperatingPlanCenter() {
 
   function save() {
     if (!persistPlan()) return;
-    setMessage('Operating Planを保存しました。今後の標準指示・Background・GitHub Agent・Guardianに反映されます。');
+    setMessage('Operating Planを保存しました。ChatGPT実行とSupervisor / Guardian監督の両方に反映されます。');
   }
 
   function markLocalExecution(route: ExecutionRoute, phase: string, at = new Date().toISOString(), status?: ProjectStatus) {
     if (!selected) return;
     const next = loadProjects().map((project) => {
       if (project.id !== selected.id) return project;
-      const executionMode: DevProject['executionMode'] = route === 'CHAT' ? 'CHAT' : 'API_WORKER';
-      const automationLevel: DevProject['automationLevel'] = route === 'GUARDIAN' ? 'GUARDIAN' : route === 'BACKGROUND' ? 'AUTO' : 'ASSIST';
+      // Actual work always belongs to ChatGPT. The route only changes the orchestration level.
+      const executionMode: DevProject['executionMode'] = 'CHAT';
+      const automationLevel: DevProject['automationLevel'] = route === 'GUARDIAN' ? 'GUARDIAN' : 'ASSIST';
       const event = {
         id: `execution-route:${route}:${at}`,
         at,
         kind: 'info' as const,
-        message: `実行ルートを${routeLabel(route)}へ切替: ${phase}`,
+        message: `ChatGPT実行 + ${routeLabel(route)}監督: ${phase}`,
       };
       return {
         ...project,
@@ -131,7 +132,7 @@ export default function OperatingPlanCenter() {
     try {
       const prompt = buildActionPrompt(selected, runAction);
       await navigator.clipboard.writeText(prompt);
-      setMessage('Planを保存し、ChatGPTへ貼る標準指示をコピーしました。追加API費用は発生しません。');
+      setMessage('Planを保存し、ChatGPTへ貼る実行指示をコピーしました。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '指示をコピーできませんでした。');
     } finally {
@@ -147,7 +148,7 @@ export default function OperatingPlanCenter() {
     try {
       const prompt = buildActionPrompt(selected, runAction);
       await navigator.clipboard.writeText(prompt);
-      markLocalExecution('CHAT', 'ChatへOperating Plan指示を準備');
+      markLocalExecution('CHAT', 'Operating Plan · ChatGPT実行指示を準備');
       setMessage(nextWindow
         ? 'Plan指示をコピーしてChatGPTを開きました。開いたチャットへ貼り付けて送信してください。'
         : 'Plan指示はコピーしました。ポップアップがブロックされたためChatGPTは手動で開いてください。');
@@ -164,16 +165,13 @@ export default function OperatingPlanCenter() {
     setMessage('');
     try {
       const prompt = buildActionPrompt(selected, runAction);
-      const job = await startBackgroundJob(selected, prompt, loadWorkerConnection(), {
-        autoRecover: true,
-        maxAutoRetries: 2,
-      });
+      const job = await startBackgroundJob(selected, prompt, loadWorkerConnection());
       setBackground(job);
       setGuardian(null);
-      markLocalExecution('BACKGROUND', `Background · ${job.status}`, job.updatedAt, 'RUNNING');
-      setMessage('Operating PlanをBackgroundへ渡しました。失敗/incomplete時は最大2回まで上限付きで自動復旧します。端末を閉じても処理は継続します。');
+      markLocalExecution('BACKGROUND', 'Supervisor · ChatGPT引き継ぎ指示準備済み', job.updatedAt, 'WAITING_USER');
+      setMessage('Supervisor APIが現在地点を整理し、ChatGPT用の次手を準備しました。APIは実作業を実行していません。');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Backgroundを開始できませんでした。');
+      setMessage(error instanceof Error ? error.message : 'Supervisor指示を準備できませんでした。');
     } finally {
       setBusy('');
     }
@@ -182,7 +180,7 @@ export default function OperatingPlanCenter() {
   async function runGuardian() {
     if (!selected || !persistPlan()) return;
     if (!selected.githubUrl) {
-      setMessage('Guardian実行には案件のGitHub URL登録が必要です。非GitHub案件はBackgroundを利用できます。');
+      setMessage('Guardian監督には案件のGitHub URL登録が必要です。非GitHub案件はSupervisorでChatGPT指示を準備できます。');
       return;
     }
     setBusy('guardian');
@@ -192,8 +190,8 @@ export default function OperatingPlanCenter() {
       const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection());
       setGuardian(run);
       setBackground(null);
-      markLocalExecution('GUARDIAN', `Guardian cycle ${run.cycle}/${run.maxCycles}`, run.updatedAt, run.status === 'waiting_ci' ? 'WAITING_AI' : 'RUNNING');
-      setMessage('Operating PlanをGuardianへ渡しました。実装→CI確認→必要なら同一branchで修正を、最大3 cycle / 3時間まで監督します。');
+      markLocalExecution('GUARDIAN', 'Guardian · ChatGPT実行待ち', run.updatedAt, 'WAITING_USER');
+      setMessage('Guardianが安全な作業branchとChatGPT指示を準備しました。以後はChatGPTの変更→現在headのCI→失敗時の復旧指示を監視します。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Guardianを開始できませんでした。');
     } finally {
@@ -235,7 +233,7 @@ export default function OperatingPlanCenter() {
 
             <div className="plan-note">
               <b>一度決めた「進め方」を毎回説明し直さない。</b>
-              <span>標準はChat-first。Planは実行方針を共有しますが、API Background / Guardianへは明示ボタンを押した時だけ昇格します。</span>
+              <span>実行者は常にChatGPT。Supervisor / Guardianは外部APIで監督・復旧・CI確認を補助します。</span>
             </div>
 
             {projects.length === 0 ? (
@@ -280,9 +278,9 @@ export default function OperatingPlanCenter() {
 
                     <div className="plan-rules">
                       <PlanToggle checked={plan.inspectBeforeWork} onChange={(value) => patch({ inspectBeforeWork: value })} title="最初に現状確認" detail="既完了を確認して重複を避ける" />
-                      <PlanToggle checked={plan.continueWithoutConfirmation} onChange={(value) => patch({ continueWithoutConfirmation: value })} title="途中確認で止まらない" detail="安全に進められる工程は連続実行" />
+                      <PlanToggle checked={plan.continueWithoutConfirmation} onChange={(value) => patch({ continueWithoutConfirmation: value })} title="途中確認で止まらない" detail="ChatGPTで安全に進められる工程は連続実行" />
                       <PlanToggle checked={plan.validateAndTest} onChange={(value) => patch({ validateAndTest: value })} title="テスト・検証する" detail="完成判定を自己申告だけにしない" />
-                      <PlanToggle checked={plan.recoverFromFailure} onChange={(value) => patch({ recoverFromFailure: value })} title="失敗時に復旧を試す" detail="原因を見て修正または別アプローチ" />
+                      <PlanToggle checked={plan.recoverFromFailure} onChange={(value) => patch({ recoverFromFailure: value })} title="失敗時に復旧を試す" detail="Guardianが証拠を整理しChatGPTへ修正指示" />
                       <PlanToggle checked={plan.selfReview} onChange={(value) => patch({ selfReview: value })} title="停止前に自己レビュー" detail="差分・副作用・未完了を確認" />
                       <PlanToggle checked={plan.finalReport} onChange={(value) => patch({ finalReport: value })} title="最後に短く報告" detail="実施内容・残作業・本人作業を整理" />
                     </div>
@@ -292,7 +290,7 @@ export default function OperatingPlanCenter() {
                     </label>
 
                     <details className="plan-preview">
-                      <summary>AIへ渡るPlanを確認</summary>
+                      <summary>ChatGPTへ渡るPlanを確認</summary>
                       <pre>{formatOperatingPlanPrompt(plan)}</pre>
                     </details>
 
@@ -300,27 +298,27 @@ export default function OperatingPlanCenter() {
 
                     <section className="execution-router">
                       <div className="execution-router-head">
-                        <div><b>実行先</b><small>通常はChat。必要な時だけターボ。</small></div>
+                        <div><b>実行・監督ルート</b><small>作業はChatGPT。必要な時だけ外部Supervisorを追加。</small></div>
                         <label className="execution-persist-toggle">
                           <input type="checkbox" checked={deviceIndependent} onChange={(event) => setDeviceIndependent(event.target.checked)} />
-                          <span>端末を閉じても続けたい</span>
+                          <span>端末を閉じても監督を残したい</span>
                         </label>
                       </div>
 
                       <div className="execution-route-grid">
-                        <RouteCard route="CHAT" recommended={recommendedRoute === 'CHAT'} disabled={Boolean(busy)} title="💬 Chat" detail="追加API費用なし。指示をコピーしてChatGPTで進める。" onClick={copyAndOpenChat} />
-                        <RouteCard route="BACKGROUND" recommended={recommendedRoute === 'BACKGROUND'} disabled={Boolean(busy)} title="⚡ Background" detail="非GitHub作業や長い分析を端末非依存で。Auto Recovery最大2回。" onClick={runBackground} />
-                        <RouteCard route="GUARDIAN" recommended={recommendedRoute === 'GUARDIAN'} disabled={Boolean(busy) || !selected.githubUrl} title="🛡 Guardian" detail={selected.githubUrl ? 'GitHub実装→CI→失敗時修正を最大3 cycle監督。' : 'GitHub URL登録済み案件のみ。'} onClick={runGuardian} />
+                        <RouteCard route="CHAT" recommended={recommendedRoute === 'CHAT'} disabled={Boolean(busy)} title="💬 ChatGPT" detail="実装・デバッグ・レビューを実際に行う本体。追加API費用なし。" onClick={copyAndOpenChat} />
+                        <RouteCard route="BACKGROUND" recommended={recommendedRoute === 'BACKGROUND'} disabled={Boolean(busy)} title="⚡ Supervisor" detail="DeepSeek/MiniMax等で低コストに状態整理・次手生成。実作業はChatGPT。" onClick={runBackground} />
+                        <RouteCard route="GUARDIAN" recommended={recommendedRoute === 'GUARDIAN'} disabled={Boolean(busy) || !selected.githubUrl} title="🛡 Guardian" detail={selected.githubUrl ? 'ChatGPT変更→CI監視→失敗時復旧指示を継続。' : 'GitHub URL登録済み案件のみ。'} onClick={runGuardian} />
                       </div>
 
                       <button className={`execution-recommended ${recommendedRoute.toLowerCase()}`} disabled={Boolean(busy)} onClick={runRecommended}>{busy ? '準備中…' : `推奨: ${routeLabel(recommendedRoute)} でPlanを開始`}</button>
-                      <button className="execution-copy-only" disabled={Boolean(busy)} onClick={copyChatPrompt}>Chat用指示だけコピー</button>
-                      <p className="plan-cost-note">Background / Guardianは明示クリック時だけOpenAI APIを利用します。Workへは自動切替しません。</p>
+                      <button className="execution-copy-only" disabled={Boolean(busy)} onClick={copyChatPrompt}>ChatGPT実行指示だけコピー</button>
+                      <p className="plan-cost-note">Supervisor / GuardianのLLM APIはオーケストレーション専用です。コード実装・GitHub編集を外部モデルへ委譲しません。</p>
                     </section>
 
-                    {background && <article className={`plan-run-status background ${background.status}`}><div><b>Background · {background.status}</b><span>attempt {(background.retryCount ?? 0) + 1}/{(background.maxAutoRetries ?? 0) + 1}</span></div><p>{background.checkpoint?.summary || background.report?.summary || 'BackgroundへPlanを引き継ぎました。'}</p></article>}
+                    {background && <article className="plan-run-status background completed"><div><b>Supervisor · GPT HANDOFF READY</b><span>{background.orchestratorProvider || 'deterministic'} / {background.model}</span></div><p>{background.checkpoint?.summary || background.report?.summary || 'ChatGPTへ渡すPlanを準備しました。'}</p>{background.handoffPrompt && <button onClick={() => void copyAndOpenSpecificChat(background.handoffPrompt!, selected.chatUrl)}>ChatGPTで実行 ↗</button>}</article>}
 
-                    {guardian && <article className={`plan-run-status ${guardian.status}`}><div><b>Guardian · {guardian.status}</b><span>cycle {guardian.cycle}/{guardian.maxCycles}</span></div><p>{guardian.message || 'GuardianへPlanを引き継ぎました。'}</p>{guardian.pullRequest && <button onClick={() => window.open(guardian.pullRequest!.url, '_blank', 'noopener,noreferrer')}>Draft PR #{guardian.pullRequest.number} ↗</button>}</article>}
+                    {guardian && <article className={`plan-run-status ${guardian.status}`}><div><b>Guardian · {guardian.status}</b><span>復旧 {guardian.recoveryCount || 0}回</span></div><p>{guardian.message || 'Guardian監督を開始しました。'}</p>{guardian.handoffPrompt && guardian.status !== 'completed' && <button onClick={() => void copyAndOpenSpecificChat(guardian.handoffPrompt!, selected.chatUrl)}>ChatGPTで続ける ↗</button>}{guardian.pullRequest && <button onClick={() => openGitHub(guardian.pullRequest!.url)}>Draft PR #{guardian.pullRequest.number} ↗</button>}</article>}
                     {message && <div className="plan-message">{message}</div>}
                   </div>
                 )}
@@ -342,9 +340,14 @@ function PlanToggle({ checked, onChange, title, detail }: { checked: boolean; on
 }
 
 function routeLabel(route: ExecutionRoute) {
-  if (route === 'GUARDIAN') return 'Guardian';
-  if (route === 'BACKGROUND') return 'Background';
-  return 'Chat';
+  if (route === 'GUARDIAN') return 'ChatGPT + Guardian';
+  if (route === 'BACKGROUND') return 'ChatGPT + Supervisor';
+  return 'ChatGPT';
+}
+
+async function copyAndOpenSpecificChat(prompt: string, value?: string) {
+  try { await navigator.clipboard.writeText(prompt); } catch { /* opening Chat still helps */ }
+  window.open(safeChatUrl(value) || 'https://chatgpt.com/', '_blank', 'noopener,noreferrer');
 }
 
 function safeChatUrl(value?: string) {
@@ -357,4 +360,11 @@ function safeChatUrl(value?: string) {
   } catch {
     return null;
   }
+}
+
+function openGitHub(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' && url.hostname.toLowerCase() === 'github.com') window.open(url.toString(), '_blank', 'noopener,noreferrer');
+  } catch { /* ignore unsafe URL */ }
 }
