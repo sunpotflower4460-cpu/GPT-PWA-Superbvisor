@@ -5,6 +5,7 @@ import {
   ChatBridgeStatus,
   ChatCommand,
   ChatProjectOverview,
+  cancelProjectChatCommand,
   chatCommandStatusLabel,
   chatProjectActivityLabel,
   enqueueProjectChatCommand,
@@ -197,8 +198,29 @@ export default function ChatControlCenter() {
   }
 
   async function manualFallback(command: ChatCommand) {
-    try { await navigator.clipboard.writeText(command.prompt); } catch { /* opening the chat still helps */ }
-    window.open(command.chatUrl, '_blank', 'noopener,noreferrer');
+    const chatUrl = safeChatUrl(command.chatUrl);
+    if (!chatUrl) {
+      setMessage('安全なChatGPT URLではないため手動fallbackを開始できません。');
+      return;
+    }
+
+    const popup = window.open('about:blank', '_blank');
+    if (popup) popup.opener = null;
+    setBusy(`${command.projectId}:manual:${command.id}`);
+    setMessage('自動配送を停止してから手動ChatGPTへ切り替えています…');
+    try {
+      await cancelProjectChatCommand(command.projectId, command.id);
+      await Promise.all([refreshCommands(), refreshProjectOverview(command.projectId)]);
+      try { await navigator.clipboard.writeText(command.prompt); } catch { /* prompt remains visible in the cancelled history row */ }
+      if (popup) popup.location.replace(chatUrl);
+      else window.open(chatUrl, '_blank', 'noopener,noreferrer');
+      setMessage('自動Queueを取消してからChatGPTを開きました。同じ指示がBridgeから後で重複配送されることはありません。');
+    } catch (error) {
+      if (popup) popup.close();
+      setMessage(`${error instanceof Error ? error.message : 'commandを安全に取消できませんでした。'} 自動配送が残っている可能性があるため、手動送信は開始していません。`);
+    } finally {
+      setBusy('');
+    }
   }
 
   return (
@@ -317,7 +339,7 @@ export default function ChatControlCenter() {
                             <button className="chat-manual-fallback" disabled={Boolean(busy)} onClick={() => void retryFailed(command)}>同じcommandを再試行 ↻</button>
                           )}
                           {(command.status === 'queued' || command.status === 'failed') && (
-                            <button className="chat-manual-fallback" onClick={() => void manualFallback(command)}>ChatGPTで手動送信 ↗</button>
+                            <button className="chat-manual-fallback" disabled={Boolean(busy)} onClick={() => void manualFallback(command)}>自動Queueを止めて手動送信 ↗</button>
                           )}
                         </article>
                       ))}
