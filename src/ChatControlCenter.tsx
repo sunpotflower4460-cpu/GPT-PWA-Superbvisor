@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { buildActionPrompt, loadProjects, quickActions, type DevProject } from './core';
 import { getOperatingPlan, formatOperatingPlanPrompt } from './operatingPlan';
 import {
+  ChatBridgeStatus,
   ChatCommand,
   chatCommandStatusLabel,
   enqueueProjectChatCommand,
+  getChatBridgeStatus,
   listProjectChatCommands,
 } from './chatControl';
 
@@ -16,6 +18,7 @@ export default function ChatControlCenter() {
   const [selectedId, setSelectedId] = useState('');
   const [prompt, setPrompt] = useState('');
   const [commands, setCommands] = useState<ChatCommand[]>([]);
+  const [bridge, setBridge] = useState<ChatBridgeStatus>({ connected: false, capabilities: [] });
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
 
@@ -38,10 +41,16 @@ export default function ChatControlCenter() {
     let cancelled = false;
     const refresh = async () => {
       try {
-        const result = await listProjectChatCommands(selected.id);
-        if (!cancelled) setCommands(result.commands);
+        const [commandResult, bridgeResult] = await Promise.all([
+          listProjectChatCommands(selected.id),
+          getChatBridgeStatus(),
+        ]);
+        if (!cancelled) {
+          setCommands(commandResult.commands);
+          setBridge(bridgeResult);
+        }
       } catch (error) {
-        if (!cancelled) setMessage(error instanceof Error ? error.message : '送信キューを取得できませんでした。');
+        if (!cancelled) setMessage(error instanceof Error ? error.message : 'Chat Control状態を取得できませんでした。');
       }
     };
     void refresh();
@@ -58,14 +67,19 @@ export default function ChatControlCenter() {
     setSelectedId(nextId);
     setPrompt('');
     setCommands([]);
+    setBridge({ connected: false, capabilities: [] });
     setMessage('');
     setOpen(true);
   }
 
   async function refreshCommands(project = selected) {
     if (!project) return;
-    const result = await listProjectChatCommands(project.id);
-    setCommands(result.commands);
+    const [commandResult, bridgeResult] = await Promise.all([
+      listProjectChatCommands(project.id),
+      getChatBridgeStatus(),
+    ]);
+    setCommands(commandResult.commands);
+    setBridge(bridgeResult);
   }
 
   async function queue(project: DevProject, value: string, source: string) {
@@ -76,7 +90,9 @@ export default function ChatControlCenter() {
     try {
       await enqueueProjectChatCommand(project, text);
       if (project.id === selected?.id) await refreshCommands(project);
-      setMessage(`${project.name} のChatGPT送信キューへ追加しました。PWAを閉じてもWorker側に残ります。`);
+      setMessage(bridge.connected
+        ? `${project.name} の送信キューへ追加しました。接続中Bridgeが取得して対象ChatGPTへ配送します。`
+        : `${project.name} の送信キューへ追加しました。PWAを閉じてもWorker側に残り、Bridge接続後に配送できます。`);
       if (source === 'free') setPrompt('');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'ChatGPT指示をキューへ追加できませんでした。');
@@ -115,12 +131,16 @@ export default function ChatControlCenter() {
           <section className="chat-control-sheet">
             <header className="chat-control-header">
               <div><p className="eyebrow">MULTI CHAT REMOTE</p><h2>Chat Control</h2></div>
-              <button className="icon-button" onClick={() => setOpen(false)}>×</button>
+              <div className="chat-control-header-actions">
+                <span className={`bridge-live ${bridge.connected ? 'connected' : 'offline'}`}>{bridge.connected ? '● Bridge接続中' : '○ Bridge待ち'}</span>
+                <button className="icon-button" onClick={() => setOpen(false)}>×</button>
+              </div>
             </header>
 
             <div className="chat-control-note">
               <b>複数の開発ChatGPTを、このPWAからまとめて動かす。</b>
               <span>指示はWorkerへ永続キュー保存。ChatGPT側Bridgeが接続されると、PWAを離れず各既存チャットへ配送できる設計です。</span>
+              {bridge.lastSeenAt && <small>Bridge: {bridge.bridgeId || 'unknown'} ・ 最終heartbeat {new Date(bridge.lastSeenAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small>}
             </div>
 
             {!projects.length ? (
@@ -171,7 +191,7 @@ export default function ChatControlCenter() {
                       disabled={!selected.chatUrl || !prompt.trim() || Boolean(busy)}
                       onClick={() => void queue(selected, prompt, 'free')}
                     >
-                      {busy ? 'キューへ追加中…' : 'このチャットの送信キューへ ▶'}
+                      {busy ? 'キューへ追加中…' : bridge.connected ? 'このChatGPTへ送る ▶' : '送信キューへ保存 ▶'}
                     </button>
 
                     <section className="chat-command-queue">
