@@ -15,6 +15,7 @@ export default function HandoffCenter() {
     () => projects.find((project) => project.id === selectedId) ?? projects[0] ?? null,
     [projects, selectedId],
   );
+  const selectedChatUrl = safeChatUrl(selected?.chatUrl);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -107,7 +108,7 @@ export default function HandoffCenter() {
                     <div className="handoff-actions">
                       <button disabled={!packet} onClick={copyPacket}>{copied ? '✓ コピー済み' : 'コピー'}</button>
                       <button className="handoff-primary" onClick={copyAndOpen}>コピーして新しいChatを開く ↗</button>
-                      {selected.chatUrl && <button onClick={() => window.open(selected.chatUrl, '_blank', 'noopener,noreferrer')}>元Chatを開く</button>}
+                      {selectedChatUrl && <button onClick={() => window.open(selectedChatUrl, '_blank', 'noopener,noreferrer')}>元Chatを開く</button>}
                     </div>
                   </div>
                 )}
@@ -119,4 +120,16 @@ export default function HandoffCenter() {
       )}
     </>
   );
+}
+
+function safeChatUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com')) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
