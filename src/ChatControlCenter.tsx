@@ -118,6 +118,22 @@ export default function ChatControlCenter() {
     setPrompt(`この案件を保存済みAutopilot Routeに従って継続してください。\n\n${formatOperatingPlanPrompt(plan)}\n\n完了済み工程を再実行せず、未完了地点から再開してください。途中の成功を最終完了と誤認せず、指定ルート全体の到達地点まで進めてください。`);
   }
 
+  async function connectBridge(project: DevProject) {
+    const chatUrl = safeChatUrl(project.chatUrl);
+    if (!chatUrl) {
+      setMessage('安全なChatGPT URLが登録されていないためBridge接続を開始できません。');
+      return;
+    }
+    const instruction = `この開発チャットをAI DEV DECKから遠隔操作できるように、接続済みのAI DEV DECK ChatGPT Bridgeアプリを使ってBridgeを接続してください。\n\nprojectId: ${project.id}\nprojectName: ${project.name}\n\n利用するtool: connect_ai_dev_deck_bridge\nこのチャット自体を実装・デバッグ・GitHub編集の実行主体として維持し、BridgeはPWAから届く次ターン指示の中継だけに使ってください。`;
+    try {
+      await navigator.clipboard.writeText(instruction);
+      setMessage('Bridge接続指示をコピーしました。開いたChatGPTへ一度だけ貼り付けて送信してください。接続後はPWA側から指示できます。');
+    } catch {
+      setMessage('ChatGPTを開きます。Bridge toolへこの案件のprojectIdを指定して接続してください。');
+    }
+    window.open(chatUrl, '_blank', 'noopener,noreferrer');
+  }
+
   async function manualFallback(command: ChatCommand) {
     try { await navigator.clipboard.writeText(command.prompt); } catch { /* opening the chat still helps */ }
     window.open(command.chatUrl, '_blank', 'noopener,noreferrer');
@@ -168,7 +184,10 @@ export default function ChatControlCenter() {
                   <div className="chat-control-main">
                     <section className="chat-session-head">
                       <div><span>選択中</span><h3>{selected.name}</h3><p>{selected.currentPhase}</p></div>
-                      <div className={`bridge-badge ${selected.chatUrl ? 'ready' : 'missing'}`}>{selected.chatUrl ? 'Chat URL ✓' : 'URL未登録'}</div>
+                      <div className="chat-session-actions">
+                        <div className={`bridge-badge ${selected.chatUrl ? 'ready' : 'missing'}`}>{selected.chatUrl ? 'Chat URL ✓' : 'URL未登録'}</div>
+                        {!bridge.connected && selected.chatUrl && <button className="bridge-connect-button" onClick={() => void connectBridge(selected)}>Bridgeを接続 ↗</button>}
+                      </div>
                     </section>
 
                     <div className="chat-control-quick">
@@ -222,4 +241,16 @@ export default function ChatControlCenter() {
       )}
     </>
   );
+}
+
+function safeChatUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com')) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
