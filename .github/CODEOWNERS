@@ -11,14 +11,17 @@
 /src/App.tsx @sunpotflower4460-cpu
 /src/core.ts @sunpotflower4460-cpu
 /src/ChatControlCenter.tsx @sunpotflower4460-cpu
+/src/chatControl.ts @sunpotflower4460-cpu
+/src/chat-control.css @sunpotflower4460-cpu
 /src/OperatingPlanCenter.tsx @sunpotflower4460-cpu
 /src/RuntimeProjectSync.tsx @sunpotflower4460-cpu
 /src/supervisor.ts @sunpotflower4460-cpu
 /src/SetupDoctorCenter.tsx @sunpotflower4460-cpu
 
-# Strong consistency / state boundary
+# Strong consistency / state / overview boundary
 /worker/src/projectCoordinator.ts @sunpotflower4460-cpu
 /worker/src/chatCommandQueue.ts @sunpotflower4460-cpu
+/worker/src/chatControlOverview.ts @sunpotflower4460-cpu
 /worker/src/stateSync.ts @sunpotflower4460-cpu
 /worker/wrangler.example.jsonc @sunpotflower4460-cpu
 /worker/wrangler.ci.jsonc @sunpotflower4460-cpu
