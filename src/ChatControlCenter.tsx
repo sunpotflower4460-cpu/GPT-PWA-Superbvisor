@@ -42,7 +42,7 @@ export default function ChatControlCenter() {
     return {
       connected: values.filter((item) => item.bridgeConnected).length,
       active: values.filter((item) => ['DELIVERING', 'RETRY_SCHEDULED', 'QUEUED', 'WAITING_BRIDGE'].includes(item.activity)).length,
-      attention: values.filter((item) => item.activity === 'NEEDS_ATTENTION').length,
+      attention: values.filter((item) => item.activity === 'NEEDS_ATTENTION' || item.activity === 'OVERVIEW_ERROR').length,
     };
   }, [overviews]);
 
