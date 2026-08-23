@@ -8,6 +8,7 @@ import {
   listProjectChatCommands,
   updateChatCommandResult,
 } from './chatCommandQueue';
+import { getChatBridgeStatus, recordChatBridgeHeartbeat } from './chatBridge';
 import {
   getVapidPublicKey,
   registerPushSubscription,
@@ -96,6 +97,7 @@ export default {
         executor: 'chatgpt',
         orchestrationOnly: true,
         chatCommandBus: true,
+        chatBridgeHeartbeat: true,
       }, 200, env, request);
     }
 
@@ -121,6 +123,23 @@ export default {
 
     if (url.pathname === '/api/chat-commands/claim' && request.method === 'POST') {
       return claimChatCommand(request, env);
+    }
+
+    if (url.pathname === '/api/chat-bridge/status' && request.method === 'GET') {
+      return json(await getChatBridgeStatus(env), 200, env, request);
+    }
+
+    if (url.pathname === '/api/chat-bridge/heartbeat' && request.method === 'POST') {
+      const body = await readJson<{ bridgeId?: string; capabilities?: string[] }>(request);
+      try {
+        const status = await recordChatBridgeHeartbeat(env, {
+          bridgeId: body?.bridgeId || '',
+          capabilities: body?.capabilities,
+        });
+        return json(status, 200, env, request);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : 'invalid_bridge_heartbeat' }, 400, env, request);
+      }
     }
 
     const chatCommandMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)$/);
