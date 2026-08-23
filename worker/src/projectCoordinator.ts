@@ -27,18 +27,29 @@ export interface CoordinatorCloudState {
   data: unknown;
 }
 
+export interface CoordinatorLease {
+  name: string;
+  token: string;
+  owner: string;
+  acquiredAt: string;
+  expiresAt: string;
+}
+
 export interface AtomicCoordinatorEnv {
   PROJECT_COORDINATOR?: DurableObjectNamespace;
 }
 
 const COMMAND_PREFIX = 'command:';
 const DEDUPE_PREFIX = 'dedupe:';
+const LEASE_PREFIX = 'lease:';
 const COMMANDS_MIGRATED_KEY = 'meta:commands-migrated-v1';
 const STATE_KEY = 'client-state:v1';
 const STATE_MIGRATED_KEY = 'meta:state-migrated-v1';
 const COMMAND_RETENTION_MS = 14 * 24 * 60 * 60_000;
 const CLAIM_STALE_MS = 2 * 60_000;
 const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
+const MIN_LEASE_MS = 5_000;
+const MAX_LEASE_MS = 10 * 60_000;
 
 export class ProjectCoordinator {
   constructor(private readonly state: DurableObjectState) {}
@@ -239,6 +250,58 @@ export class ProjectCoordinator {
       return json({ ok: true });
     }
 
+    if (url.pathname === '/lease/acquire' && request.method === 'POST') {
+      const body = await readJson<{ name?: string; owner?: string; ttlMs?: number }>(request);
+      const name = body?.name?.trim().slice(0, 160) || '';
+      const owner = body?.owner?.trim().slice(0, 200) || '';
+      if (!name || !owner) return json({ error: 'lease name and owner are required' }, 400);
+      const nowMs = Date.now();
+      const key = leaseKey(name);
+      const current = await this.state.storage.get<CoordinatorLease>(key);
+      if (current && new Date(current.expiresAt).getTime() > nowMs) {
+        return json({ acquired: false, lease: current }, 409);
+      }
+      const ttlMs = clamp(Number(body?.ttlMs || 180_000), MIN_LEASE_MS, MAX_LEASE_MS);
+      const lease: CoordinatorLease = {
+        name,
+        token: crypto.randomUUID(),
+        owner,
+        acquiredAt: new Date(nowMs).toISOString(),
+        expiresAt: new Date(nowMs + ttlMs).toISOString(),
+      };
+      await this.state.storage.put(key, lease);
+      return json({ acquired: true, lease });
+    }
+
+    if (url.pathname === '/lease/renew' && request.method === 'POST') {
+      const body = await readJson<{ name?: string; token?: string; ttlMs?: number }>(request);
+      const name = body?.name?.trim().slice(0, 160) || '';
+      const token = body?.token?.trim().slice(0, 200) || '';
+      if (!name || !token) return json({ error: 'lease name and token are required' }, 400);
+      const key = leaseKey(name);
+      const current = await this.state.storage.get<CoordinatorLease>(key);
+      if (!current || current.token !== token) return json({ error: 'lease_owner_mismatch' }, 409);
+      const nowMs = Date.now();
+      if (new Date(current.expiresAt).getTime() <= nowMs) return json({ error: 'lease_expired' }, 409);
+      const ttlMs = clamp(Number(body?.ttlMs || 180_000), MIN_LEASE_MS, MAX_LEASE_MS);
+      const lease = { ...current, expiresAt: new Date(nowMs + ttlMs).toISOString() };
+      await this.state.storage.put(key, lease);
+      return json({ renewed: true, lease });
+    }
+
+    if (url.pathname === '/lease/release' && request.method === 'POST') {
+      const body = await readJson<{ name?: string; token?: string }>(request);
+      const name = body?.name?.trim().slice(0, 160) || '';
+      const token = body?.token?.trim().slice(0, 200) || '';
+      if (!name || !token) return json({ error: 'lease name and token are required' }, 400);
+      const key = leaseKey(name);
+      const current = await this.state.storage.get<CoordinatorLease>(key);
+      if (!current) return json({ released: true });
+      if (current.token !== token) return json({ error: 'lease_owner_mismatch' }, 409);
+      await this.state.storage.delete(key);
+      return json({ released: true });
+    }
+
     return json({ error: 'not_found' }, 404);
   }
 
@@ -334,6 +397,39 @@ export async function coordinatorFetch<T>(
   return { ok: response.ok, status: response.status, data };
 }
 
+export async function acquireCoordinatorLease(
+  env: AtomicCoordinatorEnv,
+  scope: string,
+  input: { name: string; owner: string; ttlMs?: number },
+) {
+  return coordinatorFetch<{ acquired?: boolean; lease?: CoordinatorLease; error?: string }>(env, scope, '/lease/acquire', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function renewCoordinatorLease(
+  env: AtomicCoordinatorEnv,
+  scope: string,
+  input: { name: string; token: string; ttlMs?: number },
+) {
+  return coordinatorFetch<{ renewed?: boolean; lease?: CoordinatorLease; error?: string }>(env, scope, '/lease/renew', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function releaseCoordinatorLease(
+  env: AtomicCoordinatorEnv,
+  scope: string,
+  input: { name: string; token: string },
+) {
+  return coordinatorFetch<{ released?: boolean; error?: string }>(env, scope, '/lease/release', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 function isStoredCommand(value: unknown): value is CoordinatorChatCommand {
   if (!value || typeof value !== 'object') return false;
   const item = value as Partial<CoordinatorChatCommand>;
@@ -362,6 +458,10 @@ function isStoredCloudState(value: unknown): value is CoordinatorCloudState {
 
 function dedupeKey(value: string) {
   return `${DEDUPE_PREFIX}${encodeURIComponent(value)}`;
+}
+
+function leaseKey(value: string) {
+  return `${LEASE_PREFIX}${encodeURIComponent(value)}`;
 }
 
 function clamp(value: number, min: number, max: number) {
