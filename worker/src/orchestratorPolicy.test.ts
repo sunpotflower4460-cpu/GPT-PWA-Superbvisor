@@ -83,7 +83,7 @@ describe('recovery safety', () => {
       projectName: 'Research', goal: 'Finish safely', currentPhase: 'analysis', task: 'Continue', definitionOfDone: ['Evidence checked'],
     });
     expect(prompt).toContain('実行主体は、このChatGPTチャット');
-    expect(prompt).toContain('外部APIは監督・整理・次手生成だけ');
+    expect(prompt).toContain('監督・整理・次手生成だけを担当');
     expect(prompt).toContain('外部APIの要約だけを根拠に完成扱いせず');
   });
 });
