@@ -63,6 +63,6 @@ jobs:
       - name: Install ChatGPT bridge dependencies
         working-directory: chatgpt-bridge
         run: npm install
-      - name: Typecheck ChatGPT bridge
+      - name: Typecheck and dry-run ChatGPT bridge
         working-directory: chatgpt-bridge
-        run: npm run typecheck
+        run: npm run check
