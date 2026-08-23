@@ -13,6 +13,7 @@ export interface ChatCommand {
   deliveredAt?: string;
   bridgeId?: string;
   detail?: string;
+  claimAttempts?: number;
 }
 
 export interface ChatCommandEnv {
@@ -22,6 +23,7 @@ export interface ChatCommandEnv {
 const COMMAND_TTL = 60 * 60 * 24 * 14;
 const COMMAND_PREFIX = 'chat-command:';
 const PROJECT_PREFIX = 'chat-project:';
+const CLAIM_STALE_MS = 2 * 60_000;
 
 export function normalizeChatUrl(value: string) {
   try {
@@ -37,6 +39,13 @@ export function normalizeChatUrl(value: string) {
 
 export function sanitizePrompt(value: string) {
   return value.trim().slice(0, 24_000);
+}
+
+export function isClaimableCommand(command: ChatCommand, now = Date.now()) {
+  if (command.status === 'queued') return true;
+  if (command.status !== 'claimed' || !command.claimedAt) return false;
+  const claimedAt = new Date(command.claimedAt).getTime();
+  return Number.isFinite(claimedAt) && now - claimedAt >= CLAIM_STALE_MS;
 }
 
 export async function enqueueChatCommand(env: ChatCommandEnv, input: {
@@ -60,6 +69,7 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
     status: 'queued',
     createdAt: now,
     updatedAt: now,
+    claimAttempts: 0,
   };
   await saveCommand(env, command);
   await rememberProjectCommand(env, command);
@@ -85,16 +95,19 @@ export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string
   const commands = projectId
     ? await listProjectChatCommands(env, projectId, 100)
     : await listQueuedCommands(env, 100);
-  const next = commands.filter((command) => command.status === 'queued').sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+  const next = commands.filter((command) => isClaimableCommand(command)).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
   if (!next) return null;
 
   const now = new Date().toISOString();
+  const recoveredStaleClaim = next.status === 'claimed';
   const claimed: ChatCommand = {
     ...next,
     status: 'claimed',
     bridgeId: bridgeId.trim().slice(0, 200) || 'unknown-bridge',
     claimedAt: now,
     updatedAt: now,
+    claimAttempts: (next.claimAttempts ?? 0) + 1,
+    detail: recoveredStaleClaim ? 'Recovered a stale bridge claim and reassigned the command.' : next.detail,
   };
   await saveCommand(env, claimed);
   return claimed;
