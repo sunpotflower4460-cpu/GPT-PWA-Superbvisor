@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assessCi,
   buildChatGptHandoff,
+  buildGenericChatGptHandoff,
   buildRecoveryPrompt,
   failureFingerprint,
   isRetryableProviderStatus,
@@ -65,7 +66,7 @@ describe('recovery safety', () => {
     expect(isRetryableProviderStatus(401)).toBe(false);
   });
 
-  it('makes the ChatGPT executor boundary explicit in initial and recovery prompts', () => {
+  it('makes the ChatGPT executor boundary explicit in GitHub initial and recovery prompts', () => {
     const initial = buildChatGptHandoff({
       repository: 'owner/repo', branch: 'ai-dev-deck/task', defaultBranch: 'main', goal: 'Ship safely', task: 'Fix CI',
     });
@@ -75,5 +76,14 @@ describe('recovery safety', () => {
     expect(initial).toContain('実装担当は、このChatGPTチャット');
     expect(initial).toContain('外部APIは実装を行いません');
     expect(recovery).toContain('実装修正担当は、このChatGPTチャット');
+  });
+
+  it('makes generic non-GitHub handoffs orchestration-only too', () => {
+    const prompt = buildGenericChatGptHandoff({
+      projectName: 'Research', goal: 'Finish safely', currentPhase: 'analysis', task: 'Continue', definitionOfDone: ['Evidence checked'],
+    });
+    expect(prompt).toContain('実行主体は、このChatGPTチャット');
+    expect(prompt).toContain('外部APIは監督・整理・次手生成だけ');
+    expect(prompt).toContain('外部APIの要約だけを根拠に完成扱いせず');
   });
 });
