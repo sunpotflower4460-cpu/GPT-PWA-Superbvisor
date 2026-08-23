@@ -1,92 +1,177 @@
 # AI DEV DECK ChatGPT Bridge
 
-This is the ChatGPT-side companion for AI DEV DECK Multi Chat Remote.
+ChatGPT側に置く、AI DEV DECK Multi Chat Remote用の小さなApps SDK / MCP companionです。
 
-It is intentionally **not** another coding agent. The existing ChatGPT conversation remains the developer. This bridge only relays durable commands from the AI DEV DECK Worker into that same conversation.
+これは別のコーディングAIではありません。**既存のChatGPT開発チャットが実行者のまま**で、このBridgeはPWA/Workerに保存された次ターン指示を、その同じ会話へ中継するだけです。
 
 ## Flow
 
 ```text
 AI DEV DECK PWA
   -> Supervisor Worker durable chat-command queue
-  -> this MCP Apps bridge
+  -> ChatGPT Apps Bridge
   -> window.openai.sendFollowUpMessage(...)
   -> same ChatGPT conversation
-  -> ChatGPT performs the actual repository work
+  -> ChatGPT performs repository work
 ```
 
-The Worker token is held only by this MCP server. It is never placed in widget HTML or structured content.
+Supervisor Worker tokenはMCPサーバー側だけが保持し、Widget HTML / structuredContentには渡しません。
 
 ## Why a ChatGPT App
 
-Current ChatGPT Apps/MCP UI supports a widget posting a follow-up message into its host conversation through the standard follow-up messaging bridge (`ui/message`; ChatGPT compatibility API: `window.openai.sendFollowUpMessage`). The widget also uses app-only MCP tools for heartbeat, command claim, and delivery result reporting.
+ChatGPT Apps/MCP UIではWidgetからhost conversationへfollow-up messageを送れます。ChatGPT互換APIは `window.openai.sendFollowUpMessage(...)` です。
 
-## Required environment
+Widgetはさらにapp-only MCP toolsを使って以下だけを行います。
+
+- heartbeat
+- command claim
+- delivery result
+
+GitHub編集・実装・debugはBridgeではなくChatGPT本体が行います。
+
+## Recommended hosting: Cloudflare Worker
+
+スマホPWAの補助Bridgeとして常駐Nodeサーバーを別途管理しなくて済むよう、Cloudflare Worker entryを同梱しています。
+
+Cloudflare側は現在SDK v2 stateless handlerを新規MCPの推奨経路としていますが、このBridgeはOpenAI Apps SDKのSDK v1 server定義を利用しているため、まずCloudflare公式の `createLegacyMcpHandler` compatibility laneで動かします。これは移行用経路なので、Apps SDK側との互換を確認しながら将来SDK v2へ移行します。
+
+### 1. Install / verify
+
+```bash
+cd chatgpt-bridge
+npm install
+npm run check
+```
+
+`check` はTypeScript typecheckとWrangler dry-run bundleを実行します。
+
+### 2. Configure Worker secrets
+
+```bash
+npx wrangler secret put SUPERVISOR_WORKER_URL
+npx wrangler secret put SUPERVISOR_CLIENT_TOKEN
+npx wrangler secret put BRIDGE_ALLOWED_PROJECT_IDS
+```
+
+入力例:
+
+```text
+SUPERVISOR_WORKER_URL
+https://your-supervisor-worker.workers.dev
+
+BRIDGE_ALLOWED_PROJECT_IDS
+project-id-a,project-id-b
+```
+
+`BRIDGE_ALLOWED_PROJECT_IDS` は必須で、未設定時はfail closedです。
+
+### 3. Deploy
+
+```bash
+npm run deploy:cloudflare
+```
+
+公開後のendpoint:
+
+```text
+https://<your-bridge-worker>.workers.dev/mcp
+```
+
+health:
+
+```text
+https://<your-bridge-worker>.workers.dev/health
+```
+
+### 4. Connect to ChatGPT developer/private app
+
+ChatGPTのDeveloper Mode / private appで上記 `/mcp` endpointを接続します。
+
+公開配布用アプリとして使う段階ではOAuth等の本番向け認証を追加してください。現段階は自分の開発チャットを遠隔操作するprivate/developer用途を優先しています。
+
+## Local Express fallback
+
+ローカル確認用には従来どおりExpress版も使えます。
 
 ```bash
 export SUPERVISOR_WORKER_URL="https://your-worker.example.workers.dev"
 export SUPERVISOR_CLIENT_TOKEN="..."
 export BRIDGE_ALLOWED_PROJECT_IDS="project-id-a,project-id-b"
 export PORT=8788
-```
 
-`BRIDGE_ALLOWED_PROJECT_IDS` is required and fails closed when absent.
-
-## Local run
-
-```bash
-cd chatgpt-bridge
-npm install
-npm run typecheck
 npm start
 ```
 
-The MCP endpoint is:
+MCP endpoint:
 
 ```text
 http://localhost:8788/mcp
 ```
 
-For ChatGPT developer-mode testing, expose the MCP endpoint through a secure HTTPS development tunnel and connect it as a private app/plugin.
+ChatGPTから試す場合はHTTPS development tunnelで公開してください。
+
+Cloudflare版とExpress版は `src/bridgeApp.ts` の同じtool/resource/widget定義を共有します。
 
 ## Attach one existing ChatGPT conversation
 
-In the target development conversation, invoke the bridge tool with the same project ID stored in AI DEV DECK:
+対象の既存開発チャットで、PWAの「Bridgeを接続」から生成される指示を一度送ります。
+
+内部的には以下のtoolを同じproject IDで呼びます。
 
 ```text
 connect_ai_dev_deck_bridge({ projectId: "...", projectName: "..." })
 ```
 
-Once the widget is mounted it:
+Widgetがmountされると:
 
-1. reports a per-project heartbeat;
-2. polls for the next command for that project;
-3. claims one command at a time;
-4. sends it into the same ChatGPT conversation with `sendFollowUpMessage`;
-5. reports delivered/failed back to the Worker;
-6. waits before taking another command so multiple user turns are not dumped into an active response.
+1. project単位でheartbeatを送る
+2. そのprojectの次commandをpoll
+3. 一度に1commandだけclaim
+4. `sendFollowUpMessage` で同じChatGPT会話へ送る
+5. delivered / failedをWorkerへ返す
+6. 次のuser turnを連投しないようcooldown
 
-Multiple projects can each have their own bridge widget and heartbeat.
+複数projectはそれぞれ独立したBridge heartbeatを持てます。
+
+## Background resilience
+
+- PWAを閉じてもcommandはSupervisor Worker KVに残る
+- ChatGPT Widgetが一時的に消えてもqueued commandは失われない
+- Bridgeがclaim直後に落ちた場合、stale claimは一定時間後に再claim可能
+- project AのBridgeがproject Bのcommandをclaimしない
 
 ## Safety
 
-- No ChatGPT cookies or session tokens are read or stored.
-- No browser scraping or unofficial message-posting endpoint is used.
-- Supervisor Worker credentials stay server-side.
-- Project IDs are allowlisted server-side.
-- The bridge does not write GitHub code itself.
-- Merge and production deploy remain outside this bridge.
+- ChatGPT cookie / session tokenを取得・保存しない
+- browser scrapingをしない
+- 非公式message投稿endpointを使わない
+- Supervisor Worker credentialsはserver-sideのみ
+- Project ID allowlist必須
+- Bridge自身はGitHub codeを書かない
+- 自動merge / production deployなし
 
-## Current limitation
+## Current platform limitation
 
-The durable queue works while the PWA is closed, but the ChatGPT-side widget must still be mounted/alive for it to claim and inject commands. If ChatGPT unmounts or suspends the widget, commands remain queued and resume when the bridge becomes active again. This is not yet a guarantee of arbitrary server-initiated messages into a completely closed ChatGPT conversation.
+**PWA/Workerだけで、完全に閉じている任意のChatGPT既存会話をサーバー側から強制的に起動して投稿する仕組みではありません。**
 
-Claimed commands become reclaimable after a stale-claim timeout so a crashed bridge does not permanently strand the queue.
+Queueはバックグラウンドで保持できますが、ChatGPT側Widgetがmount/aliveである時にclaimして会話へ送ります。ChatGPTがWidgetをunmount/suspendした場合はQueueで待ち、Bridgeが再びactiveになった時に再開します。
+
+これは過大評価せず、実際のChatGPT host E2Eで挙動を確認しながら改善します。
+
+## Files
+
+```text
+src/bridgeApp.ts   shared Apps SDK tools/resource/widget
+src/server.ts      local Express / Streamable HTTP runtime
+src/cloudflare.ts  Cloudflare Worker runtime
+wrangler.jsonc     lightweight Worker deployment config
+```
 
 ## Production hardening still needed
 
-- OAuth/private app authentication before public deployment
-- stronger per-project coordination / Durable Object lock for competing bridge instances
-- real-device and ChatGPT host E2E tests
-- explicit bridge reconnect UX
-- structured Autopilot route state persisted independently of chat text
+- real ChatGPT developer/private app E2E
+- real iPhone/Android PWA E2E
+- public distribution時のOAuth
+- per-project atomic lock / idempotency for competing bridge instances
+- structured Autopilot route progress persisted independently of chat text
+- reconnect / suspended-widget UX validation
