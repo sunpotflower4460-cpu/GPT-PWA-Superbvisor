@@ -37,6 +37,7 @@ ChatGPT開発チャットが担当するもの:
 PWAが担当するもの:
 
 - 複数ChatGPT案件の一覧・切替
+- **選択中だけでなく、管理中の全ChatGPTのremote activityを同じ画面で把握**
 - 自由文 / Quick Command / Autopilot Route投入
 - queued / claimed / delivered / failed の表示
 - WAITING_AI / WAITING_USER / エラー / 完了の区別
@@ -48,6 +49,7 @@ PWAが担当するもの:
 Workerが担当するもの:
 
 - command queue
+- compact multi-chat overview
 - state persistence
 - GitHub / CI evidence observation
 - retry / recovery routing
@@ -67,6 +69,7 @@ SQLite-backed Durable Objectが担当するもの:
 - stale claim recoveryとdelivery retryの状態遷移
 - Cloud State revisionのcompare-and-update
 - 複数端末・複数Bridgeが同時操作した時の競合調停
+- high-frequency overview用のread-only command summary
 
 KVは移行・履歴・互換fallbackとして利用できますが、**KVだけのread → compare → writeをatomic multi-device保証として扱いません。**
 
@@ -174,9 +177,26 @@ KV-onlyのread → compare → writeは互換fallbackとしては残せますが
 - stale ownerからのresult overwriteを拒否
 - delivery retryは同じcommand IDを維持
 - transient delivery failureは安全なbackoffで再試行
+- retry/requeue時は古いBridge ownershipを外す
 - ChatGPT送信成功後のack不明時はdelivery receipt同期を優先し、安易に本文を再送しない
 
 外部ChatGPT hostとの境界を跨ぐため完全なtransactional exactly-onceを偽装せず、command IDによる重複実行抑制と送達receiptで安全側へ寄せます。
+
+### C15 — All managed chats stay visible from the primary control view
+
+Multi Chat Remoteなのに、remote状態を確認するため案件を1件ずつ開かせてはいけません。
+
+Chat Controlのprimary viewでは、ChatGPT URLを持つ**管理中の全案件**について少なくとも以下のremote activityを同じ画面で把握できる状態を保ちます。
+
+- 配送中
+- 自動再試行待ち
+- 送信待ち
+- Bridge待ち
+- 要確認
+- 最近送信済み
+- Bridge接続中 / offline
+
+ただし「全部見える」を理由に重くしてはいけません。overviewはcompact batch transportを使い、頻繁なpollでcommand本文を再取得したり、単なる読み取りのためにKV mirror writeを増幅させたりしません。Workerの1 batch上限を超える案件数はPWA側で分割し、先頭分だけ表示して残りを黙って捨てません。
 
 ## 4. Anti-goals
 
@@ -195,6 +215,8 @@ KV-onlyのread → compare → writeは互換fallbackとしては残せますが
 - 非公式手段でChatGPT response mirroringを装う
 - KV-only concurrencyをatomic multi-device保証として扱う
 - 同じcommandを複数Bridgeへ同時配送する
+- 選択中のchatだけremote状態を取得し、複数案件を1件ずつ開かせる
+- overview pollでfull prompt historyを繰り返し読み、KV writeを増幅させる
 
 ## 5. Feature decision gate
 
@@ -212,6 +234,8 @@ KV-onlyのread → compare → writeは互換fallbackとしては残せますが
 10. **通常操作がPWA内で完結する方向か？** clipboard/open-chatを主要経路へ戻していないか。
 11. **複数端末で安全か？** 同じcommand/stateを同時更新した時、二重claimやlost updateを起こさないか。
 12. **delivery uncertaintyを誤魔化していないか？** send成功/ack失敗の境界で重複配送を最小化しているか。
+13. **全案件を一目で把握できるか？** 状態確認のためにChatGPT案件を1件ずつ開く操作へ戻していないか。
+14. **overviewが軽いか？** status表示のためにfull history fetchやread-triggered writesを繰り返していないか。
 
 直接価値が弱い機能は、少なくとも「どのNorth Star機能を支えるのか」を説明できない限り優先しません。
 
@@ -227,6 +251,7 @@ KV-onlyのread → compare → writeは互換fallbackとしては残せますが
 - ChatGPT executor境界
 - Worker orchestration-only境界
 - Chat Control Bus
+- Multi Chat live overview / batch transport
 - Project Coordinator / strong consistency境界
 - ChatGPT Bridge transport / delivery receipt
 - WAITING_USER / WAITING_AI状態境界
