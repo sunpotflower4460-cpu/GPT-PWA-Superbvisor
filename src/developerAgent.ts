@@ -47,6 +47,7 @@ export interface DeveloperConfig {
   repositories: string[];
   executor?: 'chatgpt';
   orchestrationOnly?: boolean;
+  atomicCoordinator?: boolean;
   primaryProvider?: string;
   availableProviders?: string[];
   deterministicFallback?: boolean;
