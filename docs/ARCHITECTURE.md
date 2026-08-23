@@ -22,18 +22,24 @@ AI DEV DECKの出発点は、普段ChatGPTでGitHubリポジトリをつない�
 
 Supervisor / Guardian / 外部LLM APIは主役ではなく、**Multi Chat Remoteをより放置可能にするための補助層**。
 
+通常の送信経路は `PWA → Chat Control Bus → ChatGPT Bridge → 対象ChatGPT`。clipboard/open-chatは障害時のfallbackだけにする。
+
 ## 2. Core mental model
 
 ```text
 User
-  ↓ 1回の操作
+  ↓
 AI DEV DECK PWA
-  ├─ Chat A ─→ ChatGPT
-  ├─ Chat B ─→ ChatGPT
-  ├─ Chat C ─→ ChatGPT
-  └─ Chat D ─→ ChatGPT
-        ↑
-        └─ Supervisor / Guardianが必要な時だけ次手を補助
+  ├─ Chat A command ─┐
+  ├─ Chat B command ─┼─→ Durable Chat Control Bus
+  ├─ Chat C command ─┤       ↓
+  └─ Chat D route   ─┘   project-specific Bridge
+                            ↓
+                     existing ChatGPT chats
+                            ↓
+                 repository / GitHub / CI evidence
+                            ↑
+                 Supervisor / Guardian support
 ```
 
 ChatGPTは外部の別AIではない。
@@ -59,11 +65,13 @@ Cloudflare Worker、DeepSeek、MiniMax、OpenAI API等は、ChatGPTの代わり�
 - Resume / Handoff
 - Notification UI
 
+Main Project画面とOperating Planの通常操作もChat Control Busへ直接送る。コピーはfallback。
+
 PWAはChatGPTチャット本文を非公式にスクレイピングしない。
 
 ### Chat Control Bus
 
-PWAから各ChatGPTへ送る指示を、端末ローカルの一時操作ではなくWorker側の永続キューとして扱う。
+PWA / Supervisor / Guardian / Autopilotから各ChatGPTへ送る指示を、端末ローカルの一時操作ではなくWorker側の永続キューとして扱う。
 
 状態:
 
@@ -75,15 +83,31 @@ PWAから各ChatGPTへ送る指示を、端末ローカルの一時操作では�
 
 Bridge protocol:
 
-1. PWAがchat commandをqueue
-2. ChatGPT側Bridgeがclaim
+1. PWAまたはautomation layerがchat commandをqueue
+2. ChatGPT側Bridgeがproject単位でclaim
 3. 対象既存chatへ配送
 4. delivered / failedをWorkerへ返却
 5. PWAが状態を表示
 
-現時点では外部PWAから任意の既存ChatGPT会話へ直接メッセージを注入する公式の一般公開経路は前提にしない。
+Autopilot / recovery由来のcommandにはdedupe keyを付け、監視ループの重複配送を防ぐ。
 
-そのため、Transport層は差し替え可能にし、PWA・状態管理・Autopilotは特定の非公式ブラウザ自動化へ依存させない。
+### ChatGPT Bridge
+
+公式Apps SDK / MCP compatible transportを使う。
+
+- project allowlist
+- server-side Worker token
+- heartbeat
+- claim
+- same-conversation follow-up
+- result report
+- stale claim recovery
+
+Bridgeが完全にunmount/suspendされている間はcommandをQueueへ保持し、active復帰時に再開する。
+
+**完全に閉じた任意の既存ChatGPT会話を外部から無条件にwakeできる、とは扱わない。**
+
+また、ChatGPT返答本文を外部PWAへ読み戻す公式transportが利用できない場合、cookie/session scrapingで擬似的に実装しない。現状はcommand statusとGitHub/CI evidenceをPWAへ集約し、response mirroringは公式手段が確認できた時だけ追加する。
 
 ### ChatGPT execution
 
@@ -112,6 +136,7 @@ Multi Chat Remoteを補助する監督ロジック。
 - human-only判断
 - context handoff判断
 - next action生成
+- AUTO時のChat Control Bus投入
 
 Supervisor自身はコードを実装しない。
 
@@ -130,13 +155,20 @@ PWAを閉じている間も外部証拠を監視する。
 - CONTEXT_LIMIT
 - COMPLETED
 
+State rule:
+
+- Bridge配送待ち / ChatGPT作業待ち → `WAITING_AI`
+- CI監視 / recovery command配送 → `WAITING_AI`
+- 本人確認 / secrets / permission / review / merge判断 → `WAITING_USER`
+
 Recover policy:
 
 1. 一時障害は安全な範囲で再試行
 2. コード由来の失敗はChatGPT用recovery commandを生成
-3. 同じ失敗を無限再試行しない
-4. 人間しか解決できない地点だけWAITING_USER
-5. Push失敗など補助機能障害を開発完了判定と混同しない
+3. AUTO/GUARDIANではrecovery commandをChat Control Busへ自動投入
+4. 同じ指示を無限・重複配送しない
+5. 人間しか解決できない地点だけWAITING_USER
+6. Push失敗など補助機能障害を開発完了判定と混同しない
 
 ### GitHub evidence
 
@@ -170,7 +202,7 @@ GitHub write/delete/merge toolは渡さない。
 
 ### Work
 
-高コストになりやすいためデフォルトでは使わない。ユーザーが明示的に選択した時だけ利用する。
+高コストになりやすいためデフォルトでは使わない。ユーザーが明示的に選択した時だけ利用する。通常のexecutor selectorとしてAPI Workerを持たない。
 
 ## 4. Automation levels
 
@@ -184,13 +216,15 @@ PWAは記録とMulti Chat一覧のみ。
 
 ### AUTO
 
-Supervisorが途中の「続けて」「次へ」「失敗を直して再確認」等を判断してChat Control Busへ次commandを追加する。
+Supervisorが途中の「続けて」「次へ」「失敗を直して再確認」等を判断し、Chat Control Busへ次commandを自動追加する。
 
-実際の実装はChatGPTが行う。
+`CHAT`だから自動継続不可、とは扱わない。実際の実装はChatGPTが行う。
 
 ### GUARDIAN
 
 AUTOに加えてGitHub/CI監視、Retry、Recovery、Handoff、Completion Judge、Pushを有効化する。
+
+初回handoff、recoverable CI failure、Autopilot次工程はChat Control Busへ自動投入する。
 
 ## 5. Autopilot Route
 
@@ -210,6 +244,8 @@ Autopilotは単純な「最後まで続ける」だけではない。
 - 中断後は完了済み工程をやり直さず未完了地点から再開
 - 各反復は同じ操作の機械的コピーではなく新しい観点で検証
 - 途中のCI成功をルート全体の完了と誤認しない
+- CI成功後に後続工程があればcontinuation commandを自動Queue
+- recoverable failureならrecovery commandを自動Queue
 - 全ルート終了 + 必要な証拠確認後のみ完了扱い
 
 ## 6. Handoff packet
@@ -231,7 +267,18 @@ Autopilotは単純な「最後まで続ける」だけではない。
 - recent history
 - next recommended action
 
-## 7. Security rules
+## 7. Performance boundary
+
+「軽い」はProduct Constitutionの一部として数値で監視する。
+
+現行CI budget:
+
+- JavaScript gzip: 130 KiB以下
+- CSS gzip: 20 KiB以下
+
+budget超過時は、上限引き上げより先にsecondary centerのlazy-load、重複UI削減、依存削減を検討する。
+
+## 8. Security rules
 
 自動承認しやすい操作:
 
@@ -255,7 +302,7 @@ Autopilotは単純な「最後まで続ける」だけではない。
 
 Chat transportについても、ChatGPT session cookieの窃取・非公式な認証回避・秘密情報の保存を前提にしない。
 
-## 8. Completion rule
+## 9. Completion rule
 
 「ChatGPTが完了と言った」「APIがdoneと言った」だけでは完了しない。
 
@@ -272,18 +319,27 @@ Autopilot Route案件:
 
 を組み合わせる。
 
-## 9. Implementation order from here
+## 10. Current implementation status / next gaps
+
+Implemented foundation:
 
 1. Multi Chat Control UI
 2. Durable Chat Control Bus
-3. Bridge adapter contract (`claim → deliver → result`)
-4. 複数chatの状態同期 / unread / waiting表示
-5. バックグラウンドQueue + Push
-6. ChatGPT側の公式に利用可能なBridge実装
-7. AUTO next-turn loop
-8. Autopilot Route state machineの構造化
-9. Evidence Matrix / Definition of Done判定
-10. Durable lock / idempotency / multi-device coordination
-11. Real-device PWA E2E
+3. project-specific Bridge heartbeat / claim / result
+4. official ChatGPT Apps Bridge companion
+5. stale claim recovery + command dedupe
+6. Main Project / Operating Plan direct Queue path
+7. human-only WAITING_USER semantics
+8. AUTO/GUARDIAN next-turn + recovery auto-queue
+9. Autopilot Route continuation contract
+10. Concept Guard + mobile bundle budget
+
+Next high-priority gaps:
+
+1. ChatGPT host上でのreal E2E: `PWA → Queue → Bridge → same conversation`
+2. Durable Object/D1等によるatomic project lock / multi-device coordination
+3. structured Autopilot route progressをchat textとは独立して永続化
+4. real-device PWA / Push / reconnect E2E
+5. 公式に可能になった場合のみChatGPT response/statusのより深いreadback
 
 GuardianやAutopilotの高度化より、**PWA内から複数ChatGPTを自然に操作できることを常に優先する。**
