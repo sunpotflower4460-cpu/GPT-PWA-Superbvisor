@@ -2,7 +2,6 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
   AutomationLevel,
   DevProject,
-  ExecutionMode,
   ProjectStatus,
   buildActionPrompt,
   createProject,
@@ -13,6 +12,7 @@ import {
   statusLabel,
 } from './core';
 import { OperatingPlan, getOperatingPlan, targetLabels } from './operatingPlan';
+import { enqueueProjectChatCommand } from './chatControl';
 
 type Tab = 'projects' | 'human' | 'activity' | 'settings';
 
@@ -41,9 +41,7 @@ function planTargetLabel(plan: OperatingPlan) {
 }
 
 function executionRouteLabel(project: DevProject) {
-  if (project.executionMode === 'CHAT') return '💬 Chat';
-  if (project.executionMode === 'WORK') return '🟣 Work';
-  return project.automationLevel === 'GUARDIAN' ? '🛡 Guardian' : '⚡ Background';
+  return project.executionMode === 'WORK' ? '🟣 Work（明示利用）' : '💬 ChatGPT';
 }
 
 function safeChatUrl(value?: string) {
@@ -75,7 +73,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('projects');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [copied, setCopied] = useState('');
+  const [actionFeedback, setActionFeedback] = useState('');
+  const [sendingAction, setSendingAction] = useState('');
 
   useEffect(() => saveProjects(projects), [projects]);
   useEffect(() => {
@@ -115,13 +114,33 @@ export default function App() {
     );
   }
 
-  async function copyAction(project: DevProject, actionId: string) {
+  async function sendAction(project: DevProject, actionId: string) {
     const action = quickActions.find((item) => item.id === actionId);
     if (!action) return;
-    const prompt = buildActionPrompt(project, action);
-    await navigator.clipboard.writeText(prompt);
-    setCopied(action.label);
-    window.setTimeout(() => setCopied(''), 1800);
+    if (!project.chatUrl) {
+      setActionFeedback('ChatGPT URLを登録してください。');
+      return;
+    }
+    setSendingAction(action.id);
+    setActionFeedback('');
+    try {
+      await enqueueProjectChatCommand(project, buildActionPrompt(project, action));
+      patchProject(project.id, {
+        status: 'WAITING_AI',
+        currentPhase: `Chat Control Bus · ${action.label} 配送待ち`,
+        humanBlockers: [],
+      });
+      setActionFeedback(`${action.label} を対象ChatGPTの送信キューへ追加しました。`);
+    } catch (error) {
+      setActionFeedback(error instanceof Error ? error.message : 'ChatGPT指示を送信キューへ追加できませんでした。');
+    } finally {
+      setSendingAction('');
+      window.setTimeout(() => setActionFeedback(''), 3500);
+    }
+  }
+
+  function openChatControl(projectId: string) {
+    window.dispatchEvent(new CustomEvent('devdeck:open-chat-control', { detail: { projectId } }));
   }
 
   function renderProjectCard(project: DevProject) {
@@ -212,21 +231,24 @@ export default function App() {
           )}
 
           <article className="panel">
-            <div className="section-heading"><span>次の指示</span><span>タップでコピー</span></div>
+            <div className="section-heading"><span>このChatGPTへ指示</span><span>Multi Chat Remote</span></div>
             <div className="quick-actions">
               {quickActions.map((action, index) => (
                 <button
                   key={action.id}
                   className={index === 0 ? 'primary-action' : 'secondary-action'}
-                  onClick={() => copyAction(selected, action.id)}
+                  disabled={Boolean(sendingAction) || !selectedChatUrl}
+                  onClick={() => void sendAction(selected, action.id)}
                 >
-                  {copied === action.label ? '✓ コピーしました' : action.label}
+                  {sendingAction === action.id ? '送信キューへ追加中…' : action.label}
                 </button>
               ))}
             </div>
+            {actionFeedback && <p className="muted">{actionFeedback}</p>}
             <div className="launch-row">
+              <button className="launch-button" onClick={() => openChatControl(selected.id)}>Chat Controlを開く</button>
               {selectedChatUrl ? (
-                <button className="launch-button" onClick={() => window.open(selectedChatUrl, '_blank', 'noopener,noreferrer')}>ChatGPTを開く ↗</button>
+                <button className="ghost-button" onClick={() => window.open(selectedChatUrl, '_blank', 'noopener,noreferrer')}>ChatGPTを直接開く ↗</button>
               ) : <span className="muted">{selected.chatUrl ? 'Chat URLを確認してください' : 'Chat URL未登録'}</span>}
               {selectedGitHubUrl ? (
                 <button className="ghost-button" onClick={() => window.open(selectedGitHubUrl, '_blank', 'noopener,noreferrer')}>GitHub ↗</button>
@@ -235,17 +257,19 @@ export default function App() {
           </article>
 
           <article className="panel">
-            <div className="section-heading"><span>運転モード</span><span>Workは明示選択のみ</span></div>
-            <div className="segmented">
-              {(['CHAT', 'WORK', 'API_WORKER'] as ExecutionMode[]).map((mode) => (
-                <button className={selected.executionMode === mode ? 'active' : ''} key={mode} onClick={() => patchProject(selected.id, { executionMode: mode })}>{mode}</button>
-              ))}
-            </div>
+            <div className="section-heading"><span>自動化レベル</span><span>実行者はChatGPT固定</span></div>
+            {selected.executionMode === 'WORK' && (
+              <div className="human-callout">
+                Workを明示利用中です。通常のMulti Chat Remoteへ戻す場合は
+                <button className="ghost-button" onClick={() => patchProject(selected.id, { executionMode: 'CHAT' })}>ChatGPT実行へ戻す</button>
+              </div>
+            )}
             <div className="segmented automation">
               {(['OFF', 'ASSIST', 'AUTO', 'GUARDIAN'] as AutomationLevel[]).map((level) => (
                 <button className={selected.automationLevel === level ? 'active' : ''} key={level} onClick={() => patchProject(selected.id, { automationLevel: level })}>{level}</button>
               ))}
             </div>
+            <p className="muted">AUTO / GUARDIANでは、復旧やAutopilot Routeの次工程をChat Control Busへ自動投入します。本人操作が必要な時だけ「あなた待ち」になります。</p>
           </article>
 
           <article className="panel">
@@ -387,19 +411,20 @@ function Settings() {
 
   return (
     <section className="content-section">
-      <div className="section-heading"><h2>設定</h2><span>v0.15</span></div>
+      <div className="section-heading"><h2>設定</h2><span>v0.16</span></div>
       <article className="panel settings-list">
-        <div><b>基本実行</b><span>CHAT</span></div>
-        <div><b>Work切替</b><span>手動のみ</span></div>
-        <div><b>Background</b><span>任意昇格</span></div>
-        <div><b>Guardian</b><span>上限付き自動監督</span></div>
+        <div><b>基本実行者</b><span>ChatGPT固定</span></div>
+        <div><b>Multi Chat</b><span>Control Bus + Bridge</span></div>
+        <div><b>Work</b><span>明示利用時のみ</span></div>
+        <div><b>AUTO</b><span>次手を自動Queue</span></div>
+        <div><b>Guardian</b><span>CI監視 + 自動復旧Queue</span></div>
         <div><b>Operating Plan</b><span>案件ごとに保存</span></div>
         <div><b>状態同期</b><span>起動 / 復帰 / 2分ごと</span></div>
-        <div><b>データ保存</b><span>案件はこの端末</span></div>
+        <div><b>データ保存</b><span>案件はこの端末 + Worker状態</span></div>
       </article>
       <article className="panel">
         <div className="section-heading"><span>通知</span><span>{notificationState}</span></div>
-        <p className="muted">通知InboxからWeb Pushを有効化すると、Background/Guardianの完了や停止をPWAを閉じていても受け取れます。</p>
+        <p className="muted">通知InboxからWeb Pushを有効化すると、Guardianの完了や本当に本人操作が必要な停止をPWAを閉じていても受け取れます。</p>
         <button className="secondary-action" onClick={requestNotifications} disabled={notificationState === 'unsupported'}>通知権限を確認</button>
       </article>
     </section>
