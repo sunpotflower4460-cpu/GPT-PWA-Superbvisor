@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { deriveChatProjectOverview } from './chatControlOverview';
+import { deriveChatProjectOverview, getChatControlOverview } from './chatControlOverview';
 import type { ChatBridgeStatus } from './chatBridge';
-import type { ChatCommandOverviewSnapshot } from './chatCommandQueue';
+import type { ChatCommandEnv, ChatCommandOverviewSnapshot } from './chatCommandQueue';
 import type { CoordinatorCommandActivity } from './projectCoordinator';
 
 const now = Date.parse('2026-08-23T11:00:00.000Z');
@@ -96,5 +96,19 @@ describe('multi-chat overview activity', () => {
     }), bridgeOn, now);
     expect(recent.activity).toBe('DELIVERED');
     expect(old.activity).toBe('CONNECTED_IDLE');
+  });
+
+  it('does not mislabel an overview transport failure as an offline Bridge', async () => {
+    const env = {
+      SUPERVISOR_STATE: {
+        get: async () => null,
+        put: async () => undefined,
+        list: async () => { throw new Error('overview storage unavailable'); },
+      },
+    } as unknown as ChatCommandEnv;
+
+    const [overview] = await getChatControlOverview(env, ['project-1']);
+    expect(overview.activity).toBe('OVERVIEW_ERROR');
+    expect(overview.error).toContain('overview storage unavailable');
   });
 });
