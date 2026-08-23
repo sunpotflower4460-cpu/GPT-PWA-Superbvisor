@@ -22,6 +22,9 @@ export interface CiAssessment {
   humanRequired: CiCheckLike[];
 }
 
+export const AUTOPILOT_ROUTE_HEADER = '【AUTOPILOT ROUTE CONTRACT】';
+export const AUTOPILOT_ROUTE_COMPLETE_MARKER = '[AUTOPILOT_ROUTE_COMPLETE]';
+
 const SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 const TRANSIENT_CONCLUSIONS = new Set(['cancelled', 'timed_out', 'startup_failure', 'stale']);
 const HUMAN_CONCLUSIONS = new Set(['action_required']);
@@ -56,10 +59,23 @@ export function isRetryableProviderStatus(status: number) {
   return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
 }
 
+export function hasAutopilotRouteContract(task: string) {
+  return task.includes(AUTOPILOT_ROUTE_HEADER);
+}
+
+export function hasAutopilotRouteCompletionMarker(commitMessage?: string) {
+  return Boolean(commitMessage?.includes(AUTOPILOT_ROUTE_COMPLETE_MARKER));
+}
+
 function definitionOfDone(items?: string[]) {
   return items?.length
     ? items.map((item) => `- ${item}`).join('\n')
     : '- Goalを満たすこと\n- 可能な検証を行うこと\n- 未確認事項と人間操作を明示すること';
+}
+
+function autopilotExecutionRule(task: string) {
+  if (!hasAutopilotRouteContract(task)) return '';
+  return `\n\nAUTOPILOT ROUTE:\n元TASK内の ${AUTOPILOT_ROUTE_HEADER} は実行契約です。工程順・反復回数・条件分岐を守り、CIが途中で成功しても後続工程を省略しないでください。中断後は完了済みパスをやり直さず、最初の未完了工程/パスから再開してください。全ルート工程と最終検証が完了した時だけ、最終コミットのメッセージに ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を含めてください。まだ後続工程が残る状態でこのマーカーを付けてはいけません。最終工程で変更が不要だった場合、利用可能なGitHub操作でtreeを変えない安全な空コミットを作れるなら、そのコミットに完了マーカーを付けてください。できない場合は完了を偽装せず、その制約を明示してください。`;
 }
 
 export function buildGenericChatGptHandoff(input: {
@@ -69,7 +85,7 @@ export function buildGenericChatGptHandoff(input: {
   task: string;
   definitionOfDone?: string[];
 }) {
-  return `重要: この依頼の実行主体は、このChatGPTチャットです。Cloudflare WorkerやDeepSeek/MiniMax/OpenAI APIは監督・整理・次手生成だけを担当し、実作業を完了したふりをしてはいけません。\n\nPROJECT:\n${input.projectName || '未指定'}\n\nGOAL:\n${input.goal}\n\nCURRENT PHASE:\n${input.currentPhase || '未指定'}\n\nTASK:\n${input.task}\n\nDefinition of Done:\n${definitionOfDone(input.definitionOfDone)}\n\nこのChatGPTで利用可能なツール・接続先・現在の会話文脈を使って、実際にできる作業はここで進めてください。調査だけで終えず、安全に実行可能な実装・デバッグ・レビュー・検証は可能な範囲で実行してください。失敗した場合は同じ手順を漫然と繰り返さず、原因を確認して別手段または修正を試し、証拠を再確認してください。課金、秘密情報、本人確認、不可逆操作、本番公開など人間判断が必要なものだけ止めて明示してください。外部APIの要約だけを根拠に完成扱いせず、実際の結果・CI・取得できた証拠を優先してください。`;
+  return `重要: この依頼の実行主体は、このChatGPTチャットです。Cloudflare WorkerやDeepSeek/MiniMax/OpenAI APIは監督・整理・次手生成だけを担当し、実作業を完了したふりをしてはいけません。\n\nPROJECT:\n${input.projectName || '未指定'}\n\nGOAL:\n${input.goal}\n\nCURRENT PHASE:\n${input.currentPhase || '未指定'}\n\nTASK:\n${input.task}\n\nDefinition of Done:\n${definitionOfDone(input.definitionOfDone)}\n\nこのChatGPTで利用可能なツール・接続先・現在の会話文脈を使って、実際にできる作業はここで進めてください。調査だけで終えず、安全に実行可能な実装・デバッグ・レビュー・検証は可能な範囲で実行してください。失敗した場合は同じ手順を漫然と繰り返さず、原因を確認して別手段または修正を試し、証拠を再確認してください。課金、秘密情報、本人確認、不可逆操作、本番公開など人間判断が必要なものだけ止めて明示してください。外部APIの要約だけを根拠に完成扱いせず、実際の結果・CI・取得できた証拠を優先してください。${autopilotExecutionRule(input.task)}`;
 }
 
 export function buildChatGptHandoff(input: {
@@ -80,7 +96,7 @@ export function buildChatGptHandoff(input: {
   task: string;
   definitionOfDone?: string[];
 }) {
-  return `この作業の実装担当は、このChatGPTチャットです。外部APIは実装を行いません。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\nDefault branch: ${input.defaultBranch}\n\nGOAL:\n${input.goal}\n\nTASK:\n${input.task}\n\nDefinition of Done:\n${definitionOfDone(input.definitionOfDone)}\n\nGitHubを確認して必要な実装・デバッグ・テストをこのChatGPTから実際に行ってください。必ず指定branch上で作業し、main/default branchへ直接書き込まないでください。作業後はdiffとCIを確認し、失敗していたら原因を特定して修正→再確認まで進めてください。課金・秘密情報・本人確認・本番deploy・mergeなど人間判断が必要な操作は勝手に行わず、必要事項だけ明示してください。`;
+  return `この作業の実装担当は、このChatGPTチャットです。外部APIは実装を行いません。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\nDefault branch: ${input.defaultBranch}\n\nGOAL:\n${input.goal}\n\nTASK:\n${input.task}\n\nDefinition of Done:\n${definitionOfDone(input.definitionOfDone)}\n\nGitHubを確認して必要な実装・デバッグ・テストをこのChatGPTから実際に行ってください。必ず指定branch上で作業し、main/default branchへ直接書き込まないでください。作業後はdiffとCIを確認し、失敗していたら原因を特定して修正→再確認まで進めてください。課金・秘密情報・本人確認・本番deploy・mergeなど人間判断が必要な操作は勝手に行わず、必要事項だけ明示してください。${autopilotExecutionRule(input.task)}`;
 }
 
 export function buildRecoveryPrompt(input: {
@@ -95,6 +111,23 @@ export function buildRecoveryPrompt(input: {
   const ci = input.checks.length
     ? input.checks.map((check) => `- ${check.name}: ${check.conclusion || check.status} (${check.url})`).join('\n')
     : '- CI runを確認できません';
+  const routeRecovery = hasAutopilotRouteContract(input.originalTask)
+    ? `\n\nAUTOPILOT復旧ルール:\n元TASKのルート契約は復旧後も有効です。完了済み工程を最初から再実行せず、今回失敗した工程を直して再検証した後、最初の未完了工程/パスへ戻って残りルートを続けてください。CIが緑へ戻ったことはルート途中のチェックポイントであり、後続工程が残っている限り最終完了ではありません。全ルートが終わった時だけ ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を最終コミットメッセージに含めてください。`
+    : '';
 
-  return `この作業の実装修正担当は、このChatGPTチャットです。Supervisorは外部APIで監視だけを行っています。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\n\nGOAL:\n${input.goal}\n\n元のTASK:\n${input.originalTask}\n\nCI/監視結果:\n${ci}\n\n直前の監督要約:\n${input.previousSummary || 'なし'}\n\n同じ失敗を繰り返さないでください。まず現在のbranch・diff・CI失敗箇所を実際に確認し、原因を切り分け、必要なコード修正またはテスト修正をこのChatGPTから行い、再度CIまで確認してください。CI自体の一時障害ならコードを無意味に変更せず再実行/再確認を優先してください。mainへの直接write・自動merge・本番deployはしないでください。`;
+  return `この作業の実装修正担当は、このChatGPTチャットです。Supervisorは外部APIで監視だけを行っています。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\n\nGOAL:\n${input.goal}\n\n元のTASK:\n${input.originalTask}\n\nCI/監視結果:\n${ci}\n\n直前の監督要約:\n${input.previousSummary || 'なし'}\n\n同じ失敗を繰り返さないでください。まず現在のbranch・diff・CI失敗箇所を実際に確認し、原因を切り分け、必要なコード修正またはテスト修正をこのChatGPTから行い、再度CIまで確認してください。CI自体の一時障害ならコードを無意味に変更せず再実行/再確認を優先してください。mainへの直接write・自動merge・本番deployはしないでください。${routeRecovery}`;
+}
+
+export function buildAutopilotRouteContinuationPrompt(input: {
+  repository: string;
+  branch: string;
+  goal: string;
+  originalTask: string;
+  headSha: string;
+  checks: CiCheckLike[];
+}) {
+  const ci = input.checks.length
+    ? input.checks.map((check) => `- ${check.name}: ${check.conclusion || check.status} (${check.url})`).join('\n')
+    : '- CI runを確認できません';
+  return `AUTOPILOT ROUTEを継続してください。この作業の実行主体は、このChatGPTチャットです。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\nGOAL: ${input.goal}\n\n元のTASK:\n${input.originalTask}\n\n現在headのCI:\n${ci}\n\n現在のCIは成功していますが、元TASKには ${AUTOPILOT_ROUTE_HEADER} があるため、CI成功だけでは完了扱いにしません。これまでのdiff・作業結果・会話文脈からルート進捗を確認し、完了済みの工程/パスは繰り返さず、最初の未完了工程/未完了パスから続行してください。回数指定と条件分岐を省略しないでください。全ルート工程と最終検証まで完了した場合だけ、最終コミットメッセージへ ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を含めてください。それまではマーカーを付けず、次工程を実行してください。`;
 }
