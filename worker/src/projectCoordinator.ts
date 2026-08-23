@@ -229,6 +229,29 @@ export class ProjectCoordinator {
       return json({ command: updated });
     }
 
+    if (url.pathname === '/commands/cancel' && request.method === 'POST') {
+      const body = await readJson<{ id?: string; projectId?: string; detail?: string }>(request);
+      if (!body?.id || !body.projectId) return json({ error: 'id and projectId are required' }, 400);
+      const current = await this.state.storage.get<CoordinatorChatCommand>(`${COMMAND_PREFIX}${body.id}`);
+      if (!current) return json({ error: 'chat_command_not_found' }, 404);
+      if (current.projectId !== body.projectId) return json({ error: 'project_mismatch' }, 409);
+      if (current.status === 'cancelled') return json({ command: current });
+      if (current.status !== 'queued' && current.status !== 'failed') {
+        return json({ error: 'only_queued_or_failed_commands_can_cancel', command: current }, 409);
+      }
+      const updated: CoordinatorChatCommand = {
+        ...current,
+        status: 'cancelled',
+        bridgeId: undefined,
+        claimedAt: undefined,
+        nextAttemptAt: undefined,
+        updatedAt: new Date().toISOString(),
+        detail: body.detail?.trim().slice(0, 2000) || 'Cancelled before switching to manual ChatGPT fallback.',
+      };
+      await this.state.storage.put(`${COMMAND_PREFIX}${updated.id}`, updated);
+      return json({ command: updated });
+    }
+
     if (url.pathname === '/state/import' && request.method === 'POST') {
       const migrated = await this.state.storage.get<boolean>(STATE_MIGRATED_KEY);
       if (!migrated) {
@@ -241,7 +264,7 @@ export class ProjectCoordinator {
 
     if (url.pathname === '/state/get' && request.method === 'GET') {
       const state = await this.state.storage.get<CoordinatorCloudState>(STATE_KEY);
-      return state ? json({ state }) : json({ state: null });
+      return state ? json({ state }) : json({ state: null }, 200);
     }
 
     if (url.pathname === '/state/save' && request.method === 'POST') {
