@@ -10,7 +10,8 @@ export type ChatProjectActivity =
   | 'NEEDS_ATTENTION'
   | 'DELIVERED'
   | 'CONNECTED_IDLE'
-  | 'BRIDGE_OFFLINE';
+  | 'BRIDGE_OFFLINE'
+  | 'OVERVIEW_ERROR';
 
 export interface ChatCommand {
   id: string;
@@ -73,6 +74,7 @@ export function chatProjectActivityLabel(activity: ChatProjectActivity) {
   if (activity === 'NEEDS_ATTENTION') return '要確認';
   if (activity === 'DELIVERED') return '送信済み';
   if (activity === 'CONNECTED_IDLE') return '接続中';
+  if (activity === 'OVERVIEW_ERROR') return '状態取得失敗';
   return 'Bridge offline';
 }
 
