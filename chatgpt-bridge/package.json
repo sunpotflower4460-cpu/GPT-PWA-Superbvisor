@@ -18,7 +18,7 @@
     "agents": "^0.20.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "zod": "^3.24.4"
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.18",
