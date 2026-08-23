@@ -212,25 +212,40 @@ export default function ChatControlCenter() {
     popup.opener = null;
     setBusy(`${command.projectId}:manual:${command.id}`);
     setMessage('手動送信用の指示を準備しています…');
-    try {
-      try {
-        await navigator.clipboard.writeText(command.prompt);
-      } catch {
-        popup.close();
-        setMessage('指示をClipboardへコピーできなかったため、Queueは取消していません。Clipboard権限を許可してから再度お試しください。');
-        return;
-      }
 
-      setMessage('指示をコピーしました。自動配送を停止してから手動ChatGPTへ切り替えています…');
+    try {
+      await navigator.clipboard.writeText(command.prompt);
+    } catch {
+      popup.close();
+      setMessage('指示をClipboardへコピーできなかったため、Queueは取消していません。Clipboard権限を許可してから再度お試しください。');
+      setBusy('');
+      return;
+    }
+
+    setMessage('指示をコピーしました。自動配送を停止してから手動ChatGPTへ切り替えています…');
+    try {
       await cancelProjectChatCommand(command.projectId, command.id);
-      await Promise.all([refreshCommands(), refreshProjectOverview(command.projectId)]);
-      popup.location.replace(chatUrl);
-      setMessage('指示をコピーし、自動Queueを取消してからChatGPTを開きました。同じ指示がBridgeから後で重複配送されることはありません。');
     } catch (error) {
       popup.close();
       setMessage(`${error instanceof Error ? error.message : 'commandを安全に取消できませんでした。'} 自動配送が残っている可能性があるため、手動送信は開始していません。`);
+      setBusy('');
+      return;
+    }
+
+    try {
+      popup.location.replace(chatUrl);
+      setMessage('指示をコピーし、自動Queueを取消してからChatGPTを開きました。同じ指示がBridgeから後で重複配送されることはありません。');
+    } catch {
+      popup.close();
+      setMessage('自動Queueの取消と指示コピーは完了しましたが、新しいタブをChatGPTへ移動できませんでした。登録済みChatGPTを手動で開き、Clipboardの指示を貼り付けてください。');
     } finally {
       setBusy('');
+    }
+
+    try {
+      await Promise.all([refreshCommands(), refreshProjectOverview(command.projectId)]);
+    } catch {
+      setMessage((current) => `${current} 状態表示の再取得だけ失敗しましたが、cancel結果には影響しません。`);
     }
   }
 
