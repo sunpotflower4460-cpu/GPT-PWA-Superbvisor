@@ -2,13 +2,15 @@
 
 スマホから複数のAI開発案件を並行管理するための **ChatGPT-first PWAコックピット** です。
 
-> 基本はChat。必要な時だけBackground / Guardianへ昇格し、停止・エラー・引き継ぎ・完了をSupervisorが見える状態にします。
+> **実作業はChatGPT。Cloudflare Workerと外部LLM APIはオーケストレーション専用。**
+
+WorkerはChatGPTが閉じている間もGitHub branch / CI / 状態を監視し、失敗時の復旧指示を準備できます。ただし外部APIがコード実装やGitHub編集を代行したことにはしません。
 
 ## まず使う
 
 最短の初回設定は [`docs/SETUP.md`](docs/SETUP.md) を参照してください。
 
-Chat-onlyで使うだけなら、OpenAI APIキー・Cloudflare Worker・GitHub tokenは不要です。
+Chat-onlyで使うだけなら、外部LLM APIキー・Cloudflare Worker・GitHub tokenは不要です。
 
 1. GitHub Pagesを `Source: GitHub Actions` にする
 2. `Deploy PWA to GitHub Pages` workflowを実行
@@ -16,17 +18,19 @@ Chat-onlyで使うだけなら、OpenAI APIキー・Cloudflare Worker・GitHub t
 4. `＋` から案件を登録
 5. ChatGPT URL / GitHub URL / Goalを入れて使い始める
 
-Background / Guardian / Pushは必要になった時だけ追加設定します。
+Supervisor / Guardian / Pushは必要になった時だけ追加設定します。
 
 ## 設計方針
 
-- 通常運転は **ChatGPT Chat** を最優先
-- **Work** へは勝手に切り替えず、ユーザーが明示的に選ぶ
+- **ChatGPT Chat = 実装・デバッグ・レビューの実行主体**
+- **Cloudflare Worker = 外部監督・状態保持・CI監視**
+- **DeepSeek / MiniMax / OpenAI API = 状態分類・要約・次手/復旧指示生成のみ**
+- 外部LLMへGitHub write/delete/merge toolを渡さない
+- Workへは勝手に切り替えない
 - 通常Chatを外部PWAからスクレイピング・自動投稿しない
-- PWAは案件状態・Operating Plan・復旧・通知・引き継ぎを管理する
-- API実行は明示操作時だけ開始し、上限を持たせる
 - GitHub状態やCIなど、AIの自己申告だけに依存しない情報を重視する
-- 本人しかできない操作に到達したら `あなた待ち` として分離する
+- recoverableな失敗は終端にせず、原因分類→再試行/復旧指示→再監視へ進める
+- 本人しかできない操作だけ `あなた待ち` として分離する
 
 ## 現在できること
 
@@ -46,12 +50,14 @@ Background / Guardian / Pushは必要になった時だけ追加設定します�
   - COMPLETED
 - 工程・進捗・Activityタイムライン
 - `あなた待ち` 専用表示
-- 現在の実行ルート表示
+- 実行者と監督レベルの表示
 
 ### Chat-first control
 
 - Quick Reply
-- Smart Reply（端末内ルール / 任意LLM）
+- Smart Reply
+  - DeepSeek / MiniMax / OpenAI provider router
+  - 全provider障害時rule-based fallback
 - Operating Plan
   - 到達地点
   - 標準手順
@@ -61,8 +67,8 @@ Background / Guardian / Pushは必要になった時だけ追加設定します�
   - 自己レビュー
   - 最終報告
 - Plan Execution Router
-  - 💬 Chat
-  - ⚡ Background
+  - 💬 ChatGPT
+  - ⚡ Supervisor
   - 🛡 Guardian
 - Chat再開プロンプト
 - Context Limit時のCheckpoint / Handoff packet
@@ -72,25 +78,43 @@ Background / Guardian / Pushは必要になった時だけ追加設定します�
 - Watchdogによる停止疑い検出
 - 停止・エラー・引き継ぎ推奨をSupervisor Inboxへ保存
 - Inboxから再開プロンプトをコピーしてChatを開く
-- Inboxから対象案件のHandoff Centerを開く
-- Background / Guardian / Developer Agent結果の再同期
-- Draft PRへの安全な導線
+- WorkerからChatGPT handoff promptを生成
+- Provider retry / fallback
+- Push通知
+- Cloud state sync
 
-### Background / GitHub automation
+### GitHub Guardian
 
-任意のCloudflare Workerを設定すると利用できます。
+Guardianは外部AI開発者ではなく、**ChatGPT作業を監督するハーネス**です。
 
-- OpenAI Responses API background mode
-- failed / incomplete時の上限付きAuto Recovery
-- Webhook受信・状態保存
-- Web Push
-- GitHub Developer Agent
-- Guardian Runner
-  - 実装
-  - CI確認
-  - 失敗時の同一branch修正
-  - 上限付きcycle監督
-- 自動mergeはしない
+- allowlist repoへ安全な `ai-dev-deck/*` branchを準備
+- ChatGPT用の作業指示を生成
+- ChatGPTのcommitを検出
+- 現在branch head SHAと一致するGitHub Actionsだけ監視
+- pending → 待機
+- cancelled / timed_out / startup_failure / stale → failed jobs再実行
+- code failure → ChatGPT recovery prompt生成
+- action_required → 人間操作へ安全停止
+- GitHub/API一時エラー → Guardianをfailed終了せず次Cronで再試行
+- CI成功 → Draft PR / review導線
+- 自動mergeなし
+- production deployなし
+
+### Low-cost orchestration
+
+Provider Routerの標準例:
+
+```text
+DeepSeek V4 Flash
+  ↓
+MiniMax M3
+  ↓
+OpenAI fallback
+  ↓
+Deterministic ChatGPT handoff
+```
+
+モデルはvarsで差し替え可能です。全providerが利用不能でも、監督UIと安全なChatGPT引き継ぎは維持します。
 
 ### Setup / delivery
 
@@ -100,26 +124,51 @@ Background / Guardian / Pushは必要になった時だけ追加設定します�
   - PWA起動
   - 通知権限
   - Push購読
-  - Worker接続
-  - GitHub Agent設定
+  - Supervisor Worker接続
+  - GitHub Guardian設定
 - GitHub Pages自動deploy workflow
-- Pagesが未設定またはSourceがGitHub Actionsでない時は、赤エラーにせずdeployだけskip
+- Pagesが未設定またはSourceがGitHub Actionsでない時はdeployだけskip
 
-## 実行モード
+## 実行 / 監督モード
 
-| ルート | 用途 | 追加API費用 | 端末を閉じても継続 |
-|---|---|---:|---:|
-| 💬 Chat | 通常の開発作業 | なし | 保証なし |
-| ⚡ Background | 長い分析・非GitHub処理 | あり | 対応 |
-| 🛡 Guardian | GitHub実装→CI→復旧監督 | あり | 対応 |
-| 🟣 Work | 必要時にChatGPT側で明示選択 | プラン依存 | Work側仕様による |
+| ルート | 実際の作業者 | 外部APIの役割 | 端末を閉じた時 |
+|---|---|---|---|
+| 💬 ChatGPT | ChatGPT | なし | ChatGPT側仕様による |
+| ⚡ Supervisor | ChatGPT | 状態整理・次手生成・通知 | 指示/状態を保持できる |
+| 🛡 Guardian | ChatGPT | branch/CI監視・失敗分類・復旧指示 | Worker監督は継続 |
+| 🟣 Work | ChatGPT Work | Work側仕様 | Work側仕様による |
+
+重要: Supervisor / Guardianが端末非依存で継続するのは**監督処理**です。WorkerがChatGPTの会話を勝手に送信・継続するものではありません。
+
+## 失敗時の考え方
+
+```text
+Provider error
+  → retry
+  → provider fallback
+  → deterministic fallback
+
+CI transient failure
+  → rerun failed jobs
+  → re-check
+
+CI code failure
+  → evidenceを整理
+  → ChatGPT recovery prompt
+  → ChatGPTが修正
+  → new headを再監視
+
+human-required
+  → safe stop + notification
+```
+
+「失敗したので終了」ではなく、**失敗を次の状態として扱う**設計です。
 
 ## 初回設定
 
-- PWAだけ使う: [`docs/SETUP.md`](docs/SETUP.md)
-- Background Worker: [`worker/README.md`](worker/README.md)
-- GitHub Developer Agent: [`worker/DEVELOPER_AGENT.md`](worker/DEVELOPER_AGENT.md)
-- Guardian Runner: [`worker/GUARDIAN_RUNNER.md`](worker/GUARDIAN_RUNNER.md)
+- PWA: [`docs/SETUP.md`](docs/SETUP.md)
+- Supervisor Worker: [`worker/README.md`](worker/README.md)
+- Guardian: [`worker/GUARDIAN_RUNNER.md`](worker/GUARDIAN_RUNNER.md)
 - アーキテクチャ: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## ローカル開発
@@ -129,7 +178,7 @@ npm install
 npm run dev
 ```
 
-ビルド確認:
+ビルド:
 
 ```bash
 npm run build
@@ -140,15 +189,18 @@ Worker:
 ```bash
 cd worker
 npm install
-npm run typecheck
+npm run check
 ```
 
 ## セキュリティ
 
-- OpenAI APIキーをPWAへ保存しない
+- LLM APIキーをPWAへ保存しない
 - GitHub tokenをPWAへ保存しない
 - Worker secretsはCloudflare側で管理
 - 通常ChatGPTへの外部自動投稿はしない
-- GitHub PRリンクは許可された `https://github.com` のみ開く
-- Background / Guardianはユーザーの明示操作で開始
-- 自動復旧には回数・時間上限を持たせる
+- 外部LLMにGitHub write/delete/merge権限を与えない
+- main/default branchへWorkerからコードwriteしない
+- GitHubリンクは安全なhostだけ開く
+- 自動merge / production deployなし
+- CI未確認を成功扱いしない
+- Provider/Push/GitHub一時障害を可能な限り非終端状態として扱う
