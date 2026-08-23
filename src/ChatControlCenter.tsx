@@ -205,18 +205,21 @@ export default function ChatControlCenter() {
     }
 
     const popup = window.open('about:blank', '_blank');
-    if (popup) popup.opener = null;
+    if (!popup) {
+      setMessage('ブラウザに新しいタブをブロックされたため、Queueは取消していません。ポップアップを許可してから再度お試しください。');
+      return;
+    }
+    popup.opener = null;
     setBusy(`${command.projectId}:manual:${command.id}`);
     setMessage('自動配送を停止してから手動ChatGPTへ切り替えています…');
     try {
       await cancelProjectChatCommand(command.projectId, command.id);
       await Promise.all([refreshCommands(), refreshProjectOverview(command.projectId)]);
       try { await navigator.clipboard.writeText(command.prompt); } catch { /* prompt remains visible in the cancelled history row */ }
-      if (popup) popup.location.replace(chatUrl);
-      else window.open(chatUrl, '_blank', 'noopener,noreferrer');
+      popup.location.replace(chatUrl);
       setMessage('自動Queueを取消してからChatGPTを開きました。同じ指示がBridgeから後で重複配送されることはありません。');
     } catch (error) {
-      if (popup) popup.close();
+      popup.close();
       setMessage(`${error instanceof Error ? error.message : 'commandを安全に取消できませんでした。'} 自動配送が残っている可能性があるため、手動送信は開始していません。`);
     } finally {
       setBusy('');
