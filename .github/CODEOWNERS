@@ -14,10 +14,17 @@
 /src/OperatingPlanCenter.tsx @sunpotflower4460-cpu
 /src/RuntimeProjectSync.tsx @sunpotflower4460-cpu
 /src/supervisor.ts @sunpotflower4460-cpu
+/src/SetupDoctorCenter.tsx @sunpotflower4460-cpu
+
+# Strong consistency / state boundary
+/worker/src/projectCoordinator.ts @sunpotflower4460-cpu
+/worker/src/chatCommandQueue.ts @sunpotflower4460-cpu
+/worker/src/stateSync.ts @sunpotflower4460-cpu
+/worker/wrangler.example.jsonc @sunpotflower4460-cpu
+/worker/wrangler.ci.jsonc @sunpotflower4460-cpu
 
 # Executor / orchestration boundary
 /worker/src/index.ts @sunpotflower4460-cpu
-/worker/src/chatCommandQueue.ts @sunpotflower4460-cpu
 /worker/src/developerAgent.ts @sunpotflower4460-cpu
 /worker/src/guardianRunner.ts @sunpotflower4460-cpu
 /worker/src/orchestratorPolicy.ts @sunpotflower4460-cpu
