@@ -3,6 +3,7 @@ import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import { buildGenericChatGptHandoff } from './orchestratorPolicy';
 import {
   ChatCommandConflictError,
+  cancelChatCommand,
   claimNextChatCommand,
   enqueueChatCommand,
   getChatCommand,
@@ -176,6 +177,11 @@ export default {
       return retryFailedChatCommand(decodeURIComponent(chatCommandRetryMatch[1]), request, env);
     }
 
+    const chatCommandCancelMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)\/cancel$/);
+    if (chatCommandCancelMatch && request.method === 'POST') {
+      return cancelPendingChatCommand(decodeURIComponent(chatCommandCancelMatch[1]), request, env);
+    }
+
     const projectCommandsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/chat-commands$/);
     if (projectCommandsMatch && request.method === 'GET') {
       const commands = await listProjectChatCommands(env, decodeURIComponent(projectCommandsMatch[1]), 40);
@@ -314,6 +320,18 @@ async function retryFailedChatCommand(id: string, request: Request, env: Env): P
   } catch (error) {
     if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
     return json({ error: error instanceof Error ? error.message : 'chat_command_retry_failed' }, 503, env, request);
+  }
+}
+
+async function cancelPendingChatCommand(id: string, request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectId?: string; detail?: string }>(request);
+  if (!body?.projectId?.trim()) return json({ error: 'projectId is required' }, 400, env, request);
+  try {
+    const command = await cancelChatCommand(env, body.projectId, id, body.detail);
+    return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+  } catch (error) {
+    if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
+    return json({ error: error instanceof Error ? error.message : 'chat_command_cancel_failed' }, 503, env, request);
   }
 }
 
