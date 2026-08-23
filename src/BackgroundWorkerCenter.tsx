@@ -21,8 +21,6 @@ export default function BackgroundWorkerCenter() {
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
-  const [autoRecover, setAutoRecover] = useState(false);
-  const [maxAutoRetries, setMaxAutoRetries] = useState(2);
 
   const selected = useMemo(
     () => projects.find((project) => project.id === selectedId) ?? projects[0] ?? null,
@@ -51,7 +49,11 @@ export default function BackgroundWorkerCenter() {
     try {
       saveWorkerConnection(connection);
       const health = await checkWorkerHealth(connection);
-      setMessage(health.ok ? 'Workerに接続できました。' : 'Worker応答を確認できませんでした。');
+      setMessage(health.ok && health.orchestrationOnly && health.executor === 'chatgpt'
+        ? 'Supervisor Workerに接続できました。実行主体=ChatGPT / API=監督専用を確認しました。'
+        : health.ok
+          ? 'Workerには接続できましたが、旧Background Executorの可能性があります。新しいWorkerへ更新してください。'
+          : 'Worker応答を確認できませんでした。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '接続確認に失敗しました。');
     } finally {
@@ -59,23 +61,18 @@ export default function BackgroundWorkerCenter() {
     }
   }
 
-  async function startSelected() {
+  async function prepareSelected() {
     if (!selected) return;
     setBusy('start');
     setMessage('');
     try {
       saveWorkerConnection(connection);
       const prompt = customPrompt.trim() || buildActionPrompt(selected, completionAction);
-      const job = await startBackgroundJob(selected, prompt, connection, {
-        autoRecover,
-        maxAutoRetries,
-      });
+      const job = await startBackgroundJob(selected, prompt, connection);
       setJobs((items) => ({ ...items, [selected.id]: job }));
-      setMessage(autoRecover
-        ? `Background処理を開始しました。失敗/incomplete時は最大${maxAutoRetries}回まで別アプローチで自動復旧します。`
-        : 'Background処理を開始しました。端末を閉じてもOpenAI側で処理が継続します。');
+      setMessage('SupervisorがChatGPTへ渡す次手を準備しました。APIは実作業を行っていません。');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Background処理を開始できませんでした。');
+      setMessage(error instanceof Error ? error.message : 'Supervisor指示を準備できませんでした。');
     } finally {
       setBusy('');
     }
@@ -89,10 +86,9 @@ export default function BackgroundWorkerCenter() {
       saveWorkerConnection(connection);
       const job = await getLatestBackgroundJob(selected.id, connection);
       setJobs((items) => ({ ...items, [selected.id]: job }));
-      if (job.status === 'completed') setMessage('完了状態を取得しました。');
-      if ((job.status === 'failed' || job.status === 'incomplete') && job.autoRecover && (job.retryCount ?? 0) < (job.maxAutoRetries ?? 0)) {
-        setMessage('復旧Jobの起動待ち、またはWebhook反映待ちの可能性があります。少し後で再更新してください。');
-      }
+      setMessage(job.kind === 'orchestration_handoff'
+        ? '最新のChatGPT引き継ぎ指示を取得しました。'
+        : '旧Background Jobを取得しました。新規作業はSupervisor方式で作成してください。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '状態取得に失敗しました。');
     } finally {
@@ -102,26 +98,26 @@ export default function BackgroundWorkerCenter() {
 
   return (
     <>
-      <button className="worker-fab" onClick={openCenter} aria-label="Background worker center">⚡</button>
+      <button className="worker-fab" onClick={openCenter} aria-label="Supervisor worker center">⚡</button>
 
       {open && (
         <div className="worker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="worker-sheet">
             <header className="worker-header">
               <div>
-                <p className="eyebrow">OPTIONAL TURBO</p>
-                <h2>Background Worker</h2>
+                <p className="eyebrow">LOW-COST ORCHESTRATION</p>
+                <h2>Supervisor Worker</h2>
               </div>
               <button className="icon-button" onClick={() => setOpen(false)}>×</button>
             </header>
 
             <div className="worker-note">
-              <b>通常はChatのままでOK。</b>
-              <span>端末を閉じても止めたくない工程だけ、ここから明示的に昇格します。API利用料が発生します。</span>
+              <b>実際に作業するのはChatGPT。</b>
+              <span>Cloudflare WorkerとDeepSeek / MiniMax / OpenAI APIは、状態整理・次手生成・CI監視・失敗復旧の司令塔です。APIだけで実装完了とは判定しません。</span>
             </div>
 
             <details className="worker-settings">
-              <summary>Worker接続設定</summary>
+              <summary>Supervisor Worker接続設定</summary>
               <label>
                 Worker URL
                 <input value={connection.baseUrl} onChange={(event) => setConnection((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="https://...workers.dev" />
@@ -132,7 +128,7 @@ export default function BackgroundWorkerCenter() {
               </label>
               <div className="worker-setting-actions">
                 <button onClick={persistConnection}>保存</button>
-                <button onClick={testConnection} disabled={busy === 'health'}>{busy === 'health' ? '確認中…' : '接続確認'}</button>
+                <button onClick={testConnection} disabled={busy === 'health'}>{busy === 'health' ? '確認中…' : '接続・役割確認'}</button>
               </div>
             </details>
 
@@ -161,37 +157,23 @@ export default function BackgroundWorkerCenter() {
                     </article>
 
                     <label className="worker-prompt">
-                      <span>このWorkerへ任せる指示 <small>空欄なら「手動作業だけになるまで」の標準指示</small></span>
-                      <textarea rows={5} value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="例：現在の設計をレビューし、次の実装順と修正案を完成条件まで整理して" />
+                      <span>Supervisorへ整理してほしい内容 <small>空欄なら標準の「手動作業だけになるまで」</small></span>
+                      <textarea rows={5} value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="例：現在地点と残作業を整理し、このChatGPTが次に実行する最適な指示を作って" />
                     </label>
 
-                    <div className="recovery-control">
-                      <label className="recovery-toggle">
-                        <input type="checkbox" checked={autoRecover} onChange={(event) => setAutoRecover(event.target.checked)} />
-                        <span><b>Auto Recovery</b><small>失敗/incompleteなら原因を渡して別アプローチで再開</small></span>
-                      </label>
-                      {autoRecover && (
-                        <label className="retry-limit">最大再試行
-                          <select value={maxAutoRetries} onChange={(event) => setMaxAutoRetries(Number(event.target.value))}>
-                            <option value={1}>1回</option><option value={2}>2回</option>
-                          </select>
-                        </label>
-                      )}
-                    </div>
-
                     <div className="worker-actions">
-                      <button className="worker-start" disabled={busy === 'start'} onClick={startSelected}>{busy === 'start' ? '開始中…' : '⚡ Backgroundへ任せる'}</button>
-                      <button disabled={busy === 'refresh'} onClick={refreshSelected}>{busy === 'refresh' ? '更新中…' : '状態を更新'}</button>
+                      <button className="worker-start" disabled={busy === 'start'} onClick={prepareSelected}>{busy === 'start' ? '整理中…' : '⚡ GPT実行指示を準備'}</button>
+                      <button disabled={busy === 'refresh'} onClick={refreshSelected}>{busy === 'refresh' ? '更新中…' : '最新指示を取得'}</button>
                     </div>
 
-                    {selectedJob && <JobCard job={selectedJob} />}
+                    {selectedJob && <JobCard job={selectedJob} project={selected} />}
                   </div>
                 )}
               </>
             )}
 
             {message && <div className="worker-message">{message}</div>}
-            <p className="worker-footnote">Auto Recoveryは明示的にONにしたJobだけで動作し、最大2回で必ず停止します。通常Chat/Workへ勝手に昇格することはありません。</p>
+            <p className="worker-footnote">Providerが429/5xx/timeoutでも別provider・決定論的fallbackへ退避します。API障害だけで監督全体を停止しない設計です。</p>
           </section>
         </div>
       )}
@@ -199,34 +181,61 @@ export default function BackgroundWorkerCenter() {
   );
 }
 
-function JobCard({ job }: { job: BackgroundJob }) {
-  const final = ['completed', 'failed', 'incomplete', 'cancelled'].includes(job.status);
+function JobCard({ job, project }: { job: BackgroundJob; project: DevProject }) {
+  if (job.kind !== 'orchestration_handoff') {
+    return <article className="worker-job final">
+      <div className="section-heading"><span>Legacy Job</span><b>{job.status}</b></div>
+      <div className="worker-message">旧Background Executorの保存Jobです。新規の自動実行には使用しません。</div>
+      {job.outputText && <details className="worker-output"><summary>旧レポートを見る</summary><pre>{job.outputText}</pre></details>}
+    </article>;
+  }
+
   return (
-    <article className={`worker-job ${final ? 'final' : 'running'}`}>
-      <div className="section-heading"><span>Job {job.id.slice(0, 12)}…</span><b>{job.status}</b></div>
+    <article className="worker-job final">
+      <div className="section-heading"><span>Orchestration {job.id.slice(0, 8)}</span><b>GPT HANDOFF READY</b></div>
       <div className="worker-job-meta">
-        <span>{job.model}</span>
-        <span>attempt {(job.retryCount ?? 0) + 1}/{(job.maxAutoRetries ?? 0) + 1}</span>
+        <span>{job.orchestratorProvider || 'deterministic'} / {job.model}</span>
         <span>更新 {new Date(job.updatedAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
-      {job.autoRecover && <div className="recovery-badge">↻ Auto Recovery ON ・ 残り {Math.max(0, (job.maxAutoRetries ?? 0) - (job.retryCount ?? 0))}回</div>}
-      {job.checkpoint && <div className="worker-checkpoint"><b>Checkpoint</b><p>{job.checkpoint.summary}</p></div>}
-      {job.error && <div className="worker-error">⚠ {job.error}</div>}
+      {job.degradedOrchestration && <div className="worker-message">外部モデルが使えなくても決定論的fallbackで指示生成を継続しました。</div>}
+      {job.checkpoint && <div className="worker-checkpoint"><b>Supervisor</b><p>{job.checkpoint.summary}</p></div>}
       {job.report && (
         <div className="completion-report">
-          <div className="report-title"><b>{job.report.done ? '✅ 完成条件まで到達' : '📍 到達レポート'}</b><span>{job.report.reachedStage}</span></div>
+          <div className="report-title"><b>🧭 オーケストレーション完了</b><span>{job.report.reachedStage}</span></div>
           <p>{job.report.summary}</p>
-          {job.report.steps.length > 0 && <ReportList title="やったこと" items={job.report.steps} />}
-          {job.report.remaining.length > 0 && <ReportList title="残っていること" items={job.report.remaining} />}
-          {job.report.humanRequired.length > 0 && <ReportList title="👤 あなたが必要" items={job.report.humanRequired} />}
+          {job.report.remaining.length > 0 && <ReportList title="次にChatGPTが行うこと" items={job.report.remaining} />}
+          {job.report.humanRequired.length > 0 && <ReportList title="👤 人間判断が必要" items={job.report.humanRequired} />}
         </div>
       )}
-      {job.nextJobId && <div className="worker-message">↻ 復旧Jobへ引き継ぎ済みです。状態更新で最新attemptを取得できます。</div>}
-      {job.outputText && <details className="worker-output"><summary>AIの全文を見る</summary><pre>{job.outputText}</pre></details>}
+      {job.handoffPrompt && <HandoffActions prompt={job.handoffPrompt} project={project} />}
+      {job.outputText && <details className="worker-output"><summary>Supervisor要約</summary><pre>{job.outputText}</pre></details>}
     </article>
   );
 }
 
+function HandoffActions({ prompt, project }: { prompt: string; project: DevProject }) {
+  const [copied, setCopied] = useState(false);
+  async function copy(openChat: boolean) {
+    try { await navigator.clipboard.writeText(prompt); setCopied(true); } catch { setCopied(false); }
+    if (openChat) window.open(safeChatUrl(project.chatUrl) || 'https://chatgpt.com/', '_blank', 'noopener,noreferrer');
+  }
+  return <div className="worker-actions">
+    <button className="worker-start" onClick={() => void copy(true)}>🧠 ChatGPTで実行</button>
+    <button onClick={() => void copy(false)}>{copied ? 'コピー済み ✓' : '指示をコピー'}</button>
+  </div>;
+}
+
 function ReportList({ title, items }: { title: string; items: string[] }) {
   return <div className="report-list"><b>{title}</b><ol>{items.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ol></div>;
+}
+
+function safeChatUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:') return null;
+    if (host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'chat.openai.com') return url.toString();
+  } catch { /* invalid URL */ }
+  return null;
 }
