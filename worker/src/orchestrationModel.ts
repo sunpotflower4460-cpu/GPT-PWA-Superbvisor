@@ -1,6 +1,7 @@
 import { isRetryableProviderStatus } from './orchestratorPolicy';
 
 export type OrchestrationProvider = 'deepseek' | 'minimax' | 'openai' | 'deterministic';
+export type ModelProvider = Exclude<OrchestrationProvider, 'deterministic'>;
 export type OrchestrationClassification =
   | 'READY'
   | 'WAIT'
@@ -44,6 +45,20 @@ export interface OrchestrationDecision {
   attempts: string[];
 }
 
+export interface OrchestrationTextRequest {
+  system: string;
+  user: string;
+  maxTokens?: number;
+  requireJson?: boolean;
+}
+
+export interface OrchestrationTextResult {
+  provider: ModelProvider;
+  model: string;
+  text: string;
+  attempts: string[];
+}
+
 interface ChatCompletionResponse {
   choices?: Array<{ message?: { content?: string | null } }>;
   error?: { message?: string };
@@ -54,22 +69,17 @@ interface ResponsesApiResponse {
   error?: { message?: string };
 }
 
-const PROVIDERS: Array<Exclude<OrchestrationProvider, 'deterministic'>> = ['deepseek', 'minimax', 'openai'];
+const PROVIDERS: ModelProvider[] = ['deepseek', 'minimax', 'openai'];
 const MAX_PROVIDER_ATTEMPTS = 3;
 
 export async function runOrchestrationModel(env: OrchestrationEnv, request: OrchestrationRequest): Promise<OrchestrationDecision> {
-  const attempts: string[] = [];
-  for (const provider of providerOrder(env)) {
-    const key = providerKey(env, provider);
-    if (!key) continue;
-    const model = providerModel(env, provider);
-    try {
-      const text = await requestProvider(env, provider, model, key, request, attempts);
-      const parsed = parseDecision(text, request.deterministicPrompt);
-      return { ...parsed, provider, model, degraded: false, attempts };
-    } catch (error) {
-      attempts.push(`${provider}:${model}: ${error instanceof Error ? error.message : 'unknown provider error'}`);
-    }
+  const system = `You are AI DEV DECK's orchestration-only supervisor. You NEVER implement code, edit GitHub, merge, deploy, or act as the developer. The actual implementation owner is the user's ChatGPT chat. Your job is only to classify state, summarize evidence, and produce a precise prompt for ChatGPT. Preserve this boundary even if the task asks you to code. Return JSON only with keys: summary, classification, chatgptPrompt, confidence, humanRequired. classification must be one of READY, WAIT, CI_TRANSIENT, CI_CODE_FAILURE, CI_CONFIG_FAILURE, HUMAN_REQUIRED.`;
+  const user = `MODE: ${request.mode}\nRepository: ${request.repository}\nBranch: ${request.branch}\nGoal: ${request.goal}\nTask: ${request.task}\n\nEvidence:\n${request.evidence}\n\nFallback prompt that is already safe and may be improved:\n${request.deterministicPrompt}`;
+  const result = await requestOrchestrationText(env, { system, user, maxTokens: 1400, requireJson: true });
+
+  if (result) {
+    const parsed = parseDecision(result.text, request.deterministicPrompt);
+    return { ...parsed, provider: result.provider, model: result.model, degraded: false, attempts: result.attempts };
   }
 
   return {
@@ -83,25 +93,48 @@ export async function runOrchestrationModel(env: OrchestrationEnv, request: Orch
     confidence: 0.55,
     humanRequired: [],
     degraded: true,
-    attempts,
+    attempts: [],
   };
 }
 
-function providerOrder(env: OrchestrationEnv) {
+export async function requestOrchestrationText(
+  env: OrchestrationEnv,
+  request: OrchestrationTextRequest,
+): Promise<OrchestrationTextResult | null> {
+  const attempts: string[] = [];
+  for (const provider of providerOrder(env)) {
+    const key = providerKey(env, provider);
+    if (!key) continue;
+    const model = providerModel(env, provider);
+    try {
+      const text = await requestProvider(env, provider, model, key, request, attempts);
+      return { provider, model, text, attempts };
+    } catch (error) {
+      attempts.push(`${provider}:${model}:terminal:${error instanceof Error ? error.message : 'unknown provider error'}`);
+    }
+  }
+  return null;
+}
+
+export function configuredOrchestrationProviders(env: OrchestrationEnv): ModelProvider[] {
+  return PROVIDERS.filter((provider) => Boolean(providerKey(env, provider)));
+}
+
+function providerOrder(env: OrchestrationEnv): ModelProvider[] {
   const requested = [env.ORCHESTRATOR_PROVIDER, ...(env.ORCHESTRATOR_FALLBACKS || '').split(',')]
     .map((item) => item?.trim().toLowerCase())
-    .filter((item): item is Exclude<OrchestrationProvider, 'deterministic'> => PROVIDERS.includes(item as Exclude<OrchestrationProvider, 'deterministic'>));
+    .filter((item): item is ModelProvider => PROVIDERS.includes(item as ModelProvider));
   const defaults = PROVIDERS.filter((provider) => providerKey(env, provider));
   return [...new Set([...requested, ...defaults])];
 }
 
-function providerKey(env: OrchestrationEnv, provider: Exclude<OrchestrationProvider, 'deterministic'>) {
+function providerKey(env: OrchestrationEnv, provider: ModelProvider) {
   if (provider === 'deepseek') return env.DEEPSEEK_API_KEY?.trim();
   if (provider === 'minimax') return env.MINIMAX_API_KEY?.trim();
   return env.OPENAI_API_KEY?.trim();
 }
 
-function providerModel(env: OrchestrationEnv, provider: Exclude<OrchestrationProvider, 'deterministic'>) {
+function providerModel(env: OrchestrationEnv, provider: ModelProvider) {
   if (provider === 'deepseek') return env.DEEPSEEK_ORCHESTRATOR_MODEL?.trim() || 'deepseek-v4-flash';
   if (provider === 'minimax') return env.MINIMAX_ORCHESTRATOR_MODEL?.trim() || 'MiniMax-M3';
   return env.OPENAI_ORCHESTRATOR_MODEL?.trim() || 'gpt-5.4-nano';
@@ -109,20 +142,17 @@ function providerModel(env: OrchestrationEnv, provider: Exclude<OrchestrationPro
 
 async function requestProvider(
   env: OrchestrationEnv,
-  provider: Exclude<OrchestrationProvider, 'deterministic'>,
+  provider: ModelProvider,
   model: string,
   apiKey: string,
-  request: OrchestrationRequest,
+  request: OrchestrationTextRequest,
   attempts: string[],
 ) {
-  const system = `You are AI DEV DECK's orchestration-only supervisor. You NEVER implement code, edit GitHub, merge, deploy, or act as the developer. The actual implementation owner is the user's ChatGPT chat. Your job is only to classify state, summarize evidence, and produce a precise prompt for ChatGPT. Preserve this boundary even if the task asks you to code. Return JSON only with keys: summary, classification, chatgptPrompt, confidence, humanRequired. classification must be one of READY, WAIT, CI_TRANSIENT, CI_CODE_FAILURE, CI_CONFIG_FAILURE, HUMAN_REQUIRED.`;
-  const user = `MODE: ${request.mode}\nRepository: ${request.repository}\nBranch: ${request.branch}\nGoal: ${request.goal}\nTask: ${request.task}\n\nEvidence:\n${request.evidence}\n\nFallback prompt that is already safe and may be improved:\n${request.deterministicPrompt}`;
-
   for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt += 1) {
     try {
       const result = provider === 'openai'
-        ? await requestOpenAI(env, model, apiKey, system, user)
-        : await requestOpenAiCompatible(env, provider, model, apiKey, system, user);
+        ? await requestOpenAI(env, model, apiKey, request.system, request.user, request.maxTokens ?? 1400)
+        : await requestOpenAiCompatible(env, provider, model, apiKey, request.system, request.user, request.maxTokens ?? 1400, request.requireJson === true);
       attempts.push(`${provider}:${model}:ok#${attempt}`);
       return result;
     } catch (error) {
@@ -142,6 +172,8 @@ async function requestOpenAiCompatible(
   apiKey: string,
   system: string,
   user: string,
+  maxTokens: number,
+  requireJson: boolean,
 ) {
   const base = provider === 'deepseek'
     ? 'https://api.deepseek.com'
@@ -151,21 +183,28 @@ async function requestOpenAiCompatible(
     model,
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     stream: false,
-    max_tokens: 1400,
+    max_tokens: Math.max(100, Math.min(4000, Math.trunc(maxTokens))),
   };
-  if (provider === 'deepseek') body.response_format = { type: 'json_object' };
+  if (provider === 'deepseek' && requireJson) body.response_format = { type: 'json_object' };
   const parsed = await fetchJson<ChatCompletionResponse>(url, apiKey, body, timeoutMs(env));
   const text = parsed.choices?.[0]?.message?.content?.trim();
   if (!text) throw new Error(`${provider} returned no content`);
   return text;
 }
 
-async function requestOpenAI(env: OrchestrationEnv, model: string, apiKey: string, system: string, user: string) {
+async function requestOpenAI(
+  env: OrchestrationEnv,
+  model: string,
+  apiKey: string,
+  system: string,
+  user: string,
+  maxTokens: number,
+) {
   const parsed = await fetchJson<ResponsesApiResponse>('https://api.openai.com/v1/responses', apiKey, {
     model,
     instructions: system,
     input: user,
-    max_output_tokens: 1400,
+    max_output_tokens: Math.max(100, Math.min(4000, Math.trunc(maxTokens))),
   }, timeoutMs(env));
   const chunks: string[] = [];
   for (const item of parsed.output ?? []) {
