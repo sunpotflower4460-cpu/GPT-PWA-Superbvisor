@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { isClaimableCommand, normalizeChatUrl, sanitizePrompt, type ChatCommand } from './chatCommandQueue';
+import {
+  enqueueChatCommand,
+  isClaimableCommand,
+  normalizeChatUrl,
+  sanitizePrompt,
+  type ChatCommand,
+  type ChatCommandEnv,
+} from './chatCommandQueue';
 
 const baseCommand: ChatCommand = {
   id: 'command-1',
@@ -26,6 +33,41 @@ describe('chat command validation', () => {
   it('trims prompts and caps payload size', () => {
     expect(sanitizePrompt('  continue  ')).toBe('continue');
     expect(sanitizePrompt('x'.repeat(30_000))).toHaveLength(24_000);
+  });
+});
+
+describe('chat command idempotency', () => {
+  it('returns the existing command when the same project dedupe key is queued again', async () => {
+    const store = new Map<string, string>();
+    const env = {
+      SUPERVISOR_STATE: {
+        get: async (key: string) => store.get(key) ?? null,
+        put: async (key: string, value: string) => { store.set(key, value); },
+        list: async ({ prefix = '' }: { prefix?: string }) => ({
+          keys: [...store.keys()].filter((key) => key.startsWith(prefix)).map((name) => ({ name })),
+          list_complete: true,
+          cacheStatus: null,
+        }),
+      },
+    } as unknown as ChatCommandEnv;
+
+    const first = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      projectName: 'Project One',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue route',
+      dedupeKey: 'developer:job-1:phase-a',
+    });
+    const second = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      projectName: 'Project One',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue route',
+      dedupeKey: 'developer:job-1:phase-a',
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(second.dedupeKey).toBe('developer:job-1:phase-a');
   });
 });
 
