@@ -13,7 +13,7 @@ AI DEV DECKの出発点は、普段ChatGPTでGitHubリポジトリをつない�
 優先順位は以下。
 
 1. 複数ChatGPT開発チャットの一元操作
-2. 複数案件の同時並行
+2. 複数案件の同時並行と**全案件remote activityの一画面把握**
 3. 軽量・モバイル優先・バックグラウンドで状態を失わないこと
 4. 複数端末・複数Bridgeでも二重claim/lost updateを起こしにくいこと
 5. 状態監視・CI監視・通知
@@ -31,6 +31,7 @@ Supervisor / Guardian / 外部LLM APIは主役ではなく、**Multi Chat Remote
 User / multiple devices
   ↓
 AI DEV DECK PWA
+  ├─ all-chat activity overview ← compact batch summaries
   ├─ Chat A command ─┐
   ├─ Chat B command ─┼─→ Supervisor Worker
   ├─ Chat C command ─┤        ↓
@@ -60,10 +61,18 @@ Cloudflare Worker、DeepSeek、MiniMax、OpenAI API等は、ChatGPTの代わり�
 最優先レイヤー。
 
 - 複数Project / ChatGPT chatの一覧
+- **案件を開かなくても各ChatGPTのremote activityを一覧表示**
+  - 配送中
+  - 再試行待ち
+  - 送信待ち
+  - Bridge待ち
+  - 要確認
+  - 最近送信済み
+  - 接続中 / offline
+- 全体の接続数 / 進行・待機数 / 要確認数
 - 1案件を開いて自由文指示
 - 「続ける」「問題点も確認」「手動だけまで」などのQuick Command
 - 案件を行き来しながら連続して指示
-- 各チャットの送信待ち / 処理中 / 送信済み / 失敗状態
 - Project / Goal / Definition of Done
 - Progress / milestone / timeline
 - Human blockers
@@ -74,6 +83,21 @@ Cloudflare Worker、DeepSeek、MiniMax、OpenAI API等は、ChatGPTの代わり�
 Main Project画面とOperating Planの通常操作もChat Control Busへ直接送る。コピーはfallback。
 
 PWAはChatGPTチャット本文を非公式にスクレイピングしない。
+
+#### Lightweight all-chat overview
+
+Primary Chat Controlは選択中のchatだけをpollしない。ChatGPT URLを持つ管理案件をまとめて `/api/chat-control/overview` へ送り、Worker側でcompact summaryへ変換する。
+
+- PWA poll: 8秒
+- Worker 1 request: 最大30 project
+- 30件を超える場合: PWAが30件ずつbatch分割し、残りを黙って切り捨てない
+- selected chatの詳細command/heartbeat pollは別途6秒
+- overviewはfull prompt / command本文を返さない
+- Coordinatorは `/commands/overview` でstatus/count/timestampだけを返す
+- overview readを理由にKV history mirrorを書き直さない
+- KV fallback時だけ最大100件のmetadata sourceからsummary化し、上限到達時は`approximate`を返す
+
+これにより、複数案件を1件ずつ開かずに把握できることと、モバイルで軽いことを両立する。
 
 ### Project Coordinator / strong consistency boundary
 
@@ -90,6 +114,8 @@ productionの複数端末競合耐性を担うauthoritative state boundary。
 - claim ownerとresult reporterの一致確認
 - delivery failure回数 / backoff / terminal failure
 - terminal failureの明示retry
+- retry/requeue時の旧Bridge ownership解放
+- **read-only command overview summary**
 - Cloud State revision compare-and-update
 - Guardian runの短期execution lease取得 / renew / release
 
@@ -123,7 +149,7 @@ Bridge protocol:
 
 Autopilot / recovery由来のcommandにはdedupe keyを付け、監視ループの重複配送を防ぐ。
 
-Delivery failureはcommand IDを変えずにbackoff再試行する。既定の自動配送上限後のみterminal `failed` とし、PWA/Bridgeから同じcommandを明示再queueできる。
+Delivery failureはcommand IDを変えずにbackoff再試行する。既定の自動配送上限後のみterminal `failed` とし、PWA/Bridgeから同じcommandを明示再queueできる。requeue時には以前の`bridgeId` ownershipを外し、次のclaimで新しいownerを設定する。
 
 ### ChatGPT Bridge
 
@@ -325,6 +351,14 @@ Autopilotは単純な「最後まで続ける」だけではない。
 - JavaScript gzip: 130 KiB以下
 - CSS gzip: 20 KiB以下
 
+Multi Chat overviewはbundleだけでなくruntime costも抑える。
+
+- compact summary only
+- batch API
+- full prompt/historyをoverviewに載せない
+- read-triggered KV mirrorを避ける
+- selected chat詳細pollとall-chat overview pollを分離する
+
 budget超過時は、上限引き上げより先にsecondary centerのlazy-load、重複UI削減、依存削減を検討する。
 
 ## 8. Security rules
@@ -373,21 +407,24 @@ Autopilot Route案件:
 Implemented foundation:
 
 1. Multi Chat Control UI
-2. Durable Chat Control Bus
-3. SQLite Durable Object `ProjectCoordinator`
-4. atomic command enqueue / dedupe / claim / result ownership
-5. atomic Cloud State revision compare-and-update
-6. KV migration + history mirror / compatibility fallback
-7. delivery backoff / terminal retry / persisted receipt
-8. project-specific Bridge heartbeat / claim / result
-9. official ChatGPT Apps Bridge companion
-10. Main Project / Operating Plan direct Queue path
-11. human-only WAITING_USER semantics
-12. AUTO/GUARDIAN next-turn + recovery auto-queue
-13. Autopilot Route continuation contract
-14. Setup Doctor atomic-coordinator diagnosis
-15. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
-16. Guardian Cron/manual advance execution lease + lease regression tests
+2. **全ChatGPT案件のlive remote activity rail + compact batch overview**
+3. Durable Chat Control Bus
+4. SQLite Durable Object `ProjectCoordinator`
+5. atomic command enqueue / dedupe / claim / result ownership
+6. read-only Coordinator command summary / no mirror-write overview polling
+7. atomic Cloud State revision compare-and-update
+8. KV migration + history mirror / compatibility fallback
+9. delivery backoff / terminal retry / persisted receipt
+10. retry/requeue時のstale Bridge ownership解放
+11. project-specific Bridge heartbeat / claim / result
+12. official ChatGPT Apps Bridge companion
+13. Main Project / Operating Plan direct Queue path
+14. human-only WAITING_USER semantics
+15. AUTO/GUARDIAN next-turn + recovery auto-queue
+16. Autopilot Route continuation contract
+17. Setup Doctor atomic-coordinator diagnosis
+18. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
+19. Guardian Cron/manual advance execution lease + lease regression tests
 
 Next high-priority gaps:
 
