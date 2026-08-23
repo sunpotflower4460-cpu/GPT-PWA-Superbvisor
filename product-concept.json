@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "conceptId": "multi-chat-remote-v1",
+  "productName": "AI DEV DECK",
+  "primaryPurpose": "普段使っている複数のChatGPT開発チャットを、スマホPWAからまとめて同時並行・軽量・バックグラウンド耐性ありで操作する",
+  "primaryUserFlow": [
+    "PWAで複数の既存ChatGPT開発案件を一覧する",
+    "対象案件へ自由文またはQuick Commandを送る",
+    "ChatGPTが実装・デバッグ・GitHub編集を実行する",
+    "Workerがキュー・状態・CI・復旧・通知を保持する",
+    "PWAから待機・失敗・人間待ち・完了を把握して次の指示を出す"
+  ],
+  "roles": {
+    "executor": "chatgpt",
+    "pwa": "multi-chat-control-plane",
+    "worker": "durable-orchestration-and-evidence",
+    "externalLlm": "orchestration-only",
+    "bridge": "official-chatgpt-apps-transport"
+  },
+  "invariants": [
+    {
+      "id": "C1",
+      "rule": "Multi Chat Remote is the primary product value; Supervisor, Guardian and Autopilot are supporting layers."
+    },
+    {
+      "id": "C2",
+      "rule": "The existing ChatGPT development conversation remains the implementation and debugging executor."
+    },
+    {
+      "id": "C3",
+      "rule": "External LLM APIs may classify, summarize, route and generate next/recovery instructions, but must not become the repository coding executor."
+    },
+    {
+      "id": "C4",
+      "rule": "Durable queue, state and evidence survive PWA closure whenever the platform allows it; recoverable failures are states, not terminal completion."
+    },
+    {
+      "id": "C5",
+      "rule": "Completion is evidence-based and never derived only from an AI saying it is done."
+    },
+    {
+      "id": "C6",
+      "rule": "Human-only actions are isolated as WAITING_USER / あなた待ち instead of pretending automation succeeded."
+    },
+    {
+      "id": "C7",
+      "rule": "Chat transport must not depend on ChatGPT session-cookie theft, scraping, unofficial authentication bypass or secret exposure in the PWA/widget."
+    },
+    {
+      "id": "C8",
+      "rule": "No automatic merge or production deployment without an explicit future product decision and human approval boundary."
+    },
+    {
+      "id": "C9",
+      "rule": "Mobile-first, low-friction operation is preferred over building a second full IDE or a provider-centric agent platform."
+    }
+  ],
+  "antiGoals": [
+    "Claude Code clone / second IDE",
+    "external API autonomous coding agent as the main executor",
+    "chat transcript viewer as the primary experience",
+    "generic project manager with ChatGPT links attached",
+    "provider benchmark or LLM router as the product itself",
+    "automatic merge or production deployment by default",
+    "unofficial ChatGPT cookie/session automation"
+  ],
+  "protectedArchitectureFiles": [
+    "product-concept.json",
+    "docs/PRODUCT_CONSTITUTION.md",
+    "docs/ARCHITECTURE.md",
+    "scripts/concept-guard.mjs",
+    "worker/src/index.ts",
+    "worker/src/developerAgent.ts",
+    "worker/src/guardianRunner.ts",
+    "chatgpt-bridge/src/bridgeApp.ts"
+  ],
+  "safety": {
+    "externalLlmGithubWrite": false,
+    "automaticMerge": false,
+    "automaticProductionDeploy": false,
+    "chatSessionCookieAutomation": false,
+    "evidenceRequiredForCompletion": true
+  }
+}
