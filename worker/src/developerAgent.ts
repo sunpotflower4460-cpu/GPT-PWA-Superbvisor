@@ -20,6 +20,7 @@ import {
   hasAutopilotRouteContract,
 } from './orchestratorPolicy';
 import { PushEnv, sendSupervisorPush } from './push';
+import { enqueueChatCommand } from './chatCommandQueue';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -35,6 +36,8 @@ export interface CreateDeveloperJobBody {
   model?: string;
   maxToolTurns?: number;
   maxAutoCiReruns?: number;
+  chatUrl?: string;
+  autoDispatch?: boolean;
 }
 
 export type DeveloperJobStatus = 'starting' | 'running' | 'completed' | 'failed';
@@ -72,6 +75,11 @@ export interface DeveloperJob {
   lastCiRerunFingerprint?: string;
   maxAutoCiReruns: number;
   degradedOrchestration?: boolean;
+  chatUrl?: string;
+  autoDispatch: boolean;
+  lastQueuedHandoffFingerprint?: string;
+  lastQueuedCommandId?: string;
+  lastDispatchError?: string;
 }
 
 const JOB_TTL = 60 * 60 * 24 * 14;
@@ -106,6 +114,8 @@ export async function continueDeveloperJob(
     definitionOfDone: previous.definitionOfDone,
     maxToolTurns: previous.maxToolTurns,
     maxAutoCiReruns: previous.maxAutoCiReruns,
+    chatUrl: previous.chatUrl,
+    autoDispatch: previous.autoDispatch,
   }, previous.workspace, goalRunId ?? previous.managedByGoalRunId);
 }
 
@@ -137,7 +147,7 @@ async function createDeveloperJobInternal(
   });
 
   const now = new Date().toISOString();
-  const job: DeveloperJob = {
+  let job: DeveloperJob = {
     id: crypto.randomUUID(),
     projectId: body.projectId,
     projectName: body.projectName,
@@ -161,8 +171,11 @@ async function createDeveloperJobInternal(
     ciAutoReruns: 0,
     maxAutoCiReruns: clamp(body.maxAutoCiReruns ?? 2, 0, MAX_AUTO_CI_RERUNS),
     degradedOrchestration: decision.degraded,
+    chatUrl: body.chatUrl?.trim() || undefined,
+    autoDispatch: Boolean(body.autoDispatch),
   };
   await saveJob(env, job);
+  job = await queueHandoffIfEnabled(env, job);
   return job;
 }
 
@@ -185,7 +198,9 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       ...job,
       phase: 'waiting_chatgpt',
       changedFiles: comparison.files ?? [],
-      outputText: job.outputText || 'ChatGPTによるbranch上の実装開始を待っています。Supervisorは停止せず監視を継続します。',
+      outputText: job.autoDispatch
+        ? 'Chat Control Busへ指示を渡し、ChatGPTによるbranch上の実装開始を待っています。Supervisorは停止せず監視を継続します。'
+        : job.outputText || 'ChatGPTによるbranch上の実装開始を待っています。Supervisorは停止せず監視を継続します。',
       updatedAt: new Date().toISOString(),
     };
     await saveJob(env, job);
@@ -279,9 +294,12 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       updatedAt: new Date().toISOString(),
     };
     await saveJob(env, job);
+    job = await queueHandoffIfEnabled(env, job);
     await safePush(env, {
       title: `${job.projectName || job.repository}: ルート次工程`,
-      body: 'CI成功。自動運転ルートに後続工程があるため、次のChatGPT実行指示を準備しました。',
+      body: job.autoDispatch
+        ? 'CI成功。後続工程のChatGPT指示をChat Control Busへ自動投入しました。'
+        : 'CI成功。自動運転ルートに後続工程があるため、次のChatGPT実行指示を準備しました。',
       tag: `developer-route-${job.id}`,
       projectId: job.projectId,
       kind: 'info',
@@ -344,8 +362,9 @@ async function prepareRecovery(
   const fingerprint = checks.length ? failureFingerprint(headSha, checks) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
     const phase: DeveloperJobPhase = classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready';
-    const stable: DeveloperJob = { ...job, phase, error: reason, updatedAt: new Date().toISOString() };
+    let stable: DeveloperJob = { ...job, phase, error: reason, updatedAt: new Date().toISOString() };
     await saveJob(env, stable);
+    if (phase !== 'human_required') stable = await queueHandoffIfEnabled(env, stable);
     return stable;
   }
 
@@ -368,7 +387,7 @@ async function prepareRecovery(
     deterministicPrompt,
   });
 
-  const updated: DeveloperJob = {
+  let updated: DeveloperJob = {
     ...job,
     phase: classification === 'HUMAN_REQUIRED' || decision.classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready',
     model: decision.model,
@@ -382,15 +401,54 @@ async function prepareRecovery(
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, updated);
+  if (updated.phase !== 'human_required') updated = await queueHandoffIfEnabled(env, updated);
   await safePush(env, {
     title: `${job.projectName || job.repository}: GPT復旧指示あり`,
-    body: reason.slice(0, 220),
+    body: updated.autoDispatch && updated.phase !== 'human_required'
+      ? `${reason.slice(0, 170)} / 復旧指示をChat Control Busへ自動投入済み`
+      : reason.slice(0, 220),
     tag: `developer-recovery-${job.id}`,
     projectId: job.projectId,
     kind: updated.phase === 'human_required' ? 'human' : 'error',
     url: './',
   });
   return updated;
+}
+
+async function queueHandoffIfEnabled(env: AgentEnv, job: DeveloperJob): Promise<DeveloperJob> {
+  if (!job.autoDispatch || job.phase === 'human_required' || !job.projectId || !job.chatUrl || !job.handoffPrompt?.trim()) return job;
+  const fingerprint = promptFingerprint(job.handoffPrompt);
+  if (job.lastQueuedHandoffFingerprint === fingerprint && job.lastQueuedCommandId) return job;
+
+  try {
+    const command = await enqueueChatCommand(env, {
+      projectId: job.projectId,
+      projectName: job.projectName,
+      chatUrl: job.chatUrl,
+      prompt: job.handoffPrompt,
+      dedupeKey: `developer:${job.id}:${fingerprint}`,
+    });
+    const updated: DeveloperJob = {
+      ...job,
+      lastQueuedHandoffFingerprint: fingerprint,
+      lastQueuedCommandId: command.id,
+      lastDispatchError: undefined,
+      outputText: `${job.outputText || ''}${job.outputText ? '\n\n' : ''}Chat Control Busへ次のChatGPT指示を自動投入しました。`,
+      updatedAt: new Date().toISOString(),
+    };
+    await saveJob(env, updated);
+    return updated;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Chat Control Bus dispatch failed';
+    const updated: DeveloperJob = {
+      ...job,
+      lastDispatchError: detail,
+      outputText: `${job.outputText || ''}${job.outputText ? '\n\n' : ''}Chat Control Busへの自動投入に失敗しました。監督状態は維持し、再開可能です: ${detail}`,
+      updatedAt: new Date().toISOString(),
+    };
+    await saveJob(env, updated);
+    return updated;
+  }
 }
 
 async function rerunFailedWorkflowJobs(env: AgentEnv, repository: string, runId: number) {
@@ -417,7 +475,7 @@ function latestChecksForHead(runs: Awaited<ReturnType<typeof getBranchWorkflowRu
 
 function buildPullRequestBody(job: DeveloperJob, comparison: Awaited<ReturnType<typeof compareWorkspace>>) {
   const files = (comparison.files ?? []).slice(0, 50).map((file) => `- \`${file.filename}\` (${file.status}, +${file.additions}/-${file.deletions})`).join('\n') || '- No file list returned';
-  return `## AI DEV DECK / ChatGPT execution\n\n**Goal:** ${job.goal}\n\n**Executor:** ChatGPT chat\n**Orchestrator:** ${job.orchestratorProvider}/${job.model}\n**Worker role:** branch preparation, monitoring, CI recovery routing, Draft PR preparation. The external orchestration model did not edit repository files.\n\n### Changed files\n${files}\n\n### Supervisor summary\n${job.outputText || 'No summary'}\n\n### Safety\n- Draft only\n- No automatic merge\n- No production deploy\n`;
+  return `## AI DEV DECK / ChatGPT execution\n\n**Goal:** ${job.goal}\n\n**Executor:** ChatGPT chat\n**Orchestrator:** ${job.orchestratorProvider}/${job.model}\n**Worker role:** branch preparation, monitoring, CI recovery routing, Chat Control Bus routing, Draft PR preparation. The external orchestration model did not edit repository files.\n\n### Changed files\n${files}\n\n### Supervisor summary\n${job.outputText || 'No summary'}\n\n### Safety\n- Draft only\n- No automatic merge\n- No production deploy\n`;
 }
 
 async function saveJob(env: AgentEnv, job: DeveloperJob) {
@@ -433,6 +491,15 @@ async function readJob(env: AgentEnv, id: string): Promise<DeveloperJob | null> 
 
 async function safePush(env: AgentEnv, payload: Parameters<typeof sendSupervisorPush>[1]) {
   try { await sendSupervisorPush(env, payload); } catch { /* Push failure must never stop orchestration. */ }
+}
+
+function promptFingerprint(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function shortTitle(value: string) {
