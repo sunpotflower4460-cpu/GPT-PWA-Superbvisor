@@ -187,14 +187,28 @@ export default function ChatControlCenter() {
       setMessage('安全なChatGPT URLが登録されていないためBridge接続を開始できません。');
       return;
     }
+
+    const popup = window.open('about:blank', '_blank');
+    if (!popup) {
+      setMessage('ブラウザに新しいタブをブロックされました。ポップアップを許可してからBridge接続を再度お試しください。');
+      return;
+    }
+    popup.opener = null;
+
     const instruction = `この開発チャットをAI DEV DECKから遠隔操作できるように、接続済みのAI DEV DECK ChatGPT Bridgeアプリを使ってBridgeを接続してください。\n\nprojectId: ${project.id}\nprojectName: ${project.name}\n\n利用するtool: connect_ai_dev_deck_bridge\nこのチャット自体を実装・デバッグ・GitHub編集の実行主体として維持し、BridgeはPWAから届く次ターン指示の中継だけに使ってください。`;
     try {
       await navigator.clipboard.writeText(instruction);
       setMessage('Bridge接続指示をコピーしました。開いたChatGPTへ一度だけ貼り付けて送信してください。接続後はPWA側から指示できます。');
     } catch {
-      setMessage('ChatGPTを開きます。Bridge toolへこの案件のprojectIdを指定して接続してください。');
+      setMessage('ChatGPTを開きます。Clipboardへ接続指示をコピーできなかったため、Bridge toolへこの案件のprojectIdを指定して接続してください。');
     }
-    window.open(chatUrl, '_blank', 'noopener,noreferrer');
+
+    try {
+      popup.location.replace(chatUrl);
+    } catch {
+      popup.close();
+      setMessage('新しいタブをChatGPTへ移動できませんでした。登録済みChatGPT URLを手動で開き、Bridge接続を行ってください。');
+    }
   }
 
   async function manualFallback(command: ChatCommand) {
