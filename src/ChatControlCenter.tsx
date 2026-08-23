@@ -124,6 +124,7 @@ export default function ChatControlCenter() {
     const result = await getChatControlOverview([projectId]);
     const item = result.projects[0];
     if (item) setOverviews((current) => ({ ...current, [item.projectId]: item }));
+    return item;
   }
 
   async function queue(project: DevProject, value: string, source: string) {
@@ -133,12 +134,11 @@ export default function ChatControlCenter() {
     setMessage('');
     try {
       await enqueueProjectChatCommand(project, text);
-      await Promise.all([
+      const [, freshOverview] = await Promise.all([
         project.id === selected?.id ? refreshCommands(project) : Promise.resolve(),
         refreshProjectOverview(project.id),
       ]);
-      const projectOverview = overviews[project.id];
-      setMessage(projectOverview?.bridgeConnected || (project.id === selected?.id && bridge.connected)
+      setMessage(freshOverview?.bridgeConnected
         ? `${project.name} の送信キューへ追加しました。接続中Bridgeが取得して対象ChatGPTへ配送します。`
         : `${project.name} の送信キューへ追加しました。PWAを閉じてもWorker側に残り、この案件のBridge接続後に配送できます。`);
       if (source === 'free') setPrompt('');
