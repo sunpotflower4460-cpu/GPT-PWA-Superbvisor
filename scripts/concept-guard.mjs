@@ -137,7 +137,15 @@ const chatControlUi = containsAll('src/ChatControlCenter.tsx', [
 ]);
 assert(chatControlUi.includes('chatProjectActivityLabel'), 'chat control: every project can surface live remote activity in the rail');
 assert(chatControlUi.includes('Object.fromEntries'), 'chat control: batch overview is mapped across all visible projects');
-assert(/manualFallback[\s\S]{0,1600}cancelProjectChatCommand[\s\S]{0,1600}window\.open/.test(chatControlUi), 'chat control: manual fallback cancels the durable command before navigating to ChatGPT');
+assert(
+  /manualFallback[\s\S]{0,1600}window\.open\('about:blank'[\s\S]{0,1600}cancelProjectChatCommand[\s\S]{0,1600}popup\.location\.replace/.test(chatControlUi),
+  'chat control: manual fallback reserves a tab, cancels the durable command, then navigates to ChatGPT',
+);
+assert(
+  /if \(!popup\)[\s\S]{0,500}Queueは取消していません/.test(chatControlUi),
+  'chat control: popup-block failure leaves the automatic queue intact',
+);
+assert(/catch \(error\)[\s\S]{0,500}popup\.close\(\)/.test(chatControlUi), 'chat control: cancel failure closes the reserved blank tab');
 
 const chatControlClient = containsAll('src/chatControl.ts', [
   'getChatControlOverview',
