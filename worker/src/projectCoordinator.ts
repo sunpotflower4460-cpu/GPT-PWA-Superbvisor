@@ -20,6 +20,25 @@ export interface CoordinatorChatCommand {
   dedupeKey?: string;
 }
 
+export interface CoordinatorCommandActivity {
+  id: string;
+  status: CoordinatorChatCommandStatus;
+  createdAt: string;
+  updatedAt: string;
+  deliveredAt?: string;
+  bridgeId?: string;
+  deliveryFailures?: number;
+  nextAttemptAt?: string;
+}
+
+export interface CoordinatorCommandOverview {
+  latest?: CoordinatorCommandActivity;
+  unresolved?: CoordinatorCommandActivity;
+  pendingCount: number;
+  failedCount: number;
+  totalCount: number;
+}
+
 export interface CoordinatorCloudState {
   revision: string;
   updatedAt: string;
@@ -114,6 +133,11 @@ export class ProjectCoordinator {
       await this.state.storage.put(`${COMMAND_PREFIX}${command.id}`, command);
       if (command.dedupeKey) await this.state.storage.put(dedupeKey(command.dedupeKey), command.id);
       return json({ command }, 201);
+    }
+
+    if (url.pathname === '/commands/overview' && request.method === 'GET') {
+      const commands = (await this.listCommands()).filter((command) => !isExpiredCommand(command));
+      return json({ overview: summarizeCoordinatorCommands(commands) });
     }
 
     if (url.pathname === '/commands/list' && request.method === 'GET') {
@@ -319,6 +343,19 @@ export class ProjectCoordinator {
   }
 }
 
+export function summarizeCoordinatorCommands(commands: CoordinatorChatCommand[]): CoordinatorCommandOverview {
+  const newestFirst = [...commands].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const latest = newestFirst[0];
+  const unresolved = newestFirst.find((command) => command.status === 'claimed' || command.status === 'queued' || command.status === 'failed');
+  return {
+    latest: latest ? commandActivity(latest) : undefined,
+    unresolved: unresolved ? commandActivity(unresolved) : undefined,
+    pendingCount: commands.filter((command) => command.status === 'queued' || command.status === 'claimed').length,
+    failedCount: commands.filter((command) => command.status === 'failed').length,
+    totalCount: commands.length,
+  };
+}
+
 export function isCoordinatorCommandClaimable(command: CoordinatorChatCommand, now = Date.now()) {
   if (command.status === 'queued') {
     if (!command.nextAttemptAt) return true;
@@ -430,6 +467,19 @@ export async function releaseCoordinatorLease(
     method: 'POST',
     body: JSON.stringify(input),
   });
+}
+
+function commandActivity(command: CoordinatorChatCommand): CoordinatorCommandActivity {
+  return {
+    id: command.id,
+    status: command.status,
+    createdAt: command.createdAt,
+    updatedAt: command.updatedAt,
+    deliveredAt: command.deliveredAt,
+    bridgeId: command.bridgeId,
+    deliveryFailures: command.deliveryFailures,
+    nextAttemptAt: command.nextAttemptAt,
+  };
 }
 
 function isStoredCommand(value: unknown): value is CoordinatorChatCommand {
