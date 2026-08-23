@@ -101,6 +101,7 @@ containsAll('docs/ARCHITECTURE.md', [
   'Multi Chat Remoteをより放置可能にするための補助層',
   'Project Coordinator / strong consistency boundary',
   'SQLite-backed Cloudflare Durable Object',
+  'Guardian runの短期execution lease取得 / renew / release',
   'ChatGPT execution',
   'Supervisor自身はコードを実装しない',
   '通常の送信経路は `PWA → Chat Control Bus → ChatGPT Bridge → 対象ChatGPT`',
@@ -176,11 +177,15 @@ const coordinator = containsAll('worker/src/projectCoordinator.ts', [
   '/commands/result',
   '/commands/retry',
   '/state/save',
+  '/lease/acquire',
+  '/lease/renew',
+  '/lease/release',
   'claim_owner_mismatch',
   'deliveryFailures',
 ]);
 assert(coordinator.includes('COMMANDS_MIGRATED_KEY'), 'coordinator: legacy queue migration remains explicit');
 assert(coordinator.includes('STATE_MIGRATED_KEY'), 'coordinator: legacy state migration remains explicit');
+assert(coordinator.includes('lease_owner_mismatch'), 'coordinator: stale/non-owner lease changes remain rejected');
 
 const stateSync = containsAll('worker/src/stateSync.ts', [
   'hasAtomicCoordinator',
@@ -204,6 +209,16 @@ const developerAgent = containsAll('worker/src/developerAgent.ts', [
   'Chat Control Busへ次のChatGPT指示を自動投入しました',
 ]);
 assert(/recovery_ready[\s\S]{0,5000}queueHandoffIfEnabled/.test(developerAgent), 'worker: recoverable ChatGPT handoffs can be routed back into the durable command bus');
+
+const guardianRunner = containsAll('worker/src/guardianRunner.ts', [
+  'acquireCoordinatorLease',
+  'renewCoordinatorLease',
+  'releaseCoordinatorLease',
+  'GUARDIAN_ADVANCE_LEASE_NAME',
+  "const scope = `guardian:${id}`",
+]);
+assert(guardianRunner.includes('hasAtomicCoordinator'), 'guardian: atomic coordinator gates concurrent advance protection');
+assert(guardianRunner.includes('guardian_advance_lease_lost'), 'guardian: lost execution lease is detected instead of silently continuing');
 
 containsAll('worker/src/orchestratorPolicy.ts', [
   'ChatGPT',
