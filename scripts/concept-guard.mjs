@@ -37,6 +37,7 @@ function noMatch(file, patterns) {
   for (const pattern of patterns) {
     assert(!pattern.test(content), `${file}: forbidden concept-boundary pattern matched ${pattern}`);
   }
+  return content;
 }
 
 let manifest = null;
@@ -87,6 +88,33 @@ containsAll('README.md', [
   'オーケストレーション専用',
 ]);
 
+const app = containsAll('src/App.tsx', [
+  'enqueueProjectChatCommand',
+  'Chat Controlを開く',
+  '実行者はChatGPT固定',
+]);
+assert(!app.includes("'API_WORKER'"), 'app: legacy API_WORKER executor is not exposed in the primary UI');
+assert(!app.includes('タップでコピー'), 'app: primary quick actions are not clipboard-first');
+
+const core = containsAll('src/core.ts', [
+  "export type ExecutionMode = 'CHAT' | 'WORK'",
+  "executionMode: stored.executionMode === 'WORK' ? 'WORK' : 'CHAT'",
+]);
+assert(!core.includes('API_WORKER'), 'core: legacy API_WORKER executor mode is migrated away');
+
+const runtimeSync = containsAll('src/RuntimeProjectSync.tsx', [
+  'ChatGPT Bridge配送 / 実行待ち',
+  "job.phase === 'human_required'",
+]);
+assert(!runtimeSync.includes("blockers = unique(['復旧指示をChatGPTで実行'])"), 'runtime: routine recovery is not mislabeled as human-only');
+assert(!runtimeSync.includes("blockers = unique(['Supervisorが準備した指示をChatGPTで実行'])"), 'runtime: routine ChatGPT handoff is not mislabeled as human-only');
+
+const supervisor = containsAll('src/supervisor.ts', [
+  'function automationEnabled',
+  "project.automationLevel === 'AUTO' || project.automationLevel === 'GUARDIAN'",
+]);
+assert(!supervisor.includes("project.executionMode !== 'CHAT'"), 'supervisor: CHAT execution can auto-continue when automation is enabled');
+
 const workerIndex = containsAll('worker/src/index.ts', [
   "executor: 'chatgpt'",
   'orchestrationOnly: true',
@@ -94,6 +122,14 @@ const workerIndex = containsAll('worker/src/index.ts', [
   'chatCommandBus: true',
 ]);
 assert(/\/webhooks\/openai[\s\S]{0,500}deprecated_background_executor/.test(workerIndex), 'worker: deprecated external background executor stays disabled');
+
+const developerAgent = containsAll('worker/src/developerAgent.ts', [
+  'enqueueChatCommand',
+  'autoDispatch',
+  'queueHandoffIfEnabled',
+  'Chat Control Busへ次のChatGPT指示を自動投入しました',
+]);
+assert(/recovery_ready[\s\S]{0,5000}queueHandoffIfEnabled/.test(developerAgent), 'worker: recoverable ChatGPT handoffs can be routed back into the durable command bus');
 
 containsAll('worker/src/orchestratorPolicy.ts', [
   'ChatGPT',
@@ -106,6 +142,12 @@ const bridge = containsAll('chatgpt-bridge/src/bridgeApp.ts', [
   'ai_dev_deck_bridge_result',
 ]);
 assert(/allowedProjectIds/.test(bridge), 'bridge: project allowlist remains part of runtime boundary');
+
+containsAll('scripts/check-bundle-size.mjs', [
+  'JS_GZIP_BUDGET',
+  'CSS_GZIP_BUDGET',
+  'Mobile-first bundle budget failed',
+]);
 
 noMatch('chatgpt-bridge/src/bridgeApp.ts', [
   /document\.cookie/i,
@@ -133,4 +175,4 @@ if (failures.length) {
   console.error('\nRead docs/PRODUCT_CONSTITUTION.md before changing protected architecture boundaries.');
   process.exit(1);
 }
-console.log('Concept Guard: product direction and safety boundaries are intact.');
+console.log('Concept Guard: product direction, primary UX and safety boundaries are intact.');
