@@ -111,6 +111,9 @@ Supervisor / Guardianは製品の主役ではなく、Multi Chat Remoteをより
 - projectごとの送信Queue / 履歴を表示
 - `queued / claimed / delivered / failed / cancelled` を表示
 - failed commandを同じcommand IDのまま明示再試行
+- queued / failed commandを手動送信へ切り替える時は、**自動Queueを安全にcancelしてから**ChatGPTを開き、後からBridgeが同じ本文を重複配送するのを防止
+- popup block / Clipboard失敗時はQueueをcancelせず自動配送経路を維持
+- Bridgeがclaim済みなら手動切替を拒否し、配送中ownershipを奪わない
 
 #### 軽量なall-chat overview
 
@@ -139,7 +142,7 @@ queued
   ↓
 1つのBridgeだけがclaim
   ↓
-delivered / retrying / failed
+delivered / retrying / failed / cancelled
 ```
 
 - PWAを閉じてもcommandを保持
@@ -151,6 +154,7 @@ delivered / retrying / failed
 - stale/non-owner Bridgeからのresult overwriteを拒否
 - transient delivery failureは同じcommand IDでbackoff再試行
 - retry/requeue時は以前のBridge ownershipを解放
+- manual fallback時はqueued/failed→cancelledとBridge claimを同じCoordinator内で直列化
 - 自動試行上限後のみterminal `failed`
 - automation由来commandはdedupe keyで重複投入を抑制
 
@@ -262,7 +266,7 @@ Guardian leaseは通常の二重advanceを抑える入口ロックであり、Gu
 |---|---|
 | ChatGPT | 実装・デバッグ・レビュー・GitHub編集・検証 |
 | PWA | 複数chat操作・**全chat live overview**・状態表示・route指定 |
-| ProjectCoordinator | command ownership/dedupe/retry・read-only overview summary・Cloud State revision・Guardian leaseの強整合調停 |
+| ProjectCoordinator | command ownership/dedupe/retry/manual-fallback cancel・read-only overview summary・Cloud State revision・Guardian leaseの強整合調停 |
 | Chat Control Bus | 指示Queueの永続化・配送状態 |
 | ChatGPT Bridge | Queue commandを同じChatGPT会話へfollow-up送信・delivery receipt同期 |
 | Supervisor | 状態整理・次手生成・completion判断・AUTO時Queue投入 |
@@ -305,6 +309,14 @@ ChatGPT send success / Worker ack failure
 Bridge crash after claim
   → stale claim recovery
   → next active bridgeが再claim
+
+Manual fallback
+  → popup確保
+  → promptをClipboardへコピー
+  → queued/failed commandをatomic cancel
+  → cancel成功後だけChatGPTへ遷移
+  → popup/Clipboard失敗ならQueue維持
+  → Bridge claim済みならcancel拒否・手動送信しない
 
 Guardian Cron + manual refresh
   → guardian-advance lease
@@ -402,6 +414,7 @@ CIではConcept Guardを最初に実行し、通過した場合だけ次の3系�
 - 非公式スクレイピングや認証回避を前提にしない
 - Bridge project allowlistをfail-closedにする
 - stale/non-owner Bridgeからのresult overwriteを拒否する
+- manual fallbackでautomatic Queueを残したまま同じ本文を別送信しない
 - 外部LLMにGitHub write/delete/merge権限を与えない
 - main/default branchへWorkerからコードwriteしない
 - 自動merge / production deployなし
