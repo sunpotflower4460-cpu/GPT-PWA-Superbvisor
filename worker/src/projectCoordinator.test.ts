@@ -107,6 +107,40 @@ describe('ProjectCoordinator command atomicity', () => {
     expect(updated.bridgeId).toBeUndefined();
     expect(updated.nextAttemptAt).toBeTruthy();
   });
+
+  it('atomically cancels queued work before manual fallback and prevents a later claim', async () => {
+    const coordinator = createCoordinator();
+    const queued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue manually',
+    });
+    const id = (await queued.json() as { command: { id: string } }).command.id;
+    const cancelled = await post(coordinator, '/commands/cancel', {
+      id,
+      projectId: 'project-1',
+      detail: 'manual fallback',
+    });
+    expect(cancelled.status).toBe(200);
+    expect((await cancelled.json() as { command: { status: string } }).command.status).toBe('cancelled');
+
+    const claim = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    expect((await claim.json() as { command: unknown }).command).toBeNull();
+  });
+
+  it('refuses cancellation once a bridge owns the command', async () => {
+    const coordinator = createCoordinator();
+    const queued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue',
+    });
+    const id = (await queued.json() as { command: { id: string } }).command.id;
+    await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    const cancelled = await post(coordinator, '/commands/cancel', { id, projectId: 'project-1' });
+    expect(cancelled.status).toBe(409);
+    expect((await cancelled.json() as { error: string }).error).toBe('only_queued_or_failed_commands_can_cancel');
+  });
 });
 
 describe('ProjectCoordinator state atomicity', () => {
