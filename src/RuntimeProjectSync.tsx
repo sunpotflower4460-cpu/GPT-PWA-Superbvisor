@@ -88,27 +88,40 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
 
   let status: ProjectStatus = 'RUNNING';
   let progress = project.progress;
-  let phase = `Guardian cycle ${run.cycle}/${run.maxCycles}`;
+  let phase = 'Guardian監督中';
   let blockers = project.humanBlockers;
   let kind: TimelineEvent['kind'] = 'info';
 
   if (run.status === 'running' || run.status === 'starting') {
-    progress = Math.max(progress, Math.min(70, 35 + run.cycle * 10));
-    phase = `Guardian cycle ${run.cycle}/${run.maxCycles} · 実装中`;
-    blockers = [];
+    if (run.phase === 'handoff_ready' || run.phase === 'waiting_chatgpt') {
+      status = 'WAITING_USER';
+      progress = Math.max(progress, 35);
+      phase = 'Guardian監督中 · ChatGPT実行待ち';
+      blockers = unique(['ChatGPTでSupervisorの作業指示を実行']);
+      kind = 'human';
+    } else if (run.phase === 'recovery_ready') {
+      status = 'WAITING_USER';
+      progress = Math.max(progress, 65);
+      phase = 'CI失敗を検出 · ChatGPT修正待ち';
+      blockers = unique(['Guardianが生成した復旧指示をChatGPTで実行']);
+      kind = 'warning';
+    } else {
+      progress = Math.max(progress, 45);
+      phase = 'Guardian監督処理中';
+      blockers = [];
+    }
   } else if (run.status === 'waiting_ci') {
     status = 'WAITING_AI';
     progress = Math.max(progress, 78);
-    phase = `Guardian cycle ${run.cycle}/${run.maxCycles} · CI確認中`;
+    phase = 'ChatGPT変更済み · CI監視中';
     blockers = [];
   } else if (run.status === 'review_ready') {
     status = 'WAITING_USER';
-    progress = Math.max(progress, 90);
-    phase = 'コード作業完了 · CI未確認のためレビュー待ち';
-    blockers = unique([
-      run.pullRequest ? `Draft PR #${run.pullRequest.number} をレビュー` : '成果物をレビュー',
-      'CIが確認できないため、完了扱い前に検証する',
-    ]);
+    progress = Math.max(progress, run.phase === 'human_required' ? 70 : 90);
+    phase = run.phase === 'human_required' ? '人間操作が必要' : 'レビュー待ち';
+    blockers = unique(run.phase === 'human_required'
+      ? [run.message || '権限・承認など人間操作を確認']
+      : [run.pullRequest ? `Draft PR #${run.pullRequest.number} をレビュー` : '成果物と証拠をレビュー']);
     kind = 'human';
   } else if (run.status === 'completed') {
     if (run.pullRequest) {
@@ -120,13 +133,18 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
     } else {
       status = 'COMPLETED';
       progress = 100;
-      phase = 'Guardian完了 · CI成功確認済み';
+      phase = 'ChatGPT作業・CI成功確認済み';
       blockers = [];
       kind = 'success';
     }
+  } else if (run.status === 'expired') {
+    status = 'WAITING_USER';
+    phase = 'Guardian監視時間上限 · ChatGPTで再開可能';
+    blockers = unique(['保存済み状態からChatGPTで作業を再開']);
+    kind = 'warning';
   } else {
     status = 'ERROR';
-    phase = run.status === 'expired' ? 'Guardian時間上限で停止' : 'Guardianが復旧上限で停止';
+    phase = 'Guardian設定エラー';
     kind = 'error';
   }
 
@@ -134,12 +152,12 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
     status,
     progress,
     currentPhase: phase,
-    executionMode: 'API_WORKER',
+    executionMode: 'CHAT',
     automationLevel: 'GUARDIAN',
     humanBlockers: blockers,
     lastActivityAt: run.updatedAt,
   }, {
-    id: `runtime:guardian:${run.id}:${run.status}:${run.cycle}`,
+    id: `runtime:guardian:${run.id}:${run.status}:${run.phase || ''}:${run.recoveryCount || 0}`,
     at: run.updatedAt,
     kind,
     message: runtimeGuardianMessage(run),
@@ -149,24 +167,40 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
 function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
   if (!isNewer(job.updatedAt, project.lastActivityAt)) return project;
 
-  let status: ProjectStatus = 'RUNNING';
+  let status: ProjectStatus = 'WAITING_USER';
   let progress = project.progress;
-  let phase = 'GitHub Developer Agent · 実装中';
+  let phase = 'ChatGPT作業指示準備済み';
   let blockers = project.humanBlockers;
-  let kind: TimelineEvent['kind'] = 'info';
+  let kind: TimelineEvent['kind'] = 'human';
 
   if (job.status === 'starting' || job.status === 'running') {
-    progress = Math.max(progress, 45);
-    blockers = [];
+    if (job.phase === 'waiting_ci') {
+      status = 'WAITING_AI';
+      progress = Math.max(progress, 78);
+      phase = 'ChatGPT変更済み · CI監視中';
+      blockers = [];
+      kind = 'info';
+    } else if (job.phase === 'recovery_ready') {
+      progress = Math.max(progress, 65);
+      phase = 'CI失敗 · ChatGPT復旧指示あり';
+      blockers = unique(['復旧指示をChatGPTで実行']);
+      kind = 'warning';
+    } else if (job.phase === 'human_required') {
+      phase = '人間操作が必要';
+      blockers = unique([job.error || '権限・承認など人間操作を確認']);
+    } else {
+      progress = Math.max(progress, 35);
+      phase = 'ChatGPT実行待ち';
+      blockers = unique(['Supervisorが準備した指示をChatGPTで実行']);
+    }
   } else if (job.status === 'completed') {
     status = 'WAITING_USER';
-    progress = Math.max(progress, job.pullRequest ? 90 : 80);
-    phase = job.pullRequest ? `Draft PR #${job.pullRequest.number} · レビュー待ち` : 'GitHub Agent完了 · 結果確認待ち';
-    blockers = unique([job.pullRequest ? `Draft PR #${job.pullRequest.number} をレビュー` : 'Developer Agentの結果を確認']);
-    kind = 'human';
+    progress = Math.max(progress, job.pullRequest ? 95 : 90);
+    phase = job.pullRequest ? `CI成功 · Draft PR #${job.pullRequest.number} レビュー待ち` : 'CI成功 · 最終確認待ち';
+    blockers = unique([job.pullRequest ? `Draft PR #${job.pullRequest.number} をレビュー` : '実装結果と証拠を最終確認']);
   } else {
     status = 'ERROR';
-    phase = 'GitHub Developer Agentが停止';
+    phase = 'ChatGPT Orchestrator設定エラー';
     kind = 'error';
   }
 
@@ -174,12 +208,12 @@ function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
     status,
     progress,
     currentPhase: phase,
-    executionMode: 'API_WORKER',
-    automationLevel: 'AUTO',
+    executionMode: 'CHAT',
+    automationLevel: 'ASSIST',
     humanBlockers: blockers,
     lastActivityAt: job.updatedAt,
   }, {
-    id: `runtime:developer:${job.id}:${job.status}`,
+    id: `runtime:developer:${job.id}:${job.status}:${job.phase || ''}:${job.recoveryCount ?? 0}`,
     at: job.updatedAt,
     kind,
     message: runtimeDeveloperMessage(job),
@@ -189,55 +223,49 @@ function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
 function applyBackground(project: DevProject, job: BackgroundJob): DevProject {
   if (!isNewer(job.updatedAt, project.lastActivityAt)) return project;
 
-  let status: ProjectStatus = 'RUNNING';
-  let progress = project.progress;
-  let phase = job.currentPhase || 'Background処理中';
-  let blockers = project.humanBlockers;
-  let kind: TimelineEvent['kind'] = 'info';
+  if (job.kind === 'orchestration_handoff') {
+    return patchRuntime(project, {
+      status: 'WAITING_USER',
+      progress: Math.max(project.progress, 20),
+      currentPhase: 'Supervisor整理完了 · ChatGPT実行待ち',
+      executionMode: 'CHAT',
+      automationLevel: 'ASSIST',
+      humanBlockers: unique(['Supervisorが準備した指示をChatGPTで実行']),
+      lastActivityAt: job.updatedAt,
+    }, {
+      id: `runtime:orchestration:${job.id}`,
+      at: job.updatedAt,
+      kind: 'human',
+      message: `Supervisor: GPT引き継ぎ指示を準備${job.degradedOrchestration ? '（fallback使用）' : ''}`,
+    });
+  }
 
+  // Legacy background-executor jobs remain readable, but are never treated as proof of new ChatGPT execution.
+  let status: ProjectStatus = 'WAITING_USER';
+  let progress = project.progress;
+  let phase = '旧Background Job結果 · 確認待ち';
+  let blockers = unique(['旧Background Jobの結果を確認し、必要ならChatGPTで再検証']);
+  let kind: TimelineEvent['kind'] = 'warning';
   if (job.status === 'queued' || job.status === 'in_progress') {
-    progress = Math.max(progress, 35);
-    phase = job.currentPhase ? `Background · ${job.currentPhase}` : 'Background処理中';
+    status = 'WAITING_AI';
+    phase = '旧Background Job処理中';
     blockers = [];
-  } else if (job.status === 'completed') {
-    const human = job.report?.humanRequired ?? [];
-    if (human.length) {
-      status = 'WAITING_USER';
-      progress = Math.max(progress, 90);
-      phase = job.report?.reachedStage || 'Background完了 · あなた待ち';
-      blockers = unique(human);
-      kind = 'human';
-    } else if (job.report?.done) {
-      status = 'COMPLETED';
-      progress = 100;
-      phase = job.report.reachedStage || 'Background目標完了';
-      blockers = [];
-      kind = 'success';
-    } else {
-      status = 'WAITING_AI';
-      phase = job.report?.reachedStage || 'Background処理完了 · 次工程確認';
-      blockers = [];
-      kind = 'success';
-    }
-  } else {
-    status = 'ERROR';
-    phase = `Background ${job.status}`;
-    kind = 'error';
+    kind = 'info';
   }
 
   return patchRuntime(project, {
     status,
     progress,
     currentPhase: phase,
-    executionMode: 'API_WORKER',
-    automationLevel: job.autoRecover ? 'AUTO' : 'ASSIST',
+    executionMode: 'CHAT',
+    automationLevel: 'ASSIST',
     humanBlockers: blockers,
     lastActivityAt: job.updatedAt,
   }, {
-    id: `runtime:background:${job.id}:${job.status}:${job.retryCount ?? 0}`,
+    id: `runtime:legacy-background:${job.id}:${job.status}`,
     at: job.updatedAt,
     kind,
-    message: runtimeBackgroundMessage(job),
+    message: `旧Background Job ${job.status}: 新規の完成証拠には使用しません`,
   });
 }
 
@@ -249,23 +277,22 @@ function patchRuntime(project: DevProject, patch: Partial<DevProject>, event: Ti
 }
 
 function runtimeGuardianMessage(run: GuardianRun) {
-  if (run.status === 'completed') return `Guardian: CI成功確認済み${run.pullRequest ? ` / Draft PR #${run.pullRequest.number}` : ''}`;
-  if (run.status === 'review_ready') return 'Guardian: コード作業完了。CI未確認のため人間レビュー待ち';
-  if (run.status === 'waiting_ci') return `Guardian cycle ${run.cycle}/${run.maxCycles}: GitHub Actions待ち`;
-  if (run.status === 'failed' || run.status === 'expired') return `Guardian停止: ${run.message || run.error || run.status}`;
-  return `Guardian cycle ${run.cycle}/${run.maxCycles}: 実装・復旧を継続中`;
+  if (run.status === 'completed') return `Guardian: ChatGPT作業後のCI成功確認済み${run.pullRequest ? ` / Draft PR #${run.pullRequest.number}` : ''}`;
+  if (run.status === 'review_ready') return `Guardian: ${run.phase === 'human_required' ? '人間操作が必要' : 'レビュー待ち'}`;
+  if (run.status === 'waiting_ci') return 'Guardian: 現在headのGitHub Actionsを監視中';
+  if (run.status === 'expired') return 'Guardian: 監視時間上限。状態保存済み、ChatGPTで再開可能';
+  if (run.phase === 'recovery_ready') return `Guardian: CI失敗を検出しChatGPT復旧指示を準備（${run.recoveryCount || 0}回目）`;
+  if (run.phase === 'handoff_ready' || run.phase === 'waiting_chatgpt') return 'Guardian: ChatGPT実行待ち。Workerは監督のみ継続';
+  if (run.status === 'failed') return `Guardian設定エラー: ${run.message || run.error || 'unknown'}`;
+  return 'Guardian: オーケストレーション監督中';
 }
 
 function runtimeDeveloperMessage(job: DeveloperJob) {
-  if (job.status === 'completed') return job.pullRequest ? `GitHub Agent完了: Draft PR #${job.pullRequest.number}` : 'GitHub Agent完了: 結果確認待ち';
-  if (job.status === 'failed') return `GitHub Agent停止: ${job.error || 'unknown error'}`;
-  return `GitHub Agent ${job.status}: ${job.workspace.branch}`;
-}
-
-function runtimeBackgroundMessage(job: BackgroundJob) {
-  if (job.status === 'completed') return `Background完了: ${job.report?.summary || job.checkpoint?.summary || '処理完了'}`;
-  if (job.status === 'failed' || job.status === 'incomplete' || job.status === 'cancelled') return `Background停止: ${job.error || job.status}`;
-  return `Background ${job.status}${job.retryCount ? ` · retry ${job.retryCount}` : ''}`;
+  if (job.status === 'completed') return job.pullRequest ? `ChatGPT作業後のCI成功: Draft PR #${job.pullRequest.number}` : 'ChatGPT作業後のCI成功確認済み';
+  if (job.phase === 'recovery_ready') return `CI失敗: ChatGPT復旧指示を準備（${job.recoveryCount ?? 0}回目）`;
+  if (job.phase === 'waiting_ci') return 'ChatGPT変更を検出: CI監視中';
+  if (job.status === 'failed') return `Orchestrator設定エラー: ${job.error || 'unknown error'}`;
+  return `ChatGPT実行待ち: ${job.workspace.branch}`;
 }
 
 function isNewer(candidate: string, current: string) {
