@@ -1,14 +1,15 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "conceptId": "multi-chat-remote-v1",
   "productName": "AI DEV DECK",
   "primaryPurpose": "普段使っている複数のChatGPT開発チャットを、スマホPWAからまとめて同時並行・軽量・バックグラウンド耐性ありで操作する",
   "primaryUserFlow": [
     "PWAで複数の既存ChatGPT開発案件を一覧する",
-    "対象案件へ自由文またはQuick Commandを送る",
+    "対象案件へ自由文またはQuick CommandをChat Control Bus経由で送る",
     "ChatGPTが実装・デバッグ・GitHub編集を実行する",
-    "Workerがキュー・状態・CI・復旧・通知を保持する",
-    "PWAから待機・失敗・人間待ち・完了を把握して次の指示を出す"
+    "Workerがキュー・状態・CI・復旧・Autopilot次手・通知を保持する",
+    "AUTO/GUARDIANでは復旧・次工程をChat Control Busへ自動投入する",
+    "PWAから待機・失敗・本当の人間待ち・完了を把握して複数案件を回す"
   ],
   "roles": {
     "executor": "chatgpt",
@@ -17,6 +18,18 @@
     "externalLlm": "orchestration-only",
     "bridge": "official-chatgpt-apps-transport"
   },
+  "experience": {
+    "primarySendPath": "pwa-to-chat-control-bus-to-chatgpt-bridge",
+    "clipboardIsFallbackOnly": true,
+    "routineChatWaitingIsHumanRequired": false,
+    "chatCanAutoContinue": true,
+    "autopilotNextTurnAutoQueue": true,
+    "recoveryNextTurnAutoQueue": true,
+    "legacyApiWorkerExecutorVisible": false,
+    "responseMirrorRequiresOfficialTransport": true,
+    "mobileJsGzipBudgetKiB": 130,
+    "mobileCssGzipBudgetKiB": 20
+  },
   "invariants": [
     {
       "id": "C1",
@@ -24,7 +37,7 @@
     },
     {
       "id": "C2",
-      "rule": "The existing ChatGPT development conversation remains the implementation and debugging executor."
+      "rule": "The existing ChatGPT development conversation remains the implementation and debugging executor; API_WORKER is not a normal executor mode."
     },
     {
       "id": "C3",
@@ -40,7 +53,7 @@
     },
     {
       "id": "C6",
-      "rule": "Human-only actions are isolated as WAITING_USER / あなた待ち instead of pretending automation succeeded."
+      "rule": "WAITING_USER is reserved for genuine human-only actions; normal ChatGPT handoff, bridge delivery and recoverable code failure remain AI/system states."
     },
     {
       "id": "C7",
@@ -52,7 +65,19 @@
     },
     {
       "id": "C9",
-      "rule": "Mobile-first, low-friction operation is preferred over building a second full IDE or a provider-centric agent platform."
+      "rule": "Mobile-first, low-friction operation is preferred over building a second full IDE or a provider-centric agent platform, and bundle size is budgeted in CI."
+    },
+    {
+      "id": "C10",
+      "rule": "Normal commands, Operating Plans, recovery prompts and Autopilot next turns use Chat Control Bus; clipboard/open-chat is fallback only."
+    },
+    {
+      "id": "C11",
+      "rule": "CHAT can auto-continue in AUTO/GUARDIAN; automation extends the ChatGPT executor rather than replacing it."
+    },
+    {
+      "id": "C12",
+      "rule": "Unsupported host capabilities such as arbitrary closed-thread wakeup or response mirroring are represented honestly and are not emulated with unofficial session automation."
     }
   ],
   "antiGoals": [
@@ -62,14 +87,23 @@
     "generic project manager with ChatGPT links attached",
     "provider benchmark or LLM router as the product itself",
     "automatic merge or production deployment by default",
-    "unofficial ChatGPT cookie/session automation"
+    "unofficial ChatGPT cookie/session automation",
+    "clipboard-first normal command flow",
+    "routine ChatGPT or recovery states mislabeled as human waiting",
+    "fake response mirroring through unsupported ChatGPT internals"
   ],
   "protectedArchitectureFiles": [
     "product-concept.json",
     "docs/PRODUCT_CONSTITUTION.md",
     "docs/ARCHITECTURE.md",
     "scripts/concept-guard.mjs",
+    "scripts/check-bundle-size.mjs",
+    "src/App.tsx",
+    "src/core.ts",
+    "src/RuntimeProjectSync.tsx",
+    "src/supervisor.ts",
     "worker/src/index.ts",
+    "worker/src/chatCommandQueue.ts",
     "worker/src/developerAgent.ts",
     "worker/src/guardianRunner.ts",
     "chatgpt-bridge/src/bridgeApp.ts"
