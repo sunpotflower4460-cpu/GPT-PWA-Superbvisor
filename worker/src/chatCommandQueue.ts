@@ -14,6 +14,7 @@ export interface ChatCommand {
   bridgeId?: string;
   detail?: string;
   claimAttempts?: number;
+  dedupeKey?: string;
 }
 
 export interface ChatCommandEnv {
@@ -23,6 +24,7 @@ export interface ChatCommandEnv {
 const COMMAND_TTL = 60 * 60 * 24 * 14;
 const COMMAND_PREFIX = 'chat-command:';
 const PROJECT_PREFIX = 'chat-project:';
+const DEDUPE_PREFIX = 'chat-dedupe:';
 const CLAIM_STALE_MS = 2 * 60_000;
 
 export function normalizeChatUrl(value: string) {
@@ -53,11 +55,21 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
   projectName?: string;
   chatUrl: string;
   prompt: string;
+  dedupeKey?: string;
 }) {
   const projectId = input.projectId.trim().slice(0, 200);
   const chatUrl = normalizeChatUrl(input.chatUrl);
   const prompt = sanitizePrompt(input.prompt);
+  const dedupeKey = input.dedupeKey?.trim().slice(0, 200) || undefined;
   if (!projectId || !chatUrl || !prompt) throw new Error('projectId, valid ChatGPT chatUrl and prompt are required');
+
+  if (dedupeKey) {
+    const existingId = await env.SUPERVISOR_STATE.get(dedupeStorageKey(projectId, dedupeKey));
+    if (existingId) {
+      const existing = await getChatCommand(env, existingId);
+      if (existing) return existing;
+    }
+  }
 
   const now = new Date().toISOString();
   const command: ChatCommand = {
@@ -70,9 +82,13 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
     createdAt: now,
     updatedAt: now,
     claimAttempts: 0,
+    dedupeKey,
   };
   await saveCommand(env, command);
   await rememberProjectCommand(env, command);
+  if (dedupeKey) {
+    await env.SUPERVISOR_STATE.put(dedupeStorageKey(projectId, dedupeKey), command.id, { expirationTtl: COMMAND_TTL });
+  }
   return command;
 }
 
@@ -141,4 +157,8 @@ async function saveCommand(env: ChatCommandEnv, command: ChatCommand) {
 async function rememberProjectCommand(env: ChatCommandEnv, command: ChatCommand) {
   const sortable = command.createdAt.replace(/[^0-9]/g, '').slice(0, 17);
   await env.SUPERVISOR_STATE.put(`${PROJECT_PREFIX}${command.projectId}:${sortable}:${command.id}`, command.id, { expirationTtl: COMMAND_TTL });
+}
+
+function dedupeStorageKey(projectId: string, dedupeKey: string) {
+  return `${DEDUPE_PREFIX}${encodeURIComponent(projectId)}:${encodeURIComponent(dedupeKey)}`;
 }
