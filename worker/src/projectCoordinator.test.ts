@@ -85,6 +85,28 @@ describe('ProjectCoordinator command atomicity', () => {
     expect(response.status).toBe(409);
     expect((await response.json() as { error: string }).error).toBe('claim_owner_mismatch');
   });
+
+  it('releases bridge ownership when a failed delivery is queued for retry', async () => {
+    const coordinator = createCoordinator();
+    const queued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue',
+    });
+    const id = (await queued.json() as { command: { id: string } }).command.id;
+    await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    const failed = await post(coordinator, '/commands/result', {
+      id,
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'failed',
+      detail: 'temporary host failure',
+    });
+    const updated = (await failed.json() as { command: { status: string; bridgeId?: string; nextAttemptAt?: string } }).command;
+    expect(updated.status).toBe('queued');
+    expect(updated.bridgeId).toBeUndefined();
+    expect(updated.nextAttemptAt).toBeTruthy();
+  });
 });
 
 describe('ProjectCoordinator state atomicity', () => {
