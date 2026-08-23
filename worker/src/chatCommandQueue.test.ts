@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ChatCommandConflictError,
+  claimNextChatCommand,
   enqueueChatCommand,
   isClaimableCommand,
   normalizeChatUrl,
   sanitizePrompt,
+  updateChatCommandResult,
   type ChatCommand,
   type ChatCommandEnv,
 } from './chatCommandQueue';
+import { applyCommandResult } from './projectCoordinator';
 
 const baseCommand: ChatCommand = {
   id: 'command-1',
@@ -17,6 +21,23 @@ const baseCommand: ChatCommand = {
   createdAt: '2026-08-23T00:00:00.000Z',
   updatedAt: '2026-08-23T00:00:00.000Z',
 };
+
+function fakeEnv() {
+  const store = new Map<string, string>();
+  const env = {
+    SUPERVISOR_STATE: {
+      get: async (key: string) => store.get(key) ?? null,
+      put: async (key: string, value: string) => { store.set(key, value); },
+      delete: async (key: string) => { store.delete(key); },
+      list: async ({ prefix = '', limit = 100 }: { prefix?: string; limit?: number }) => ({
+        keys: [...store.keys()].filter((key) => key.startsWith(prefix)).slice(0, limit).map((name) => ({ name })),
+        list_complete: true,
+        cacheStatus: null,
+      }),
+    },
+  } as unknown as ChatCommandEnv;
+  return { env, store };
+}
 
 describe('chat command validation', () => {
   it('accepts canonical ChatGPT conversation URLs', () => {
@@ -38,19 +59,7 @@ describe('chat command validation', () => {
 
 describe('chat command idempotency', () => {
   it('returns the existing command when the same project dedupe key is queued again', async () => {
-    const store = new Map<string, string>();
-    const env = {
-      SUPERVISOR_STATE: {
-        get: async (key: string) => store.get(key) ?? null,
-        put: async (key: string, value: string) => { store.set(key, value); },
-        list: async ({ prefix = '' }: { prefix?: string }) => ({
-          keys: [...store.keys()].filter((key) => key.startsWith(prefix)).map((name) => ({ name })),
-          list_complete: true,
-          cacheStatus: null,
-        }),
-      },
-    } as unknown as ChatCommandEnv;
-
+    const { env } = fakeEnv();
     const first = await enqueueChatCommand(env, {
       projectId: 'project-1',
       projectName: 'Project One',
@@ -76,6 +85,12 @@ describe('chat command claim recovery', () => {
     expect(isClaimableCommand(baseCommand, Date.parse('2026-08-23T00:00:01.000Z'))).toBe(true);
   });
 
+  it('respects retry backoff for a requeued command', () => {
+    const retrying = { ...baseCommand, nextAttemptAt: '2026-08-23T00:00:10.000Z' };
+    expect(isClaimableCommand(retrying, Date.parse('2026-08-23T00:00:09.000Z'))).toBe(false);
+    expect(isClaimableCommand(retrying, Date.parse('2026-08-23T00:00:10.000Z'))).toBe(true);
+  });
+
   it('does not steal a fresh claim from another active bridge', () => {
     expect(isClaimableCommand({
       ...baseCommand,
@@ -95,5 +110,44 @@ describe('chat command claim recovery', () => {
   it('never reclaims terminal commands', () => {
     expect(isClaimableCommand({ ...baseCommand, status: 'delivered' }, Date.parse('2026-08-23T00:10:00.000Z'))).toBe(false);
     expect(isClaimableCommand({ ...baseCommand, status: 'failed' }, Date.parse('2026-08-23T00:10:00.000Z'))).toBe(false);
+  });
+});
+
+describe('chat command delivery recovery', () => {
+  it('requeues transient delivery failures with backoff before terminal failure', () => {
+    const claimed: ChatCommand = {
+      ...baseCommand,
+      status: 'claimed',
+      bridgeId: 'bridge-a',
+      claimedAt: '2026-08-23T00:00:00.000Z',
+      deliveryFailures: 0,
+      maxDeliveryAttempts: 3,
+    };
+    const first = applyCommandResult(claimed, { status: 'failed', detail: 'host unavailable' }, Date.parse('2026-08-23T00:00:01.000Z'));
+    expect(first.status).toBe('queued');
+    expect(first.deliveryFailures).toBe(1);
+    expect(first.nextAttemptAt).toBe('2026-08-23T00:00:06.000Z');
+
+    const exhausted = applyCommandResult({ ...claimed, deliveryFailures: 2 }, { status: 'failed', detail: 'still unavailable' }, Date.parse('2026-08-23T00:01:00.000Z'));
+    expect(exhausted.status).toBe('failed');
+    expect(exhausted.deliveryFailures).toBe(3);
+    expect(exhausted.nextAttemptAt).toBeUndefined();
+  });
+
+  it('rejects a result from a bridge that no longer owns the claim', async () => {
+    const { env } = fakeEnv();
+    const queued = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue',
+    });
+    const claimed = await claimNextChatCommand(env, 'bridge-a', 'project-1');
+    expect(claimed?.id).toBe(queued.id);
+
+    await expect(updateChatCommandResult(env, queued.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-b',
+      status: 'delivered',
+    })).rejects.toBeInstanceOf(ChatCommandConflictError);
   });
 });
