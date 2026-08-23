@@ -49,6 +49,9 @@ PWA
 
         ↓
 
+ProjectCoordinator
+(SQLite Durable Object)
+        ↓
 Durable Chat Control Bus
         ↓
 
@@ -69,9 +72,10 @@ PWAで待機 / エラー / 本当のあなた待ち / 完了を確認
 1. **複数ChatGPT開発チャットをPWAから一元操作**
 2. **複数案件を同時並行で扱える**
 3. **スマホで軽く、PWAを閉じても状態・指示Queueを失わない**
-4. GitHub / CI / Pushで外部状態を監視
-5. Supervisorが途中の「続けて」「直して再確認」を代行
-6. Autopilot Routeで複数工程を自動運転
+4. **複数端末・複数Bridgeでもcommand ownership/state revisionを安全に調停する**
+5. GitHub / CI / Pushで外部状態を監視
+6. Supervisorが途中の「続けて」「直して再確認」を代行
+7. Autopilot Routeで複数工程を自動運転
 
 Supervisor / Guardianは製品の主役ではなく、Multi Chat Remoteをより放置可能にするための補助層です。
 
@@ -92,26 +96,47 @@ Supervisor / Guardianは製品の主役ではなく、Multi Chat Remoteをより
 - 案件一覧から▶で複数chatへ続行指示を連続投入
 - projectごとの送信Queue / 履歴を表示
 - `queued / claimed / delivered / failed / cancelled` を表示
+- failed commandを同じcommand IDのまま明示再試行
 
 ### Durable Chat Control Bus
 
-ChatGPTへの指示は端末上だけで持たず、WorkerのKVへ保存します。
+ChatGPTへの指示は端末上だけで持たず、Worker側へ永続化します。
+
+productionのauthoritativeな競合判断はSQLite-backed Durable Object `ProjectCoordinator` が担当し、KVは既存データmigration・履歴mirror・互換fallbackとして残します。
 
 ```text
 PWA / Supervisor / Guardian / Autopilot
   ↓
+ProjectCoordinator
+  ↓
 queued
   ↓
-ChatGPT Bridgeがclaim
+1つのBridgeだけがclaim
   ↓
-delivered / failed
+delivered / retrying / failed
 ```
 
 - PWAを閉じてもcommandを保持
 - project単位でQueueを分離
 - ChatGPT URL以外への配送を拒否
-- Bridgeがclaim直後に落ちても、stale claimを回収して再配送可能
+- 同じdedupe keyの同時enqueueをatomicに1 commandへ集約
+- 1 commandのactive claim ownerは1 Bridgeだけ
+- stale claimを回収して再配送可能
+- stale/non-owner Bridgeからのresult overwriteを拒否
+- transient delivery failureは同じcommand IDでbackoff再試行
+- 自動試行上限後のみterminal `failed`
 - automation由来commandはdedupe keyで重複投入を抑制
+
+`PROJECT_COORDINATOR` が未設定の古いWorkerではKV fallbackで基本操作はできますが、**atomic multi-device guaranteeは有効ではありません**。Setup Doctorがこの状態を警告します。
+
+### Atomic Cloud State
+
+複数端末からのCloud State同期も、Coordinator有効時は同じrevisionに対するcompare-and-updateをDurable Object内で直列化します。
+
+- 2台が同じbaseRevisionから同時saveした場合、片方だけ成功
+- もう片方は409 revision conflict
+- lost updateを「後勝ち」で隠さない
+- 既存KV stateは初回にCoordinatorへmigration
 
 ### ChatGPT Apps Bridge
 
@@ -120,7 +145,7 @@ delivered / failed
 ```text
 PWA
   ↓
-Supervisor Worker Queue
+Supervisor Worker / ProjectCoordinator
   ↓
 ChatGPT Bridge Widget
   ↓
@@ -130,11 +155,16 @@ window.openai.sendFollowUpMessage(...)
 ```
 
 - ChatGPT側Widgetから同じ会話へfollow-up message
-- app-only MCP toolでheartbeat / claim / result
+- app-only MCP toolでheartbeat / claim / result / retry
 - Worker tokenはMCP serverだけが保持し、Widgetへ渡さない
 - project allowlist必須
 - projectごとのBridge heartbeat
 - 複数案件を独立して接続可能
+- 各配送へ `AI DEV DECK COMMAND ID` を付与
+- ChatGPT送信成功後にWorker ackだけ失敗した場合はdelivery receiptを保存し、本文再送よりack再同期を優先
+- send失敗時はWorker側backoffへ戻し、自動試行上限後だけ明示retryを要求
+
+完全なtransactional exactly-onceをChatGPT hostとの境界越しに偽装はしません。command IDとdelivery receiptで重複実行の可能性を最小化します。
 
 詳細: [`chatgpt-bridge/README.md`](chatgpt-bridge/README.md)
 
@@ -151,6 +181,7 @@ window.openai.sendFollowUpMessage(...)
 - 工程・進捗・Activity
 - `あなた待ち` 専用表示
 - Operating Plan
+- Setup DoctorでAtomic Coordinator状態を診断
 
 `WAITING_USER / あなた待ち` は、本人確認・権限・secrets・レビュー/merge判断など本当に人間しかできない時だけ使用します。Bridge配送、ChatGPT作業、CI復旧は `WAITING_AI` 側です。
 
@@ -201,11 +232,13 @@ Guardianは外部AI開発者ではなく、**ChatGPT作業を監督するハー�
 |---|---|
 | ChatGPT | 実装・デバッグ・レビュー・GitHub編集・検証 |
 | PWA | 複数chat操作・状態表示・route指定 |
-| Chat Control Bus | 指示Queueの永続化・重複抑制・配送状態 |
-| ChatGPT Bridge | Queue commandを同じChatGPT会話へfollow-up送信 |
+| ProjectCoordinator | command ownership/dedupe/retry・Cloud State revisionの強整合調停 |
+| Chat Control Bus | 指示Queueの永続化・配送状態 |
+| ChatGPT Bridge | Queue commandを同じChatGPT会話へfollow-up送信・delivery receipt同期 |
 | Supervisor | 状態整理・次手生成・completion判断・AUTO時Queue投入 |
 | Guardian | branch / CI監視・retry・recovery / route next-turn Queue |
 | DeepSeek / MiniMax / OpenAI API | 安価な分類・要約・次手/復旧生成のみ |
+| KV | migration / history mirror / compatibility fallback |
 
 外部LLMへGitHub write/delete/merge toolは渡しません。通常のexecutorに `API_WORKER` はありません。Workは明示選択時だけの別経路です。
 
@@ -228,6 +261,15 @@ Deterministic ChatGPT handoff
 ```text
 Provider error
   → retry / fallback
+
+Bridge send failure
+  → same command IDでbackoff
+  → automatic retry
+  → 上限後だけterminal failed
+
+ChatGPT send success / Worker ack failure
+  → delivery receipt保持
+  → 本文を再送せずack再同期
 
 Bridge crash after claim
   → stale claim recovery
@@ -290,9 +332,10 @@ Worker:
 ```bash
 cd worker
 npm install
-npm run typecheck
-npm test
+npm run check
 ```
+
+`npm run check` はtypecheck、regression tests、SQLite Durable Objectを含むWrangler dry-runを実行します。
 
 ChatGPT Bridge:
 
@@ -305,7 +348,7 @@ npm run check
 CIではConcept Guardを最初に実行し、通過した場合だけ次の3系統を検証します。
 
 - app build + mobile bundle budget
-- worker typecheck + regression tests
+- worker typecheck + regression tests + SQLite Durable Object dry-run
 - ChatGPT bridge typecheck + Cloudflare dry-run
 
 ## セキュリティ
@@ -316,6 +359,7 @@ CIではConcept Guardを最初に実行し、通過した場合だけ次の3系�
 - ChatGPT cookie/session tokenを取得・保存しない
 - 非公式スクレイピングや認証回避を前提にしない
 - Bridge project allowlistをfail-closedにする
+- stale/non-owner Bridgeからのresult overwriteを拒否する
 - 外部LLMにGitHub write/delete/merge権限を与えない
 - main/default branchへWorkerからコードwriteしない
 - 自動merge / production deployなし
