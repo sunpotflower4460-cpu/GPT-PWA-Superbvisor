@@ -132,15 +132,20 @@ const chatControlUi = containsAll('src/ChatControlCenter.tsx', [
   'chat-project-remote',
   '全体:',
   '8000',
+  'cancelProjectChatCommand',
+  '自動Queueを止めて手動送信',
 ]);
 assert(chatControlUi.includes('chatProjectActivityLabel'), 'chat control: every project can surface live remote activity in the rail');
 assert(chatControlUi.includes('Object.fromEntries'), 'chat control: batch overview is mapped across all visible projects');
+assert(/manualFallback[\s\S]{0,1600}cancelProjectChatCommand[\s\S]{0,1600}window\.open/.test(chatControlUi), 'chat control: manual fallback cancels the durable command before navigating to ChatGPT');
 
 const chatControlClient = containsAll('src/chatControl.ts', [
   'getChatControlOverview',
   'OVERVIEW_BATCH_SIZE = 30',
   '/api/chat-control/overview',
   'flatMap',
+  'cancelProjectChatCommand',
+  '/cancel',
 ]);
 assert(!chatControlClient.includes('unique.slice(0, 30)'), 'chat control: projects beyond the first batch are not silently dropped');
 
@@ -179,6 +184,8 @@ const workerIndex = containsAll('worker/src/index.ts', [
   'ChatCommandConflictError',
   '/api/chat-control/overview',
   'MAX_OVERVIEW_PROJECTS = 30',
+  '/cancel',
+  'cancelPendingChatCommand',
 ]);
 assert(/\/webhooks\/openai[\s\S]{0,500}deprecated_background_executor/.test(workerIndex), 'worker: deprecated external background executor stays disabled');
 
@@ -191,10 +198,13 @@ const commandQueue = containsAll('worker/src/chatCommandQueue.ts', [
   'getProjectChatCommandOverview',
   "'/commands/overview'",
   'retryChatCommand',
+  'cancelChatCommand',
+  "'/commands/cancel'",
   'claim_owner_mismatch',
 ]);
 assert(commandQueue.includes('dedupeStorageKey'), 'worker: auto-dispatched commands retain KV-compatible dedupe storage');
 assert(commandQueue.includes('coordinatorFetch'), 'worker: production queue can route through the atomic coordinator');
+assert(commandQueue.includes('only_queued_or_failed_commands_can_cancel'), 'worker: PWA cancellation cannot steal an actively claimed command');
 
 const chatOverview = containsAll('worker/src/chatControlOverview.ts', [
   'getProjectChatCommandOverview',
@@ -214,6 +224,8 @@ const coordinator = containsAll('worker/src/projectCoordinator.ts', [
   '/commands/claim',
   '/commands/result',
   '/commands/retry',
+  '/commands/cancel',
+  'only_queued_or_failed_commands_can_cancel',
   '/state/save',
   '/lease/acquire',
   '/lease/renew',
@@ -224,7 +236,7 @@ const coordinator = containsAll('worker/src/projectCoordinator.ts', [
 assert(coordinator.includes('COMMANDS_MIGRATED_KEY'), 'coordinator: legacy queue migration remains explicit');
 assert(coordinator.includes('STATE_MIGRATED_KEY'), 'coordinator: legacy state migration remains explicit');
 assert(coordinator.includes('lease_owner_mismatch'), 'coordinator: stale/non-owner lease changes remain rejected');
-assert(coordinator.includes('bridgeId: undefined'), 'coordinator: requeued commands release stale Bridge ownership');
+assert(coordinator.includes('bridgeId: undefined'), 'coordinator: requeued/cancelled commands release stale Bridge ownership');
 
 const stateSync = containsAll('worker/src/stateSync.ts', [
   'hasAtomicCoordinator',
