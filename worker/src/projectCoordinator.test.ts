@@ -102,3 +102,29 @@ describe('ProjectCoordinator state atomicity', () => {
     expect([a.status, b.status].sort()).toEqual([200, 409]);
   });
 });
+
+describe('ProjectCoordinator execution lease', () => {
+  it('allows only one concurrent guardian advance owner', async () => {
+    const coordinator = createCoordinator();
+    const [a, b] = await Promise.all([
+      post(coordinator, '/lease/acquire', { name: 'guardian-advance', owner: 'cron', ttlMs: 60_000 }),
+      post(coordinator, '/lease/acquire', { name: 'guardian-advance', owner: 'manual-refresh', ttlMs: 60_000 }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+  });
+
+  it('rejects release from a non-owner token and permits reacquire after owner release', async () => {
+    const coordinator = createCoordinator();
+    const acquired = await post(coordinator, '/lease/acquire', { name: 'guardian-advance', owner: 'cron', ttlMs: 60_000 });
+    const lease = (await acquired.json() as { lease: { token: string } }).lease;
+
+    const wrongRelease = await post(coordinator, '/lease/release', { name: 'guardian-advance', token: 'wrong-token' });
+    expect(wrongRelease.status).toBe(409);
+
+    const release = await post(coordinator, '/lease/release', { name: 'guardian-advance', token: lease.token });
+    expect(release.status).toBe(200);
+
+    const reacquire = await post(coordinator, '/lease/acquire', { name: 'guardian-advance', owner: 'manual-refresh', ttlMs: 60_000 });
+    expect(reacquire.status).toBe(200);
+  });
+});
