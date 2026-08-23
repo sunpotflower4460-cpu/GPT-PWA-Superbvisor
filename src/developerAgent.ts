@@ -38,8 +38,18 @@ export interface DeveloperJob {
   pullRequest?: { number: number; url: string; draft: true };
 }
 
+export interface DeveloperConfig {
+  configured: boolean;
+  repositories: string[];
+  executor?: 'chatgpt';
+  orchestrationOnly?: boolean;
+  primaryProvider?: string;
+  availableProviders?: string[];
+  deterministicFallback?: boolean;
+}
+
 export async function getDeveloperConfig(connection: WorkerConnection = loadWorkerConnection()) {
-  return api<{ configured: boolean; repositories: string[] }>(connection, '/api/github-agent/config', { method: 'GET' });
+  return api<DeveloperConfig>(connection, '/api/github-agent/config', { method: 'GET' });
 }
 
 export async function startDeveloperJob(
@@ -76,7 +86,7 @@ export async function getLatestDeveloperJob(projectId: string, connection: Worke
 }
 
 async function api<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
-  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にBackground Workerの接続設定を保存してください。');
+  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にSupervisor Workerの接続設定を保存してください。');
   const response = await fetch(`${connection.baseUrl.trim().replace(/\/$/, '')}${path}`, {
     ...init,
     headers: {
