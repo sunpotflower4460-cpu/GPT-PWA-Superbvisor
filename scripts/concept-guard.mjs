@@ -121,6 +121,24 @@ const app = containsAll('src/App.tsx', [
 assert(!app.includes("'API_WORKER'"), 'app: legacy API_WORKER executor is not exposed in the primary UI');
 assert(!app.includes('タップでコピー'), 'app: primary quick actions are not clipboard-first');
 
+const chatControlUi = containsAll('src/ChatControlCenter.tsx', [
+  'getChatControlOverview',
+  'overviewSummary',
+  'chat-project-remote',
+  '全体:',
+  '8000',
+]);
+assert(chatControlUi.includes('chatProjectActivityLabel'), 'chat control: every project can surface live remote activity in the rail');
+assert(chatControlUi.includes('Object.fromEntries'), 'chat control: batch overview is mapped across all visible projects');
+
+const chatControlClient = containsAll('src/chatControl.ts', [
+  'getChatControlOverview',
+  'OVERVIEW_BATCH_SIZE = 30',
+  '/api/chat-control/overview',
+  'flatMap',
+]);
+assert(!chatControlClient.includes('unique.slice(0, 30)'), 'chat control: projects beyond the first batch are not silently dropped');
+
 const operatingPlan = containsAll('src/OperatingPlanCenter.tsx', [
   'enqueueProjectChatCommand',
   '手動fallback: 実行指示をコピー',
@@ -154,6 +172,8 @@ const workerIndex = containsAll('worker/src/index.ts', [
   'chatCommandBus: true',
   'atomicCoordinator: Boolean(env.PROJECT_COORDINATOR)',
   'ChatCommandConflictError',
+  '/api/chat-control/overview',
+  'MAX_OVERVIEW_PROJECTS = 30',
 ]);
 assert(/\/webhooks\/openai[\s\S]{0,500}deprecated_background_executor/.test(workerIndex), 'worker: deprecated external background executor stays disabled');
 
@@ -163,16 +183,29 @@ const commandQueue = containsAll('worker/src/chatCommandQueue.ts', [
   'isClaimableCommand',
   'hasAtomicCoordinator',
   'getProjectChatCommand',
+  'getProjectChatCommandOverview',
+  "'/commands/overview'",
   'retryChatCommand',
   'claim_owner_mismatch',
 ]);
 assert(commandQueue.includes('dedupeStorageKey'), 'worker: auto-dispatched commands retain KV-compatible dedupe storage');
 assert(commandQueue.includes('coordinatorFetch'), 'worker: production queue can route through the atomic coordinator');
 
+const chatOverview = containsAll('worker/src/chatControlOverview.ts', [
+  'getProjectChatCommandOverview',
+  'getChatBridgeStatus',
+  'RETRY_SCHEDULED',
+  'WAITING_BRIDGE',
+  'NEEDS_ATTENTION',
+]);
+assert(!chatOverview.includes('listProjectChatCommands('), 'multi-chat overview: frequent polling does not fetch full command bodies or trigger list mirror writes');
+
 const coordinator = containsAll('worker/src/projectCoordinator.ts', [
   'export class ProjectCoordinator',
   'blockConcurrencyWhile',
   '/commands/enqueue',
+  '/commands/overview',
+  'summarizeCoordinatorCommands',
   '/commands/claim',
   '/commands/result',
   '/commands/retry',
@@ -186,6 +219,7 @@ const coordinator = containsAll('worker/src/projectCoordinator.ts', [
 assert(coordinator.includes('COMMANDS_MIGRATED_KEY'), 'coordinator: legacy queue migration remains explicit');
 assert(coordinator.includes('STATE_MIGRATED_KEY'), 'coordinator: legacy state migration remains explicit');
 assert(coordinator.includes('lease_owner_mismatch'), 'coordinator: stale/non-owner lease changes remain rejected');
+assert(coordinator.includes('bridgeId: undefined'), 'coordinator: requeued commands release stale Bridge ownership');
 
 const stateSync = containsAll('worker/src/stateSync.ts', [
   'hasAtomicCoordinator',
@@ -287,4 +321,4 @@ if (failures.length) {
   console.error('\nRead docs/PRODUCT_CONSTITUTION.md before changing protected architecture boundaries.');
   process.exit(1);
 }
-console.log('Concept Guard: product direction, primary UX, atomic multi-device control and safety boundaries are intact.');
+console.log('Concept Guard: product direction, primary multi-chat UX, atomic control and safety boundaries are intact.');
