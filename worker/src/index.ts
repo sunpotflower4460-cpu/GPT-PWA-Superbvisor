@@ -91,7 +91,6 @@ export default {
       }, 200, env, request);
     }
 
-    // Legacy background Responses webhooks are intentionally retired. External APIs no longer execute project work.
     if (url.pathname === '/webhooks/openai' && request.method === 'POST') {
       return json({ error: 'deprecated_background_executor', executor: 'chatgpt', orchestrationOnly: true }, 410, env, request);
     }
@@ -156,12 +155,9 @@ export default {
 };
 
 async function createSmartReplies(request: Request, env: Env): Promise<Response> {
-  if (!env.OPENAI_API_KEY?.trim()) {
-    return json({ error: 'smart_reply_provider_not_configured' }, 503, env, request);
-  }
   const body = await readJson<SmartReplyRequest>(request);
   if (!body) return json({ error: 'invalid_json' }, 400, env, request);
-  const result = await generateSmartReplies(body, { OPENAI_API_KEY: env.OPENAI_API_KEY, SMART_REPLY_MODEL: env.SMART_REPLY_MODEL });
+  const result = await generateSmartReplies(body, env);
   if (!result.ok) return json({ error: result.error }, result.status, env, request);
   return json(result, 200, env, request);
 }
