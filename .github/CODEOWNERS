@@ -1,0 +1,21 @@
+# Product concept / architecture boundaries
+/product-concept.json @sunpotflower4460-cpu
+/docs/PRODUCT_CONSTITUTION.md @sunpotflower4460-cpu
+/docs/ARCHITECTURE.md @sunpotflower4460-cpu
+/scripts/concept-guard.mjs @sunpotflower4460-cpu
+/AGENTS.md @sunpotflower4460-cpu
+/.github/copilot-instructions.md @sunpotflower4460-cpu
+
+# Executor / orchestration boundary
+/worker/src/index.ts @sunpotflower4460-cpu
+/worker/src/developerAgent.ts @sunpotflower4460-cpu
+/worker/src/guardianRunner.ts @sunpotflower4460-cpu
+/worker/src/orchestratorPolicy.ts @sunpotflower4460-cpu
+/worker/src/orchestrationModel.ts @sunpotflower4460-cpu
+
+# Chat transport boundary
+/chatgpt-bridge/src/bridgeApp.ts @sunpotflower4460-cpu
+/chatgpt-bridge/src/cloudflare.ts @sunpotflower4460-cpu
+
+# CI governance
+/.github/workflows/ci.yml @sunpotflower4460-cpu
