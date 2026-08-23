@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
-    "check": "npm run typecheck && npm run test",
+    "dry-run": "wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist-ci",
+    "check": "npm run typecheck && npm run test && npm run dry-run",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
