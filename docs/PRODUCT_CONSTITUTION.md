@@ -58,6 +58,18 @@ Workerが担当するもの:
 
 Workerは別のコーディングAIではありません。
 
+### Project Coordinator = strong consistency boundary
+
+SQLite-backed Durable Objectが担当するもの:
+
+- 同一projectのcommand enqueue / dedupe / claimを直列化
+- active claim ownerを1つに保つ
+- stale claim recoveryとdelivery retryの状態遷移
+- Cloud State revisionのcompare-and-update
+- 複数端末・複数Bridgeが同時操作した時の競合調停
+
+KVは移行・履歴・互換fallbackとして利用できますが、**KVだけのread → compare → writeをatomic multi-device保証として扱いません。**
+
 ### External LLM = orchestration-only
 
 DeepSeek / MiniMax / OpenAI API等が担当できるもの:
@@ -148,6 +160,24 @@ PWAを閉じてもQueue・state・GitHub/CI監視を保持することと、完�
 
 公式にサポートされた機能がないものを「できる」と見せません。特にChatGPTの返答本文を外部PWAへ読み戻す経路が公式に利用できない場合、cookie/session scrapingで擬似実装せず、status/evidenceと利用可能な公式transportを使います。
 
+### C13 — Multi-device coordination must be strongly consistent
+
+複数端末・複数Bridgeから同じ案件を操作する時、command ownershipとCloud State revisionは強整合なCoordinatorで調停します。
+
+KV-onlyのread → compare → writeは互換fallbackとしては残せますが、「atomic」「二重実行防止済み」と表示してはいけません。productionでAtomic Coordinatorが無効ならSetup Doctorが警告します。
+
+### C14 — One command, one active claim owner
+
+1つのChat commandを同時に複数Bridgeが所有してはいけません。
+
+- claimは1 ownerだけ
+- stale ownerからのresult overwriteを拒否
+- delivery retryは同じcommand IDを維持
+- transient delivery failureは安全なbackoffで再試行
+- ChatGPT送信成功後のack不明時はdelivery receipt同期を優先し、安易に本文を再送しない
+
+外部ChatGPT hostとの境界を跨ぐため完全なtransactional exactly-onceを偽装せず、command IDによる重複実行抑制と送達receiptで安全側へ寄せます。
+
 ## 4. Anti-goals
 
 次の方向へ進み始めた場合はconcept driftとして扱います。
@@ -163,6 +193,8 @@ PWAを閉じてもQueue・state・GitHub/CI監視を保持することと、完�
 - 通常の指示送信をclipboard-firstへ戻す
 - routineなChatGPT待ち/復旧を `あなた待ち` と表示する
 - 非公式手段でChatGPT response mirroringを装う
+- KV-only concurrencyをatomic multi-device保証として扱う
+- 同じcommandを複数Bridgeへ同時配送する
 
 ## 5. Feature decision gate
 
@@ -178,6 +210,8 @@ PWAを閉じてもQueue・state・GitHub/CI監視を保持することと、完�
 8. **モバイルで意味があるか？** desktop IDE的な複雑さを持ち込んでいないか。
 9. **人間待ちを増やしていないか？** ChatGPT/Bridgeが処理できる工程を誤って本人操作へ戻していないか。
 10. **通常操作がPWA内で完結する方向か？** clipboard/open-chatを主要経路へ戻していないか。
+11. **複数端末で安全か？** 同じcommand/stateを同時更新した時、二重claimやlost updateを起こさないか。
+12. **delivery uncertaintyを誤魔化していないか？** send成功/ack失敗の境界で重複配送を最小化しているか。
 
 直接価値が弱い機能は、少なくとも「どのNorth Star機能を支えるのか」を説明できない限り優先しません。
 
@@ -193,7 +227,8 @@ PWAを閉じてもQueue・state・GitHub/CI監視を保持することと、完�
 - ChatGPT executor境界
 - Worker orchestration-only境界
 - Chat Control Bus
-- ChatGPT Bridge transport
+- Project Coordinator / strong consistency境界
+- ChatGPT Bridge transport / delivery receipt
 - WAITING_USER / WAITING_AI状態境界
 - Autopilot / recoveryの自動Queue境界
 - completion/evidenceルール
