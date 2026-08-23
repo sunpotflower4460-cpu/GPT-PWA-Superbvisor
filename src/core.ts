@@ -10,7 +10,7 @@ export type ProjectStatus =
   | 'CONTEXT_LIMIT'
   | 'COMPLETED';
 
-export type ExecutionMode = 'CHAT' | 'WORK' | 'API_WORKER';
+export type ExecutionMode = 'CHAT' | 'WORK';
 export type AutomationLevel = 'OFF' | 'ASSIST' | 'AUTO' | 'GUARDIAN';
 export type MilestoneState = 'TODO' | 'ACTIVE' | 'DONE' | 'BLOCKED';
 
@@ -100,7 +100,7 @@ export function createProject(input: Pick<DevProject, 'name' | 'goal'> & Partial
     chatUrl: input.chatUrl,
     workUrl: input.workUrl,
     status: input.status ?? 'WAITING_AI',
-    executionMode: input.executionMode ?? 'CHAT',
+    executionMode: input.executionMode === 'WORK' ? 'WORK' : 'CHAT',
     automationLevel: input.automationLevel ?? 'ASSIST',
     progress: input.progress ?? 0,
     currentPhase: input.currentPhase ?? '開始待ち',
@@ -124,7 +124,8 @@ export function loadProjects(): DevProject[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((value) => normalizeStoredProject(value)).filter((value): value is DevProject => Boolean(value));
   } catch {
     return [];
   }
@@ -162,4 +163,21 @@ export function statusLabel(status: ProjectStatus) {
     COMPLETED: '完了',
   };
   return labels[status];
+}
+
+function normalizeStoredProject(value: unknown): DevProject | null {
+  if (!value || typeof value !== 'object') return null;
+  const stored = value as Partial<DevProject> & { executionMode?: string };
+  if (!stored.id || !stored.name || !stored.goal) return null;
+  return {
+    ...createProject({ name: stored.name, goal: stored.goal }),
+    ...stored,
+    executionMode: stored.executionMode === 'WORK' ? 'WORK' : 'CHAT',
+    automationLevel: ['OFF', 'ASSIST', 'AUTO', 'GUARDIAN'].includes(stored.automationLevel || '')
+      ? stored.automationLevel as AutomationLevel
+      : 'ASSIST',
+    humanBlockers: Array.isArray(stored.humanBlockers) ? stored.humanBlockers : [],
+    milestones: Array.isArray(stored.milestones) ? stored.milestones : [],
+    timeline: Array.isArray(stored.timeline) ? stored.timeline : [],
+  };
 }
