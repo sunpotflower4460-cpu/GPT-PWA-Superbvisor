@@ -1,7 +1,9 @@
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 import { DevProject } from './core';
+import { DeveloperJobPhase } from './developerAgent';
 
 export interface GuardianCiCheck {
+  id?: number;
   name: string;
   status: string;
   conclusion: string | null;
@@ -17,7 +19,9 @@ export interface GuardianRun {
   goal: string;
   prompt: string;
   model?: string;
+  orchestratorProvider?: string;
   status: 'starting' | 'running' | 'waiting_ci' | 'review_ready' | 'completed' | 'failed' | 'expired';
+  phase?: DeveloperJobPhase;
   cycle: number;
   maxCycles: number;
   maxToolTurns: number;
@@ -28,9 +32,13 @@ export interface GuardianRun {
   lastAdvanceAt?: string;
   message?: string;
   error?: string;
+  transientErrorCount?: number;
   ciChecks?: GuardianCiCheck[];
   pullRequest?: { number: number; url: string; draft: true };
   finalSummary?: string;
+  handoffPrompt?: string;
+  recoveryCount?: number;
+  degradedOrchestration?: boolean;
   notifiedAt?: string;
 }
 
@@ -48,10 +56,12 @@ export async function startGuardianRun(
       projectName: project.name,
       repository: project.githubUrl,
       goal: project.goal,
+      definitionOfDone: project.definitionOfDone,
       prompt,
       maxCycles: clamp(options.maxCycles ?? 3, 1, 4),
       maxToolTurns: clamp(options.maxToolTurns ?? 10, 1, 16),
       maxMinutes: clamp(options.maxMinutes ?? 180, 15, 360),
+      maxAutoCiReruns: 2,
     }),
   });
   return result.run;
