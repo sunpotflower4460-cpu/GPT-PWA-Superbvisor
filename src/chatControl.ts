@@ -104,6 +104,20 @@ export async function retryProjectChatCommand(
   });
 }
 
+export async function cancelProjectChatCommand(
+  projectId: string,
+  commandId: string,
+  connection: WorkerConnection = loadWorkerConnection(),
+) {
+  return workerFetch<{ command: ChatCommand }>(connection, `/api/chat-commands/${encodeURIComponent(commandId)}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId,
+      detail: 'Cancelled by PWA before switching this command to manual ChatGPT fallback.',
+    }),
+  });
+}
+
 export async function listProjectChatCommands(
   projectId: string,
   connection: WorkerConnection = loadWorkerConnection(),
