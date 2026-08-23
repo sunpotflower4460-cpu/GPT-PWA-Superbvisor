@@ -126,13 +126,16 @@ export default {
     }
 
     if (url.pathname === '/api/chat-bridge/status' && request.method === 'GET') {
-      return json(await getChatBridgeStatus(env), 200, env, request);
+      const projectId = url.searchParams.get('projectId')?.trim() || '';
+      if (!projectId) return json({ error: 'projectId is required' }, 400, env, request);
+      return json(await getChatBridgeStatus(env, projectId), 200, env, request);
     }
 
     if (url.pathname === '/api/chat-bridge/heartbeat' && request.method === 'POST') {
-      const body = await readJson<{ bridgeId?: string; capabilities?: string[] }>(request);
+      const body = await readJson<{ projectId?: string; bridgeId?: string; capabilities?: string[] }>(request);
       try {
         const status = await recordChatBridgeHeartbeat(env, {
+          projectId: body?.projectId || '',
           bridgeId: body?.bridgeId || '',
           capabilities: body?.capabilities,
         });
@@ -231,8 +234,8 @@ async function createChatCommand(request: Request, env: Env): Promise<Response> 
 
 async function claimChatCommand(request: Request, env: Env): Promise<Response> {
   const body = await readJson<{ bridgeId?: string; projectId?: string }>(request);
-  if (!body?.bridgeId?.trim()) return json({ error: 'bridgeId is required' }, 400, env, request);
-  const command = await claimNextChatCommand(env, body.bridgeId, body.projectId?.trim() || undefined);
+  if (!body?.bridgeId?.trim() || !body.projectId?.trim()) return json({ error: 'bridgeId and projectId are required' }, 400, env, request);
+  const command = await claimNextChatCommand(env, body.bridgeId, body.projectId.trim());
   return json({ command }, 200, env, request);
 }
 
