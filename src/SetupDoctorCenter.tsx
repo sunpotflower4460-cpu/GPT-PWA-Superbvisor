@@ -100,6 +100,7 @@ export default function SetupDoctorCenter() {
     const workerConfigured = Boolean(connection.baseUrl.trim() && connection.token.trim());
     let workerHealthy = false;
     let workerBoundaryOk = false;
+    let atomicCoordinator = false;
     if (!workerConfigured) {
       next.push({ id: 'worker', label: 'Supervisor Worker', level: 'WARN', detail: '未設定です。Chat-only運用は可能です。外部監督を使う場合は⚡からWorker URLと接続トークンを設定してください。' });
     } else {
@@ -107,6 +108,7 @@ export default function SetupDoctorCenter() {
         const health = await withTimeout(checkWorkerHealth(connection), 8000);
         workerHealthy = Boolean(health.ok);
         workerBoundaryOk = health.executor === 'chatgpt' && health.orchestrationOnly === true;
+        atomicCoordinator = health.atomicCoordinator === true;
         next.push({
           id: 'worker',
           label: 'Supervisor Worker',
@@ -116,6 +118,16 @@ export default function SetupDoctorCenter() {
             : workerBoundaryOk
               ? 'Cloudflare Workerへ接続済み。実行主体=ChatGPT / API=オーケストレーション専用を確認しました。'
               : 'Workerには接続できますが、旧Background Executorの可能性があります。新しいWorkerへ更新してください。',
+        });
+        next.push({
+          id: 'atomic-coordinator',
+          label: 'Atomic Multi-device Coordinator',
+          level: atomicCoordinator ? 'PASS' : 'WARN',
+          detail: atomicCoordinator
+            ? 'SQLite Durable Objectが有効です。同一案件のQueue claim/dedupeとCloud State revisionを強整合で調停します。'
+            : 'PROJECT_COORDINATOR bindingを確認できません。現在は互換KV fallbackのため、複数端末・複数Bridgeの完全な競合防止は有効ではありません。Cloudflare Workerを最新設定で再deployしてください。',
+          action: 'OPEN_DEVELOPER',
+          actionLabel: 'Worker設定を確認',
         });
       } catch (error) {
         next.push({ id: 'worker', label: 'Supervisor Worker', level: 'FAIL', detail: `接続できません: ${error instanceof Error ? error.message : 'unknown error'}` });
@@ -137,13 +149,23 @@ export default function SetupDoctorCenter() {
         next.push({
           id: 'github-agent',
           label: 'ChatGPT Guardian / GitHub',
-          level: config.configured && config.executor === 'chatgpt' && config.orchestrationOnly ? 'PASS' : config.configured ? 'WARN' : 'WARN',
+          level: config.configured && config.executor === 'chatgpt' && config.orchestrationOnly ? 'PASS' : 'WARN',
           detail: config.configured
             ? `GitHub監督設定済み・許可repo ${config.repositories.length}件。Workerはコード実装せずChatGPTのbranch/CIを監視します。`
             : 'Workerは動いていますがGITHUB_TOKENまたはGITHUB_ALLOWED_REPOSが未設定です。',
           action: 'OPEN_DEVELOPER',
           actionLabel: 'Guardianを確認',
         });
+        if (config.atomicCoordinator !== undefined && config.atomicCoordinator !== atomicCoordinator) {
+          next.push({
+            id: 'atomic-coordinator-consistency',
+            label: 'Coordinator Health整合性',
+            level: 'WARN',
+            detail: 'Worker healthとGuardian configでPROJECT_COORDINATOR状態が一致しません。古いWorker instanceやdeploy途中の可能性があります。',
+            action: 'OPEN_DEVELOPER',
+            actionLabel: 'Worker設定を確認',
+          });
+        }
       } catch (error) {
         next.push({ id: 'github-agent', label: 'ChatGPT Guardian / GitHub', level: 'WARN', detail: `Guardian設定を確認できません: ${error instanceof Error ? error.message : 'unknown error'}`, action: 'OPEN_DEVELOPER', actionLabel: 'Guardianを確認' });
       }
@@ -180,7 +202,7 @@ export default function SetupDoctorCenter() {
       <div className={`doctor-summary ${chatReady ? 'ready' : 'danger'}`}><b>{chatReady ? '💬 Chat基本運転は利用可能' : '⚠ 基本環境に要修正項目あり'}</b><span>{counts.fail} fail / {counts.warn} warning</span></div>
       <div className="doctor-list">{checks.map((item) => <article key={item.id} className={`doctor-check ${item.level.toLowerCase()}`}><span className="doctor-check-icon">{item.level === 'PASS' ? '✓' : item.level === 'FAIL' ? '!' : '?'}</span><div><strong>{item.label}</strong><p>{item.detail}</p>{item.action && <button onClick={() => runAction(item.action)}>{item.actionLabel || '開く'}</button>}</div></article>)}</div>
       <div className="doctor-actions"><button onClick={diagnose} disabled={busy}>{busy ? '診断中…' : '↻ 再診断'}</button><span>{checkedAt ? `最終診断 ${new Date(checkedAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}` : ''}</span></div>
-      <p className="doctor-footnote">秘密値そのものは表示しません。Providerが未設定でもdeterministic fallbackでSupervisorは利用できます。警告が残っていてもChat-only運用は可能です。</p>
+      <p className="doctor-footnote">秘密値そのものは表示しません。Providerが未設定でもdeterministic fallbackでSupervisorは利用できます。Atomic Coordinator警告がある場合、基本Chat操作は可能ですが複数端末競合耐性は完全ではありません。</p>
     </section></div>}
   </>;
 }
