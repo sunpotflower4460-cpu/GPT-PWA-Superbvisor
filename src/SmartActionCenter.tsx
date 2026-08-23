@@ -171,6 +171,8 @@ function SmartProject({
   onGenerateAI: () => Promise<void>;
   onUseFree: () => void;
 }) {
+  const chatUrl = safeChatUrl(project.chatUrl);
+
   return (
     <div className="smart-project">
       <article className="smart-status-card">
@@ -213,10 +215,22 @@ function SmartProject({
       </div>
 
       <div className="smart-launch-row">
-        {project.chatUrl ? <button className="launch-button" onClick={() => window.open(project.chatUrl, '_blank', 'noopener,noreferrer')}>ChatGPTを開く ↗</button> : <span className="muted">ChatGPT URL未登録</span>}
+        {chatUrl ? <button className="launch-button" onClick={() => window.open(chatUrl, '_blank', 'noopener,noreferrer')}>ChatGPTを開く ↗</button> : <span className="muted">{project.chatUrl ? 'ChatGPT URLを確認してください' : 'ChatGPT URL未登録'}</span>}
       </div>
 
       <p className="smart-footnote">通常は無料候補で十分です。判断が微妙な時だけAI候補を使い、通常Chatへの送信自体は1タップコピーで行います。</p>
     </div>
   );
+}
+
+function safeChatUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com')) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
