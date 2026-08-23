@@ -49,3 +49,20 @@ jobs:
       - name: Run worker regression tests
         working-directory: worker
         run: npm test
+
+  chatgpt-bridge-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ChatGPT bridge dependencies
+        working-directory: chatgpt-bridge
+        run: npm install
+      - name: Typecheck ChatGPT bridge
+        working-directory: chatgpt-bridge
+        run: npm run typecheck
