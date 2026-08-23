@@ -233,7 +233,7 @@ export default function DataBackupCenter() {
         return;
       }
       const incoming = parseBackup(JSON.stringify(remote.data));
-      const merged = mergeBackup(createBackup(), incoming);
+      const merged = mergeNewestBackup(createBackup(), incoming);
       writeBackup(merged);
       rememberCloudRevision(remote.revision);
       setCloudState({ ...remote, data: incoming });
