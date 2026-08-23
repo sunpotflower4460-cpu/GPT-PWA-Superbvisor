@@ -12,9 +12,12 @@ import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
   CiCheckLike,
   assessCi,
+  buildAutopilotRouteContinuationPrompt,
   buildChatGptHandoff,
   buildRecoveryPrompt,
   failureFingerprint,
+  hasAutopilotRouteCompletionMarker,
+  hasAutopilotRouteContract,
 } from './orchestratorPolicy';
 import { PushEnv, sendSupervisorPush } from './push';
 
@@ -257,6 +260,36 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     return prepareRecovery(env, job, repo.headSha, assessment.failed, '現在headのCIが失敗しています。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。', 'CI_CODE_FAILURE');
   }
 
+  if (hasAutopilotRouteContract(job.prompt) && !hasAutopilotRouteCompletionMarker(repo.headCommitMessage)) {
+    const continuationPrompt = buildAutopilotRouteContinuationPrompt({
+      repository: job.repository,
+      branch: job.workspace.branch,
+      goal: job.goal,
+      originalTask: job.prompt,
+      headSha: repo.headSha,
+      checks,
+    });
+    job = {
+      ...job,
+      status: 'running',
+      phase: 'handoff_ready',
+      error: undefined,
+      handoffPrompt: continuationPrompt,
+      outputText: '現在headのCIは成功しました。AUTOPILOT ROUTEの途中チェックポイントとして扱い、完了済み工程を飛ばさず次の未完了工程へ進むChatGPT指示を準備しました。',
+      updatedAt: new Date().toISOString(),
+    };
+    await saveJob(env, job);
+    await safePush(env, {
+      title: `${job.projectName || job.repository}: ルート次工程`,
+      body: 'CI成功。自動運転ルートに後続工程があるため、次のChatGPT実行指示を準備しました。',
+      tag: `developer-route-${job.id}`,
+      projectId: job.projectId,
+      kind: 'info',
+      url: './',
+    });
+    return job;
+  }
+
   let pullRequest = job.pullRequest;
   if (!pullRequest) {
     try {
@@ -278,7 +311,9 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     status: 'completed',
     phase: 'review_ready',
     pullRequest,
-    outputText: '現在headのCI成功を確認しました。実装はChatGPTが行い、Workerは監督・CI確認・Draft PR準備のみを担当しました。',
+    outputText: hasAutopilotRouteContract(job.prompt)
+      ? 'AUTOPILOT ROUTE完了マーカーと現在headのCI成功を確認しました。全ルート終了後のレビュー可能状態です。'
+      : '現在headのCI成功を確認しました。実装はChatGPTが行い、Workerは監督・CI確認・Draft PR準備のみを担当しました。',
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, job);
