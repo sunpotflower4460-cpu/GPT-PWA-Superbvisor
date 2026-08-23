@@ -1,4 +1,5 @@
 import baseWorker from './index';
+export { ProjectCoordinator } from './projectCoordinator';
 import {
   CreateDeveloperJobBody,
   createDeveloperJob,
@@ -31,6 +32,7 @@ interface Env extends OrchestrationEnv {
   GITHUB_TOKEN?: string;
   GITHUB_ALLOWED_REPOS?: string;
   SUPERVISOR_STATE: KVNamespace;
+  PROJECT_COORDINATOR?: DurableObjectNamespace;
 }
 
 type BaseWorkerFetch = typeof baseWorker.fetch;
@@ -50,8 +52,12 @@ export default {
     }
 
     if (url.pathname === '/api/state-sync' && request.method === 'GET') {
-      const state = await getCloudState(env);
-      return state ? json({ state }, 200, env, request) : json({ error: 'cloud_state_not_found' }, 404, env, request);
+      try {
+        const state = await getCloudState(env);
+        return state ? json({ state }, 200, env, request) : json({ error: 'cloud_state_not_found' }, 404, env, request);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : 'cloud_state_read_failed' }, 503, env, request);
+      }
     }
 
     if (url.pathname === '/api/state-sync' && request.method === 'POST') {
@@ -63,8 +69,12 @@ export default {
     }
 
     if (url.pathname === '/api/state-sync' && request.method === 'DELETE') {
-      await deleteCloudState(env);
-      return json({ ok: true }, 200, env, request);
+      try {
+        await deleteCloudState(env);
+        return json({ ok: true }, 200, env, request);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : 'cloud_state_delete_failed' }, 503, env, request);
+      }
     }
 
     if (url.pathname === '/api/developer-jobs' && request.method === 'POST') {
@@ -102,6 +112,7 @@ export default {
         repositories,
         executor: 'chatgpt',
         orchestrationOnly: true,
+        atomicCoordinator: Boolean(env.PROJECT_COORDINATOR),
         primaryProvider: env.ORCHESTRATOR_PROVIDER?.trim() || 'deepseek',
         availableProviders,
         deterministicFallback: true,
