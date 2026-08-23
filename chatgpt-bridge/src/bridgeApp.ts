@@ -28,6 +28,9 @@ interface ChatCommand {
   createdAt: string;
   updatedAt: string;
   bridgeId?: string;
+  deliveryFailures?: number;
+  maxDeliveryAttempts?: number;
+  nextAttemptAt?: string;
 }
 
 export function createBridgeServer(configInput: BridgeRuntimeConfig) {
@@ -117,7 +120,7 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
         body: JSON.stringify({
           projectId,
           bridgeId,
-          capabilities: ['claim-command', 'send-follow-up-message', 'report-result', `project:${projectId}`],
+          capabilities: ['claim-command', 'send-follow-up-message', 'report-result', 'retry-command', 'delivery-receipt', `project:${projectId}`],
         }),
       });
       return toolJson({ ok: true, status });
@@ -162,6 +165,7 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       description: 'Internal app-only tool that reports whether a claimed command was delivered into the ChatGPT conversation.',
       inputSchema: {
         projectId: z.string().min(1).max(200),
+        bridgeId: z.string().min(1).max(200),
         commandId: z.string().min(1).max(200),
         status: z.enum(['delivered', 'failed', 'cancelled']),
         detail: z.string().max(2000).optional(),
@@ -173,14 +177,41 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       },
       _meta: { ui: { visibility: ['app'] } },
     },
-    async ({ projectId, commandId, status, detail }) => {
+    async ({ projectId, bridgeId, commandId, status, detail }) => {
       assertAllowedProject(projectId);
-      const existing = await supervisorFetch<{ command: ChatCommand }>(`/api/chat-commands/${encodeURIComponent(commandId)}`, { method: 'GET' });
-      if (existing.command.projectId !== projectId) throw new Error('Command does not belong to this project');
       const result = await supervisorFetch<{ command: ChatCommand }>(`/api/chat-commands/${encodeURIComponent(commandId)}/result`, {
         method: 'POST',
-        body: JSON.stringify({ status, detail }),
+        body: JSON.stringify({ projectId, bridgeId, status, detail }),
       });
+      if (result.command.projectId !== projectId) throw new Error('Supervisor returned a command for a different project');
+      return toolJson({ command: result.command });
+    },
+  );
+
+  registerAppTool(
+    server,
+    'ai_dev_deck_bridge_retry',
+    {
+      title: 'Retry AI DEV DECK Chat Command',
+      description: 'Internal app-only tool that requeues a terminal failed command after automatic delivery retries were exhausted.',
+      inputSchema: {
+        projectId: z.string().min(1).max(200),
+        commandId: z.string().min(1).max(200),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: true,
+      },
+      _meta: { ui: { visibility: ['app'] } },
+    },
+    async ({ projectId, commandId }) => {
+      assertAllowedProject(projectId);
+      const result = await supervisorFetch<{ command: ChatCommand }>(`/api/chat-commands/${encodeURIComponent(commandId)}/retry`, {
+        method: 'POST',
+        body: JSON.stringify({ projectId }),
+      });
+      if (result.command.projectId !== projectId) throw new Error('Supervisor returned a command for a different project');
       return toolJson({ command: result.command });
     },
   );
@@ -275,7 +306,7 @@ function bridgeWidgetHtml() {
     </div>
     <div class="meta"><span id="bridge"></span><span id="heartbeat"></span></div>
     <div class="last" id="last">PWAからの指示を待機します。</div>
-    <button id="retry" hidden>今すぐ再確認</button>
+    <button id="retry" hidden>今すぐ再試行</button>
   </section>
 <script>
 (() => {
@@ -289,6 +320,7 @@ function bridgeWidgetHtml() {
   let lastHeartbeat = 0;
   let cooldownUntil = 0;
   let timer = null;
+  let lastFailedCommandId = '';
 
   function input() {
     return window.openai?.toolInput || {};
@@ -315,6 +347,32 @@ function bridgeWidgetHtml() {
       return id;
     } catch {
       return 'chatgpt:' + pid + ':' + Math.random().toString(36).slice(2, 10);
+    }
+  }
+
+  function receiptKey() {
+    return 'ai-dev-deck-delivery-receipt:' + (projectId() || 'unknown');
+  }
+
+  function readReceipt() {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try {
+        const raw = storage.getItem(receiptKey());
+        if (raw) return JSON.parse(raw);
+      } catch {}
+    }
+    return null;
+  }
+
+  function saveReceipt(receipt) {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try { storage.setItem(receiptKey(), JSON.stringify(receipt)); return; } catch {}
+    }
+  }
+
+  function clearReceipt() {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try { storage.removeItem(receiptKey()); } catch {}
     }
   }
 
@@ -346,17 +404,36 @@ function bridgeWidgetHtml() {
     heartbeatEl.textContent = 'heartbeat ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
   }
 
-  async function report(commandId, status, detail) {
+  async function report(commandId, status, detail, ownerBridgeId) {
+    const result = await callTool('ai_dev_deck_bridge_result', {
+      projectId: projectId(),
+      bridgeId: ownerBridgeId || bridgeId(),
+      commandId,
+      status,
+      detail: detail || undefined,
+    });
+    return structured(result).command || null;
+  }
+
+  async function flushReceipt() {
+    const receipt = readReceipt();
+    if (!receipt || !receipt.commandId || !receipt.bridgeId) return true;
     try {
-      await callTool('ai_dev_deck_bridge_result', {
-        projectId: projectId(),
-        commandId,
-        status,
-        detail: detail || undefined,
-      });
+      await report(receipt.commandId, 'delivered', receipt.detail || 'Recovered persisted delivery receipt', receipt.bridgeId);
+      clearReceipt();
+      setStatus('送信済み', 'ok');
+      return true;
     } catch (error) {
-      console.warn('AI DEV DECK result report failed', error);
+      setStatus('結果同期待ち', 'work');
+      lastEl.textContent = 'ChatGPTへの送信は完了済みです。Workerへの送達確認だけを再同期しています。';
+      console.warn('AI DEV DECK delivery receipt sync failed', error);
+      return false;
     }
+  }
+
+  function deliveryPrompt(command) {
+    return '[AI DEV DECK COMMAND ID: ' + command.id + ']\n' + command.prompt +
+      '\n\n同じAI DEV DECK COMMAND IDの指示をこの会話ですでに実行済みなら、重複実行せず現在状態だけ確認してください。';
   }
 
   async function tick(force) {
@@ -377,6 +454,7 @@ function bridgeWidgetHtml() {
     processing = true;
     try {
       await heartbeat(force);
+      if (!await flushReceipt()) return;
       if (!force && Date.now() < cooldownUntil) {
         setStatus('応答待ち', 'work');
         return;
@@ -390,19 +468,50 @@ function bridgeWidgetHtml() {
         return;
       }
 
+      lastFailedCommandId = '';
+      retryEl.hidden = true;
       setStatus('送信中', 'work');
       lastEl.textContent = command.prompt;
+
       try {
-        await window.openai.sendFollowUpMessage({ prompt: command.prompt });
-        await report(command.id, 'delivered', 'Sent through ChatGPT Apps SDK sendFollowUpMessage');
+        await window.openai.sendFollowUpMessage({ prompt: deliveryPrompt(command) });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          const updated = await report(command.id, 'failed', detail, bridgeId());
+          if (updated && updated.status === 'queued') {
+            setStatus('自動再試行待ち', 'work');
+            lastEl.textContent = detail + '\nWorkerが安全なバックオフ後に再配送します。';
+            cooldownUntil = Date.now() + 6_000;
+          } else {
+            lastFailedCommandId = command.id;
+            setStatus('送信失敗', 'error');
+            lastEl.textContent = detail;
+            retryEl.hidden = false;
+          }
+        } catch (reportError) {
+          setStatus('送信失敗', 'error');
+          lastEl.textContent = detail + '\n結果報告にも失敗しました。stale claim回収後に再試行されます。';
+          console.warn('AI DEV DECK failed-delivery report failed', reportError);
+        }
+        return;
+      }
+
+      const receipt = {
+        commandId: command.id,
+        bridgeId: bridgeId(),
+        detail: 'Sent through ChatGPT Apps SDK sendFollowUpMessage',
+      };
+      saveReceipt(receipt);
+      try {
+        await report(command.id, 'delivered', receipt.detail, receipt.bridgeId);
+        clearReceipt();
         setStatus('送信済み', 'ok');
         cooldownUntil = Date.now() + 30_000;
       } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        await report(command.id, 'failed', detail);
-        setStatus('送信失敗', 'error');
-        lastEl.textContent = detail;
-        retryEl.hidden = false;
+        setStatus('結果同期待ち', 'work');
+        lastEl.textContent = 'ChatGPTへの送信は成功しました。送達確認だけを再同期します。';
+        console.warn('AI DEV DECK delivered receipt report failed', error);
       }
     } catch (error) {
       setStatus('Bridge失敗', 'error');
@@ -413,9 +522,23 @@ function bridgeWidgetHtml() {
     }
   }
 
-  retryEl.addEventListener('click', () => {
+  retryEl.addEventListener('click', async () => {
     retryEl.hidden = true;
     cooldownUntil = 0;
+    if (lastFailedCommandId) {
+      processing = true;
+      try {
+        await callTool('ai_dev_deck_bridge_retry', { projectId: projectId(), commandId: lastFailedCommandId });
+        lastFailedCommandId = '';
+      } catch (error) {
+        setStatus('再試行失敗', 'error');
+        lastEl.textContent = error instanceof Error ? error.message : String(error);
+        retryEl.hidden = false;
+        processing = false;
+        return;
+      }
+      processing = false;
+    }
     void tick(true);
   });
 
