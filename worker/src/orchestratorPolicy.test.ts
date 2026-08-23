@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUTOPILOT_ROUTE_COMPLETE_MARKER,
+  AUTOPILOT_ROUTE_HEADER,
   assessCi,
+  buildAutopilotRouteContinuationPrompt,
   buildChatGptHandoff,
   buildGenericChatGptHandoff,
   buildRecoveryPrompt,
   failureFingerprint,
+  hasAutopilotRouteCompletionMarker,
+  hasAutopilotRouteContract,
   isRetryableProviderStatus,
 } from './orchestratorPolicy';
 
@@ -85,5 +90,43 @@ describe('recovery safety', () => {
     expect(prompt).toContain('実行主体は、このChatGPTチャット');
     expect(prompt).toContain('監督・整理・次手生成だけを担当');
     expect(prompt).toContain('外部APIの要約だけを根拠に完成扱いせず');
+  });
+});
+
+describe('autopilot route contract', () => {
+  const routeTask = `Plan\n${AUTOPILOT_ROUTE_HEADER}\n3回デバッグ → 問題があれば追加 → 機能追加 → 3回補強 → UIUXを3回`;
+
+  it('detects route contracts and completion markers explicitly', () => {
+    expect(hasAutopilotRouteContract(routeTask)).toBe(true);
+    expect(hasAutopilotRouteContract('ordinary task')).toBe(false);
+    expect(hasAutopilotRouteCompletionMarker(`feat: final ${AUTOPILOT_ROUTE_COMPLETE_MARKER}`)).toBe(true);
+    expect(hasAutopilotRouteCompletionMarker('feat: intermediate')).toBe(false);
+  });
+
+  it('keeps later route stages alive after an intermediate green CI', () => {
+    const prompt = buildAutopilotRouteContinuationPrompt({
+      repository: 'owner/repo',
+      branch: 'ai-dev-deck/task',
+      goal: 'Finish route',
+      originalTask: routeTask,
+      headSha: 'abc123',
+      checks: [base],
+    });
+    expect(prompt).toContain('CI成功だけでは完了扱いにしません');
+    expect(prompt).toContain('最初の未完了工程/未完了パスから続行');
+    expect(prompt).toContain(AUTOPILOT_ROUTE_COMPLETE_MARKER);
+  });
+
+  it('preserves route progress rules through recovery prompts', () => {
+    const prompt = buildRecoveryPrompt({
+      repository: 'owner/repo',
+      branch: 'ai-dev-deck/task',
+      goal: 'Finish route',
+      originalTask: routeTask,
+      headSha: 'abc123',
+      checks: [{ ...base, conclusion: 'failure' }],
+    });
+    expect(prompt).toContain('完了済み工程を最初から再実行せず');
+    expect(prompt).toContain('後続工程が残っている限り最終完了ではありません');
   });
 });
