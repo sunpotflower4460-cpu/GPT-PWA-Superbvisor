@@ -1,0 +1,205 @@
+import { useEffect, useMemo, useState } from 'react';
+import { buildActionPrompt, loadProjects, quickActions, type DevProject } from './core';
+import { getOperatingPlan, formatOperatingPlanPrompt } from './operatingPlan';
+import {
+  ChatCommand,
+  chatCommandStatusLabel,
+  enqueueProjectChatCommand,
+  listProjectChatCommands,
+} from './chatControl';
+
+const continueAction = quickActions.find((item) => item.id === 'continue')!;
+
+export default function ChatControlCenter() {
+  const [open, setOpen] = useState(false);
+  const [projects, setProjects] = useState<DevProject[]>([]);
+  const [selectedId, setSelectedId] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [commands, setCommands] = useState<ChatCommand[]>([]);
+  const [busy, setBusy] = useState('');
+  const [message, setMessage] = useState('');
+
+  const selected = useMemo(
+    () => projects.find((project) => project.id === selectedId) ?? projects[0] ?? null,
+    [projects, selectedId],
+  );
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const projectId = (event as CustomEvent<{ projectId?: string }>).detail?.projectId;
+      openCenter(projectId);
+    };
+    window.addEventListener('devdeck:open-chat-control', handler);
+    return () => window.removeEventListener('devdeck:open-chat-control', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open || !selected) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const result = await listProjectChatCommands(selected.id);
+        if (!cancelled) setCommands(result.commands);
+      } catch (error) {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : '送信キューを取得できませんでした。');
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 6000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [open, selected?.id]);
+
+  function openCenter(preferredProjectId?: string) {
+    const next = loadProjects();
+    const nextId = preferredProjectId && next.some((project) => project.id === preferredProjectId)
+      ? preferredProjectId
+      : next.find((project) => project.chatUrl)?.id ?? next[0]?.id ?? '';
+    setProjects(next);
+    setSelectedId(nextId);
+    setPrompt('');
+    setCommands([]);
+    setMessage('');
+    setOpen(true);
+  }
+
+  async function refreshCommands(project = selected) {
+    if (!project) return;
+    const result = await listProjectChatCommands(project.id);
+    setCommands(result.commands);
+  }
+
+  async function queue(project: DevProject, value: string, source: string) {
+    const text = value.trim();
+    if (!text) return;
+    setBusy(`${project.id}:${source}`);
+    setMessage('');
+    try {
+      await enqueueProjectChatCommand(project, text);
+      if (project.id === selected?.id) await refreshCommands(project);
+      setMessage(`${project.name} のChatGPT送信キューへ追加しました。PWAを閉じてもWorker側に残ります。`);
+      if (source === 'free') setPrompt('');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'ChatGPT指示をキューへ追加できませんでした。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function queueContinue(project: DevProject) {
+    return queue(project, buildActionPrompt(project, continueAction), 'continue');
+  }
+
+  function useQuickAction(actionId: string) {
+    if (!selected) return;
+    const action = quickActions.find((item) => item.id === actionId);
+    if (!action) return;
+    setPrompt(buildActionPrompt(selected, action));
+  }
+
+  function useAutopilotPlan() {
+    if (!selected) return;
+    const plan = getOperatingPlan(selected.id);
+    setPrompt(`この案件を保存済みAutopilot Routeに従って継続してください。\n\n${formatOperatingPlanPrompt(plan)}\n\n完了済み工程を再実行せず、未完了地点から再開してください。途中の成功を最終完了と誤認せず、指定ルート全体の到達地点まで進めてください。`);
+  }
+
+  async function manualFallback(command: ChatCommand) {
+    try { await navigator.clipboard.writeText(command.prompt); } catch { /* opening the chat still helps */ }
+    window.open(command.chatUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  return (
+    <>
+      <button className="chat-control-fab" onClick={() => openCenter()} aria-label="Multi Chat Control">💬</button>
+      {open && (
+        <div className="chat-control-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
+          <section className="chat-control-sheet">
+            <header className="chat-control-header">
+              <div><p className="eyebrow">MULTI CHAT REMOTE</p><h2>Chat Control</h2></div>
+              <button className="icon-button" onClick={() => setOpen(false)}>×</button>
+            </header>
+
+            <div className="chat-control-note">
+              <b>複数の開発ChatGPTを、このPWAからまとめて動かす。</b>
+              <span>指示はWorkerへ永続キュー保存。ChatGPT側Bridgeが接続されると、PWAを離れず各既存チャットへ配送できる設計です。</span>
+            </div>
+
+            {!projects.length ? (
+              <div className="empty-state compact"><div>💬</div><h2>案件がありません</h2><p>先に開発プロジェクトとChatGPT URLを登録してください。</p></div>
+            ) : (
+              <div className="chat-control-layout">
+                <aside className="chat-project-rail">
+                  {projects.map((project) => (
+                    <div className={`chat-project-row ${project.id === selected?.id ? 'active' : ''}`} key={project.id}>
+                      <button className="chat-project-select" onClick={() => { setSelectedId(project.id); setCommands([]); setMessage(''); }}>
+                        <span className={`chat-project-dot ${project.status.toLowerCase()}`} />
+                        <span><b>{project.name}</b><small>{project.currentPhase}</small></span>
+                      </button>
+                      <button
+                        className="chat-project-continue"
+                        disabled={!project.chatUrl || Boolean(busy)}
+                        onClick={() => void queueContinue(project)}
+                        title="このChatGPTへ続行指示をキュー"
+                      >▶</button>
+                    </div>
+                  ))}
+                </aside>
+
+                {selected && (
+                  <div className="chat-control-main">
+                    <section className="chat-session-head">
+                      <div><span>選択中</span><h3>{selected.name}</h3><p>{selected.currentPhase}</p></div>
+                      <div className={`bridge-badge ${selected.chatUrl ? 'ready' : 'missing'}`}>{selected.chatUrl ? 'Chat URL ✓' : 'URL未登録'}</div>
+                    </section>
+
+                    <div className="chat-control-quick">
+                      <button onClick={() => useQuickAction('continue')}>そのまま続ける</button>
+                      <button onClick={() => useQuickAction('inspect-first')}>問題点も確認</button>
+                      <button onClick={() => useQuickAction('manual-only')}>手動だけまで</button>
+                      <button onClick={useAutopilotPlan}>Autopilot Route</button>
+                    </div>
+
+                    <label className="chat-command-compose">このChatGPTへ送る指示
+                      <textarea
+                        rows={7}
+                        value={prompt}
+                        onChange={(event) => setPrompt(event.target.value)}
+                        placeholder="例：まず3回デバッグ。問題が残れば追加で数回。問題なければ次の機能を追加し、その後3回補強→3回デバッグ→UI/UX改善を3回。"
+                      />
+                    </label>
+                    <button
+                      className="chat-command-send"
+                      disabled={!selected.chatUrl || !prompt.trim() || Boolean(busy)}
+                      onClick={() => void queue(selected, prompt, 'free')}
+                    >
+                      {busy ? 'キューへ追加中…' : 'このチャットの送信キューへ ▶'}
+                    </button>
+
+                    <section className="chat-command-queue">
+                      <div className="section-heading"><span>送信キュー</span><b>{commands.filter((item) => item.status === 'queued' || item.status === 'claimed').length}待機</b></div>
+                      {!commands.length && <p className="muted">この案件の送信履歴はまだありません。</p>}
+                      {commands.slice(0, 12).map((command) => (
+                        <article className={`chat-command-row ${command.status}`} key={command.id}>
+                          <div>
+                            <span>{chatCommandStatusLabel(command.status)}</span>
+                            <time>{new Date(command.createdAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
+                          </div>
+                          <p>{command.prompt}</p>
+                          {command.bridgeId && <small>Bridge: {command.bridgeId}</small>}
+                          {command.detail && <small>{command.detail}</small>}
+                          {(command.status === 'queued' || command.status === 'failed') && (
+                            <button className="chat-manual-fallback" onClick={() => void manualFallback(command)}>手動Bridgeで送る ↗</button>
+                          )}
+                        </article>
+                      ))}
+                    </section>
+                    {message && <div className="chat-control-message">{message}</div>}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+    </>
+  );
+}
