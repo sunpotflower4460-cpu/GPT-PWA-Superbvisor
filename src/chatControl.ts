@@ -18,6 +18,13 @@ export interface ChatCommand {
   detail?: string;
 }
 
+export interface ChatBridgeStatus {
+  connected: boolean;
+  bridgeId?: string;
+  lastSeenAt?: string;
+  capabilities: string[];
+}
+
 export function chatCommandStatusLabel(status: ChatCommandStatus) {
   if (status === 'queued') return '送信待ち';
   if (status === 'claimed') return 'Bridge処理中';
@@ -48,6 +55,10 @@ export async function listProjectChatCommands(
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
   return workerFetch<{ commands: ChatCommand[] }>(connection, `/api/projects/${encodeURIComponent(projectId)}/chat-commands`, { method: 'GET' });
+}
+
+export async function getChatBridgeStatus(connection: WorkerConnection = loadWorkerConnection()) {
+  return workerFetch<ChatBridgeStatus>(connection, '/api/chat-bridge/status', { method: 'GET' });
 }
 
 async function workerFetch<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
