@@ -175,6 +175,7 @@ function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
     progress,
     currentPhase: phase,
     executionMode: 'API_WORKER',
+    automationLevel: 'AUTO',
     humanBlockers: blockers,
     lastActivityAt: job.updatedAt,
   }, {
@@ -229,6 +230,7 @@ function applyBackground(project: DevProject, job: BackgroundJob): DevProject {
     progress,
     currentPhase: phase,
     executionMode: 'API_WORKER',
+    automationLevel: job.autoRecover ? 'AUTO' : 'ASSIST',
     humanBlockers: blockers,
     lastActivityAt: job.updatedAt,
   }, {
