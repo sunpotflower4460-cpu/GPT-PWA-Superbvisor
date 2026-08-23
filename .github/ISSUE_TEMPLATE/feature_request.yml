@@ -1,0 +1,68 @@
+name: Feature request
+about: Propose a feature while checking AI DEV DECK product alignment
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing a feature, read `docs/PRODUCT_CONSTITUTION.md`.
+        AI DEV DECK's North Star is controlling multiple existing ChatGPT development conversations from one mobile-first PWA.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user friction or failure are we fixing?
+    validations:
+      required: true
+  - type: textarea
+    id: north_star
+    attributes:
+      label: North Star impact
+      description: How does this make Multi Chat Remote faster, clearer, safer, more durable, or easier on mobile?
+      placeholder: This improves Multi Chat Remote by...
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Primary layer
+      options:
+        - Multi Chat Remote / PWA
+        - Chat Control Bus
+        - ChatGPT Apps Bridge
+        - Supervisor / Guardian
+        - Evidence / Completion
+        - Autopilot Route
+        - Setup / Delivery
+        - Other supporting layer
+    validations:
+      required: true
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Product invariants
+      options:
+        - label: ChatGPT remains the implementation/debugging executor.
+          required: true
+        - label: External LLMs remain orchestration-only.
+          required: true
+        - label: This does not make a second IDE / generic project manager / provider router the main product.
+          required: true
+        - label: This does not introduce unofficial ChatGPT cookie/session automation.
+          required: true
+        - label: This does not introduce implicit automatic merge or production deploy.
+          required: true
+  - type: textarea
+    id: mobile
+    attributes:
+      label: Mobile / interaction impact
+      description: Does this reduce or add taps, settings, screens, or operational burden?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Completion / evidence impact
+      description: How will we know this works without relying only on AI self-report?
+    validations:
+      required: true
