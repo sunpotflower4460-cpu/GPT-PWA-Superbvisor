@@ -7,7 +7,8 @@
     "dev": "vite",
     "concept:guard": "node scripts/concept-guard.mjs",
     "build": "tsc -b && vite build",
-    "check": "npm run concept:guard && npm run build",
+    "bundle:budget": "node scripts/check-bundle-size.mjs",
+    "check": "npm run concept:guard && npm run build && npm run bundle:budget",
     "preview": "vite preview"
   },
   "dependencies": {
