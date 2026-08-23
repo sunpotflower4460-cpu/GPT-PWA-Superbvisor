@@ -89,32 +89,27 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
   let status: ProjectStatus = 'RUNNING';
   let progress = project.progress;
   let phase = 'Guardian監督中';
-  let blockers = project.humanBlockers;
+  let blockers: string[] = [];
   let kind: TimelineEvent['kind'] = 'info';
 
   if (run.status === 'running' || run.status === 'starting') {
     if (run.phase === 'handoff_ready' || run.phase === 'waiting_chatgpt') {
-      status = 'WAITING_USER';
+      status = 'WAITING_AI';
       progress = Math.max(progress, 35);
-      phase = 'Guardian監督中 · ChatGPT実行待ち';
-      blockers = unique(['ChatGPTでSupervisorの作業指示を実行']);
-      kind = 'human';
+      phase = 'ChatGPT Bridge配送 / 実行待ち';
     } else if (run.phase === 'recovery_ready') {
-      status = 'WAITING_USER';
+      status = 'WAITING_AI';
       progress = Math.max(progress, 65);
-      phase = 'CI失敗を検出 · ChatGPT修正待ち';
-      blockers = unique(['Guardianが生成した復旧指示をChatGPTで実行']);
+      phase = 'CI失敗を検出 · ChatGPT復旧Queue';
       kind = 'warning';
     } else {
       progress = Math.max(progress, 45);
       phase = 'Guardian監督処理中';
-      blockers = [];
     }
   } else if (run.status === 'waiting_ci') {
     status = 'WAITING_AI';
     progress = Math.max(progress, 78);
     phase = 'ChatGPT変更済み · CI監視中';
-    blockers = [];
   } else if (run.status === 'review_ready') {
     status = 'WAITING_USER';
     progress = Math.max(progress, run.phase === 'human_required' ? 70 : 90);
@@ -134,13 +129,12 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
       status = 'COMPLETED';
       progress = 100;
       phase = 'ChatGPT作業・CI成功確認済み';
-      blockers = [];
       kind = 'success';
     }
   } else if (run.status === 'expired') {
     status = 'WAITING_USER';
-    phase = 'Guardian監視時間上限 · ChatGPTで再開可能';
-    blockers = unique(['保存済み状態からChatGPTで作業を再開']);
+    phase = 'Guardian監視時間上限 · 再開判断が必要';
+    blockers = unique(['監視時間上限に達したため、継続するか確認']);
     kind = 'warning';
   } else {
     status = 'ERROR';
@@ -167,37 +161,35 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
 function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
   if (!isNewer(job.updatedAt, project.lastActivityAt)) return project;
 
-  let status: ProjectStatus = 'WAITING_USER';
+  let status: ProjectStatus = 'WAITING_AI';
   let progress = project.progress;
-  let phase = 'ChatGPT作業指示準備済み';
-  let blockers = project.humanBlockers;
-  let kind: TimelineEvent['kind'] = 'human';
+  let phase = 'ChatGPT実行待ち';
+  let blockers: string[] = [];
+  let kind: TimelineEvent['kind'] = 'info';
 
   if (job.status === 'starting' || job.status === 'running') {
     if (job.phase === 'waiting_ci') {
-      status = 'WAITING_AI';
       progress = Math.max(progress, 78);
       phase = 'ChatGPT変更済み · CI監視中';
-      blockers = [];
-      kind = 'info';
     } else if (job.phase === 'recovery_ready') {
       progress = Math.max(progress, 65);
-      phase = 'CI失敗 · ChatGPT復旧指示あり';
-      blockers = unique(['復旧指示をChatGPTで実行']);
+      phase = job.autoDispatch ? 'CI失敗 · ChatGPT復旧Queue投入済み' : 'CI失敗 · ChatGPT復旧指示あり';
       kind = 'warning';
     } else if (job.phase === 'human_required') {
+      status = 'WAITING_USER';
       phase = '人間操作が必要';
       blockers = unique([job.error || '権限・承認など人間操作を確認']);
+      kind = 'human';
     } else {
       progress = Math.max(progress, 35);
-      phase = 'ChatGPT実行待ち';
-      blockers = unique(['Supervisorが準備した指示をChatGPTで実行']);
+      phase = job.autoDispatch ? 'ChatGPT Bridge配送 / 実行待ち' : 'ChatGPT実行待ち';
     }
   } else if (job.status === 'completed') {
     status = 'WAITING_USER';
     progress = Math.max(progress, job.pullRequest ? 95 : 90);
     phase = job.pullRequest ? `CI成功 · Draft PR #${job.pullRequest.number} レビュー待ち` : 'CI成功 · 最終確認待ち';
     blockers = unique([job.pullRequest ? `Draft PR #${job.pullRequest.number} をレビュー` : '実装結果と証拠を最終確認']);
+    kind = 'human';
   } else {
     status = 'ERROR';
     phase = 'ChatGPT Orchestrator設定エラー';
@@ -209,7 +201,7 @@ function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
     progress,
     currentPhase: phase,
     executionMode: 'CHAT',
-    automationLevel: 'ASSIST',
+    automationLevel: job.autoDispatch ? project.automationLevel : 'ASSIST',
     humanBlockers: blockers,
     lastActivityAt: job.updatedAt,
   }, {
@@ -225,17 +217,17 @@ function applyBackground(project: DevProject, job: BackgroundJob): DevProject {
 
   if (job.kind === 'orchestration_handoff') {
     return patchRuntime(project, {
-      status: 'WAITING_USER',
+      status: 'WAITING_AI',
       progress: Math.max(project.progress, 20),
-      currentPhase: 'Supervisor整理完了 · ChatGPT実行待ち',
+      currentPhase: 'Supervisor整理完了 · Chat Control配送待ち',
       executionMode: 'CHAT',
-      automationLevel: 'ASSIST',
-      humanBlockers: unique(['Supervisorが準備した指示をChatGPTで実行']),
+      automationLevel: project.automationLevel,
+      humanBlockers: [],
       lastActivityAt: job.updatedAt,
     }, {
       id: `runtime:orchestration:${job.id}`,
       at: job.updatedAt,
-      kind: 'human',
+      kind: 'info',
       message: `Supervisor: GPT引き継ぎ指示を準備${job.degradedOrchestration ? '（fallback使用）' : ''}`,
     });
   }
@@ -280,19 +272,22 @@ function runtimeGuardianMessage(run: GuardianRun) {
   if (run.status === 'completed') return `Guardian: ChatGPT作業後のCI成功確認済み${run.pullRequest ? ` / Draft PR #${run.pullRequest.number}` : ''}`;
   if (run.status === 'review_ready') return `Guardian: ${run.phase === 'human_required' ? '人間操作が必要' : 'レビュー待ち'}`;
   if (run.status === 'waiting_ci') return 'Guardian: 現在headのGitHub Actionsを監視中';
-  if (run.status === 'expired') return 'Guardian: 監視時間上限。状態保存済み、ChatGPTで再開可能';
-  if (run.phase === 'recovery_ready') return `Guardian: CI失敗を検出しChatGPT復旧指示を準備（${run.recoveryCount || 0}回目）`;
-  if (run.phase === 'handoff_ready' || run.phase === 'waiting_chatgpt') return 'Guardian: ChatGPT実行待ち。Workerは監督のみ継続';
+  if (run.status === 'expired') return 'Guardian: 監視時間上限。状態保存済み';
+  if (run.phase === 'recovery_ready') return `Guardian: CI失敗を検出しChatGPT復旧指示をQueue（${run.recoveryCount || 0}回目）`;
+  if (run.phase === 'handoff_ready' || run.phase === 'waiting_chatgpt') return 'Guardian: ChatGPT Bridge配送 / 実行待ち。Workerは監督を継続';
   if (run.status === 'failed') return `Guardian設定エラー: ${run.message || run.error || 'unknown'}`;
   return 'Guardian: オーケストレーション監督中';
 }
 
 function runtimeDeveloperMessage(job: DeveloperJob) {
   if (job.status === 'completed') return job.pullRequest ? `ChatGPT作業後のCI成功: Draft PR #${job.pullRequest.number}` : 'ChatGPT作業後のCI成功確認済み';
-  if (job.phase === 'recovery_ready') return `CI失敗: ChatGPT復旧指示を準備（${job.recoveryCount ?? 0}回目）`;
+  if (job.phase === 'recovery_ready') return job.autoDispatch
+    ? `CI失敗: ChatGPT復旧指示を自動Queue（${job.recoveryCount ?? 0}回目）`
+    : `CI失敗: ChatGPT復旧指示を準備（${job.recoveryCount ?? 0}回目）`;
   if (job.phase === 'waiting_ci') return 'ChatGPT変更を検出: CI監視中';
+  if (job.phase === 'human_required') return `人間操作が必要: ${job.error || '確認してください'}`;
   if (job.status === 'failed') return `Orchestrator設定エラー: ${job.error || 'unknown error'}`;
-  return `ChatGPT実行待ち: ${job.workspace.branch}`;
+  return job.autoDispatch ? `ChatGPT Bridge配送 / 実行待ち: ${job.workspace.branch}` : `ChatGPT実行待ち: ${job.workspace.branch}`;
 }
 
 function isNewer(candidate: string, current: string) {
