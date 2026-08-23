@@ -211,13 +211,21 @@ export default function ChatControlCenter() {
     }
     popup.opener = null;
     setBusy(`${command.projectId}:manual:${command.id}`);
-    setMessage('自動配送を停止してから手動ChatGPTへ切り替えています…');
+    setMessage('手動送信用の指示を準備しています…');
     try {
+      try {
+        await navigator.clipboard.writeText(command.prompt);
+      } catch {
+        popup.close();
+        setMessage('指示をClipboardへコピーできなかったため、Queueは取消していません。Clipboard権限を許可してから再度お試しください。');
+        return;
+      }
+
+      setMessage('指示をコピーしました。自動配送を停止してから手動ChatGPTへ切り替えています…');
       await cancelProjectChatCommand(command.projectId, command.id);
       await Promise.all([refreshCommands(), refreshProjectOverview(command.projectId)]);
-      try { await navigator.clipboard.writeText(command.prompt); } catch { /* prompt remains visible in the cancelled history row */ }
       popup.location.replace(chatUrl);
-      setMessage('自動Queueを取消してからChatGPTを開きました。同じ指示がBridgeから後で重複配送されることはありません。');
+      setMessage('指示をコピーし、自動Queueを取消してからChatGPTを開きました。同じ指示がBridgeから後で重複配送されることはありません。');
     } catch (error) {
       popup.close();
       setMessage(`${error instanceof Error ? error.message : 'commandを安全に取消できませんでした。'} 自動配送が残っている可能性があるため、手動送信は開始していません。`);
