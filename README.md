@@ -42,6 +42,11 @@ AI DEV DECK:
 
 ```text
 PWA
+  ├─ Chat A  ● 配送中
+  ├─ Chat B  ↻ 再試行待ち
+  ├─ Chat C  ○ Bridge待ち
+  └─ Chat D  ! 要確認
+
   ├─ Chat Aへ「続けて」
   ├─ Chat Bへ「問題点も確認」
   ├─ Chat Cへ「CI成功まで」
@@ -58,7 +63,7 @@ Durable Chat Control Bus
 複数ChatGPTがそれぞれ進行
         ↓
 
-PWAで待機 / エラー / 本当のあなた待ち / 完了を確認
+PWAで全案件の待機 / エラー / 本当のあなた待ち / 完了を確認
 ```
 
 さらにAutopilotでは、例えば以下のような自然文ルートを指定できます。
@@ -70,7 +75,7 @@ PWAで待機 / エラー / 本当のあなた待ち / 完了を確認
 ## 第一優先の設計原則
 
 1. **複数ChatGPT開発チャットをPWAから一元操作**
-2. **複数案件を同時並行で扱える**
+2. **複数案件を同時並行で扱い、全案件のremote状態を同じ画面で把握**
 3. **スマホで軽く、PWAを閉じても状態・指示Queueを失わない**
 4. **複数端末・複数Bridgeでもcommand ownership/state revisionを安全に調停する**
 5. GitHub / CI / Pushで外部状態を監視
@@ -85,6 +90,15 @@ Supervisor / Guardianは製品の主役ではなく、Multi Chat Remoteをより
 
 - 複数Project / ChatGPT URLを登録
 - PWA内の **Chat Control Center** から案件を切り替え
+- **選択中でない案件も含め、全ChatGPTのremote activityを一覧表示**
+  - 配送中
+  - 再試行待ち
+  - 送信待ち
+  - Bridge待ち
+  - 要確認
+  - 最近送信済み
+  - 接続中 / offline
+- 全体の接続数 / 進行・待機数 / 要確認数を表示
 - 自由文指示を案件ごとに投入
 - Main Project画面のQuick Commandも直接Queueへ送信
 - Operating Planも直接Queueへ送信
@@ -97,6 +111,18 @@ Supervisor / Guardianは製品の主役ではなく、Multi Chat Remoteをより
 - projectごとの送信Queue / 履歴を表示
 - `queued / claimed / delivered / failed / cancelled` を表示
 - failed commandを同じcommand IDのまま明示再試行
+
+#### 軽量なall-chat overview
+
+一覧表示のために全command本文を何度も取り直しません。
+
+- PWAは8秒ごとにcompact overviewを取得
+- Worker endpointは1 batch最大30案件
+- 30件超はPWAが自動で複数batchへ分割し、残りを切り捨てない
+- Coordinatorの `/commands/overview` はstatus/count/timestamp等のsummaryだけを返す
+- overview pollはcommand本文を取得しない
+- overview readを理由にKV history mirror writeを発生させない
+- 選択中chatの詳細Queue/heartbeatは別の6秒pollで保持
 
 ### Durable Chat Control Bus
 
@@ -124,6 +150,7 @@ delivered / retrying / failed
 - stale claimを回収して再配送可能
 - stale/non-owner Bridgeからのresult overwriteを拒否
 - transient delivery failureは同じcommand IDでbackoff再試行
+- retry/requeue時は以前のBridge ownershipを解放
 - 自動試行上限後のみterminal `failed`
 - automation由来commandはdedupe keyで重複投入を抑制
 
@@ -223,16 +250,19 @@ Guardianは外部AI開発者ではなく、**ChatGPT作業を監督するハー�
 - action_required → あなた待ち
 - 一時GitHub/API障害 → 非終端で再監視
 - CI成功 → Draft PR導線
+- Cron/manual refresh競合 → Coordinatorの`guardian-advance` leaseで通常の二重advanceを抑止
 - 自動mergeなし
 - production deployなし
+
+Guardian leaseは通常の二重advanceを抑える入口ロックであり、Guardian / Developer KV state全体を完全transactional/fencedにしたとは扱いません。
 
 ## 実行境界
 
 | 層 | 役割 |
 |---|---|
 | ChatGPT | 実装・デバッグ・レビュー・GitHub編集・検証 |
-| PWA | 複数chat操作・状態表示・route指定 |
-| ProjectCoordinator | command ownership/dedupe/retry・Cloud State revisionの強整合調停 |
+| PWA | 複数chat操作・**全chat live overview**・状態表示・route指定 |
+| ProjectCoordinator | command ownership/dedupe/retry・read-only overview summary・Cloud State revision・Guardian leaseの強整合調停 |
 | Chat Control Bus | 指示Queueの永続化・配送状態 |
 | ChatGPT Bridge | Queue commandを同じChatGPT会話へfollow-up送信・delivery receipt同期 |
 | Supervisor | 状態整理・次手生成・completion判断・AUTO時Queue投入 |
@@ -264,6 +294,7 @@ Provider error
 
 Bridge send failure
   → same command IDでbackoff
+  → old bridge ownership release
   → automatic retry
   → 上限後だけterminal failed
 
@@ -274,6 +305,10 @@ ChatGPT send success / Worker ack failure
 Bridge crash after claim
   → stale claim recovery
   → next active bridgeが再claim
+
+Guardian Cron + manual refresh
+  → guardian-advance lease
+  → one active advance
 
 CI transient failure
   → rerun failed jobs
@@ -292,12 +327,19 @@ human-required
 
 **失敗は終了ではなく状態**として扱います。
 
-## 軽量性のCI budget
+## 軽量性のCI / runtime budget
 
 スマホPWAであることを守るため、production build後にgzipサイズをCIで検査します。
 
 - JavaScript: **130 KiB gzip以下**
 - CSS: **20 KiB gzip以下**
+
+さらにall-chat overviewはruntimeでも軽量性を守ります。
+
+- compact batch summary
+- full command promptをoverviewに含めない
+- overview readでKV mirror writeを増幅しない
+- 30件超は複数batchへ分割
 
 budgetを超えた場合は、先にsecondary centerのlazy-loadや依存整理を検討し、安易に上限だけを上げません。
 
