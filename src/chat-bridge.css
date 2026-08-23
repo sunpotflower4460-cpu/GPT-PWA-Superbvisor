@@ -31,7 +31,28 @@
   line-height: 1.4;
 }
 
+.chat-session-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+  flex: none;
+}
+
+.bridge-connect-button {
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 7px 9px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 @media (max-width: 560px) {
   .chat-control-header-actions { gap: 6px; }
   .bridge-live { padding: 0 8px; font-size: 10px; }
+  .chat-session-actions { align-items: stretch; }
+  .bridge-connect-button { padding: 7px 8px; }
 }
