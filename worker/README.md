@@ -33,7 +33,8 @@ Cloudflare Worker
  │    ├─ atomic enqueue / dedupe
  │    ├─ one active Bridge claim owner
  │    ├─ delivery retry / stale claim recovery
- │    └─ Cloud State revision compare-and-update
+ │    ├─ Cloud State revision compare-and-update
+ │    └─ Guardian advance execution lease
  │
  ├─ KV
  │    └─ migration / history mirror / compatibility fallback
@@ -61,6 +62,9 @@ Coordinatorが担当する強整合境界:
 - transient delivery failureを同じcommand IDでbackoff再試行
 - terminal failureを明示retryで同じcommand IDのまま再queue
 - Cloud Stateのrevision conflictをatomicに判定
+- 同一Guardian runのCron/manual advance入口を短期execution leaseで1本に絞る
+
+Guardian leaseは通常の二重advanceを抑止するための入口ロックです。Guardian / Developerの全KV state writeをtransactional storageへ移したわけではなく、lease期限を超える異常に長い処理まで完全fencingできるとは扱いません。
 
 `PROJECT_COORDINATOR` がない場合は既存KV fallbackで基本動作しますが、**atomic multi-device guaranteeはありません**。`GET /health` の `atomicCoordinator` とPWAのSetup Doctorで確認できます。
 
@@ -72,6 +76,7 @@ Coordinatorが担当する強整合境界:
 - Bridge send failure → 同じcommand IDでbackoff再queue、上限後のみterminal failed
 - ChatGPT send成功 / Worker ack失敗 → Bridge delivery receiptを再同期し、本文の即再送を避ける
 - stale Bridge claim → 2分後に回収可能
+- Guardian Cron/manual refresh競合 → Coordinator有効時は同一runのadvance leaseを1実行だけ取得
 - CI `cancelled` / `timed_out` / `startup_failure` / `stale` → failed jobsを最大2回再実行
 - CI `failure` → 同じ失敗をfingerprintしてChatGPT修正指示へ変換
 - GitHub/API一時エラー → Guardianをfailed終了せず次Cronで再試行
@@ -277,6 +282,8 @@ GET /api/guardian-runs/<id>
 GET /api/guardian-projects/<project-id>/latest
 ```
 
+Coordinator有効時、同じGuardian runのCron sweepと手動refreshは `guardian-advance` leaseで同時advanceを抑制します。
+
 Guardianの詳細は `GUARDIAN_RUNNER.md` を参照してください。
 
 ### Smart Reply
@@ -304,19 +311,23 @@ POST /api/push/test
 
 ## State and consistency
 
-状態の扱いを2種類に分けます。
+状態の扱いを3段階に分けます。
 
 **Strongly consistent / authoritative:**
 - Chat command ownership / dedupe / delivery retry
 - Cloud State revision compare-and-update
 - SQLite Durable Object `ProjectCoordinator`
 
+**Strongly coordinated execution entry:**
+- Guardian runのCron/manual `advance` はCoordinator leaseで同時実行を抑制
+- leaseは期限付きで、Worker crash後は自動takeover可能
+
 **Durable snapshot / mirror:**
 - KV migration source
 - command history mirror
-- Guardian/handoff/Push等の既存監督snapshot
+- Guardian / Developer / handoff / Push等の既存監督snapshot
 
-Guardian transition自体のCron/manual refresh競合は次のhardening対象です。command queueのatomic化だけでGuardian全体が完全transactionalになったとは扱いません。
+したがって、通常のGuardian二重advanceは抑制済みですが、Guardian / Developer state全体が完全transactional/fencedになったとは扱いません。実運用上必要性が確認された場合は、authoritative state自体をCoordinator/D1等へ移すのが次の強化段階です。
 
 ## Cost / safety
 
