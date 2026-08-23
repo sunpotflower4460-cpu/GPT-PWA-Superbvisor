@@ -1,57 +1,72 @@
 # Guardian Goal Runner
 
-Guardian Goal Runnerは、GitHub Developer Agentを1回だけ動かして終わるのではなく、**実装 → CI確認 → 失敗時の修正 → 再確認**を、設定した上限内で監督するモードです。
+Guardian Goal Runnerは、**ChatGPTが実装・デバッグを行い、Cloudflare Workerが外から監督を続ける**モードです。
 
-通常のChat主体運用は変わりません。PWAのGitHub Developer Agent画面で明示的に `Guardian` を選んだ案件だけがAPI実行対象になります。
+外部LLM API（DeepSeek / MiniMax / OpenAI）はコードを編集しません。役割は状態分類、要約、次にChatGPTへ渡す指示、CI失敗時の復旧指示だけです。
 
 ## Flow
 
 ```text
 Guardian start
   ↓
-Developer Agent cycle 1
+Worker: protected ai-dev-deck/* branchを準備
   ↓
-protected ai-dev-deck/* branch
+DeepSeek / MiniMax / OpenAI: ChatGPT用の作業指示を整理
   ↓
-Draft PR
+ChatGPT chat: 実装・デバッグ・GitHub編集
+  ↓
+Worker: branch head SHAを監視
   ↓
 GitHub Actions
-  ├─ green → Guardian completed → Push
-  ├─ running → wait
-  └─ failed → same branch recovery cycle
-                ↓
-             re-check CI
+  ├─ green → Draft PR / review ready → Push
+  ├─ running → wait and keep monitoring
+  ├─ transient failure → failed jobsを最大2回再実行
+  ├─ code failure → ChatGPT用recovery promptを更新 → 次commit待ち
+  └─ action_required → 人間操作が必要として安全停止
 ```
 
-## Stop conditions
+## Failure is a state, not the end
 
-Guardianは必ず次のいずれかで停止します。
+Guardianはrecoverableな失敗を原則として終端状態にしません。
 
-- CIが成功した
-- 最大cycle数に達した
-- 最大経過時間に達した
-- Developer Agentが復旧不能なエラーになった
-- 人間レビューへ進める状態になった
+- GitHub/APIの一時エラー → 状態を保持して次回Cronで再試行
+- Providerの429 / 5xx / timeout → 同provider retry → 次provider → deterministic fallback
+- CI cancelled / timed_out / startup_failure / stale → failed jobs再実行
+- CI failure → 同じheadの失敗をfingerprintし、ChatGPT用の原因確認・修正指示を1回生成
+- Push失敗 → 監督状態には影響させない
+- 100件を超えるGuardian run → KV listをページングして巡回
 
-自動mergeは行いません。
+## Stop / pause conditions
 
-## Cost bounds
+安全上、次は停止または人間待ちになります。
 
-PWAから次を設定できます。
+- 現在headのCI成功 + review可能状態
+- GitHubが `action_required` を返した
+- 課金・権限・承認など人間操作が必要
+- 最大監視時間に達した
+- 初期設定そのものが不正で開始できない
 
-- 1 cycleあたりの最大tool round: 1〜16
-- 最大cycle: 1〜4（標準3）
-- 最大経過時間: 15〜360分（UI標準3時間）
+`maxCycles` は復旧回数の目安としてUIへ表示しますが、recoverableなCI失敗だけを理由にGuardian全体を強制終了しません。無限実行防止の最終境界は `maxMinutes` です。
 
-この3つを掛け合わせた範囲を超えて、自律的にAPIを回し続けることはありません。
+## Provider routing
+
+標準例:
+
+```text
+DeepSeek V4 Flash
+  ↓ failure / rate limit
+MiniMax M3
+  ↓ failure / rate limit
+OpenAI orchestration model
+  ↓ unavailable
+Deterministic ChatGPT handoff
+```
+
+Providerが全部落ちても、Workerは安全な定型ChatGPT指示を生成できるため、監督機能そのものは失われません。
 
 ## Watchdog
 
-OpenAI webhookを受け取った時は即時に次状態へ進みます。
-
-加えてCloudflare WorkersのCron Triggerで、未完了Guardianを定期巡回します。これによりWebhookが一時的に取りこぼされた場合や、CI待ちで止まっている場合も後から再評価できます。
-
-`wrangler.jsonc` 例:
+Cloudflare Workers Cron Triggerが未完了Guardianを定期巡回します。
 
 ```jsonc
 {
@@ -61,43 +76,36 @@ OpenAI webhookを受け取った時は即時に次状態へ進みます。
 }
 ```
 
-標準例は5分ごとの巡回です。
+ChatGPTが閉じている間もWorkerはbranch/CI状態を監視し、復旧指示を準備できます。ただし**ChatGPTの会話をWorkerが勝手に継続することはありません**。実装の実行主体はChatGPTです。
 
 ## Same-branch recovery
 
-CI失敗時に新しいbranchを乱造しません。
+CI失敗時も `ai-dev-deck/*` の同じ作業branchを使います。
 
-最初のDeveloper Agentが作った `ai-dev-deck/*` branchを引き継ぎ、前cycleの成果を残したまま原因修正を行います。Draft PRも同じbranchを指すため、レビュー対象を一つに保てます。
+Workerはコードを直しません。ChatGPTへ「現在branch / head / CI evidence / 元のGoal」を含むrecovery promptを渡し、ChatGPTが修正commitを作ったらGuardianがその新しいheadを再監視します。
 
-## GitHub Actions policy
+## CI evidence policy
 
-Guardian自身は `.github/workflows/*` をDeveloper Agentから読み書きできないようコード側で遮断しています。
+- 最新branch head SHAと一致するrunだけを見る
+- CIがまだ出ていない時は成功扱いしない
+- pendingは待つ
+- failureは成功扱いしない
+- transient failureとcode failureを分ける
+- action_requiredは人間判断へ送る
 
-そのためCI失敗を「Workflowを削除して緑にする」ような回避はできません。既存コード側を直してCIを通す前提です。
-
-CIが存在しないrepositoryでは、一定のgrace period後に「CI未検出・人間レビュー必要」として終了します。CIがないことを成功テストと偽りません。
-
-## Background behavior
-
-- OpenAI Responses API background実行
-- OpenAI webhookでDeveloper Agentのtool loopを継続
-- Cloudflare KVへGuardian / Developer Job状態を保存
-- Cron Watchdogで未完了runを再評価
-- 最終完了/停止時のみWeb Push
-
-途中cycleごとのPushは抑止し、通知が大量に飛ばないようにしています。
+外部LLMの「たぶん直った」という文章では完成判定しません。
 
 ## Safety boundary
 
-GuardianでもPhase 8のDeveloper Agent guardrailはそのまま維持します。
-
+- 実装者: ChatGPT chat
+- 外部LLM: orchestration only
 - allowlist repoのみ
-- `ai-dev-deck/*` branchのみ
-- main/default branch直接書込禁止
-- Draft PRのみ
+- 作業branchは `ai-dev-deck/*`
+- main/default branchへWorkerからコードwriteしない
 - auto merge禁止
 - production deploy禁止
-- secrets/credential/workflow path禁止
-- tool/cycle/timeの3重上限
+- secretsをPWAへ置かない
+- CI成功を推測しない
+- Provider障害時はdeterministic fallback
 
-Guardianは「長く働ける」モードであって、「権限が強くなる」モードではありません。
+Guardianは「外部AIが自律開発する機能」ではなく、**ChatGPTの開発作業を外から止まりにくく監督するハーネス**です。
