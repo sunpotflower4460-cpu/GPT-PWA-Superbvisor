@@ -64,6 +64,9 @@ if (manifest) {
   assert(manifest.experience?.atomicCoordinatorRequiredForMultiDevice === true, 'manifest: multi-device control requires atomic coordination');
   assert(manifest.experience?.singleClaimOwnerRequired === true, 'manifest: one active command claim owner is required');
   assert(manifest.experience?.deliveryRetryPreservesCommandIdentity === true, 'manifest: delivery retries preserve command identity');
+  assert(manifest.experience?.multiChatOverviewRequired === true, 'manifest: all managed ChatGPT projects remain visible in the primary overview');
+  assert(manifest.experience?.overviewUsesBatchTransport === true, 'manifest: multi-chat overview remains batch-oriented');
+  assert(manifest.experience?.overviewPollingAvoidsCommandBodyReads === true, 'manifest: overview polling stays summary-only');
   assert(manifest.experience?.mobileJsGzipBudgetKiB === 130, 'manifest: JavaScript mobile budget remains 130 KiB gzip');
   assert(manifest.experience?.mobileCssGzipBudgetKiB === 20, 'manifest: CSS mobile budget remains 20 KiB gzip');
   assert(manifest.safety?.externalLlmGithubWrite === false, 'manifest: external LLM GitHub write remains disabled');
@@ -71,8 +74,8 @@ if (manifest) {
   assert(manifest.safety?.automaticProductionDeploy === false, 'manifest: automatic production deploy remains disabled');
   assert(manifest.safety?.chatSessionCookieAutomation === false, 'manifest: ChatGPT session-cookie automation remains disabled');
   assert(manifest.safety?.evidenceRequiredForCompletion === true, 'manifest: evidence remains required for completion');
-  assert(Array.isArray(manifest.invariants) && manifest.invariants.length >= 14, 'manifest: product invariants remain explicit');
-  assert(Array.isArray(manifest.antiGoals) && manifest.antiGoals.length >= 12, 'manifest: anti-goals remain explicit');
+  assert(Array.isArray(manifest.invariants) && manifest.invariants.length >= 15, 'manifest: product invariants remain explicit');
+  assert(Array.isArray(manifest.antiGoals) && manifest.antiGoals.length >= 14, 'manifest: anti-goals remain explicit');
 
   for (const protectedFile of manifest.protectedArchitectureFiles ?? []) {
     assert(fs.existsSync(path.join(root, protectedFile)), `manifest: protected architecture file exists: ${protectedFile}`);
@@ -93,6 +96,8 @@ containsAll('docs/PRODUCT_CONSTITUTION.md', [
   'Platform limitations must be represented honestly',
   'Multi-device coordination must be strongly consistent',
   'One command, one active claim owner',
+  'All managed chats stay visible from the primary control view',
+  'compact batch transport',
 ]);
 
 containsAll('docs/ARCHITECTURE.md', [
