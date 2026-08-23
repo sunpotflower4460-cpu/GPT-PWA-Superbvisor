@@ -15,10 +15,11 @@ AI DEV DECKの出発点は、普段ChatGPTでGitHubリポジトリをつない�
 1. 複数ChatGPT開発チャットの一元操作
 2. 複数案件の同時並行
 3. 軽量・モバイル優先・バックグラウンドで状態を失わないこと
-4. 状態監視・CI監視・通知
-5. 「続けて」などの途中指示をSupervisorが代行
-6. 複数工程・反復・条件分岐を持つAutopilot Route
-7. 最初の指示から指定到達地点までの自動運転
+4. 複数端末・複数Bridgeでも二重claim/lost updateを起こしにくいこと
+5. 状態監視・CI監視・通知
+6. 「続けて」などの途中指示をSupervisorが代行
+7. 複数工程・反復・条件分岐を持つAutopilot Route
+8. 最初の指示から指定到達地点までの自動運転
 
 Supervisor / Guardian / 外部LLM APIは主役ではなく、**Multi Chat Remoteをより放置可能にするための補助層**。
 
@@ -27,19 +28,23 @@ Supervisor / Guardian / 外部LLM APIは主役ではなく、**Multi Chat Remote
 ## 2. Core mental model
 
 ```text
-User
+User / multiple devices
   ↓
 AI DEV DECK PWA
   ├─ Chat A command ─┐
-  ├─ Chat B command ─┼─→ Durable Chat Control Bus
-  ├─ Chat C command ─┤       ↓
-  └─ Chat D route   ─┘   project-specific Bridge
-                            ↓
-                     existing ChatGPT chats
-                            ↓
-                 repository / GitHub / CI evidence
-                            ↑
-                 Supervisor / Guardian support
+  ├─ Chat B command ─┼─→ Supervisor Worker
+  ├─ Chat C command ─┤        ↓
+  └─ Chat D route   ─┘   ProjectCoordinator (SQLite Durable Object)
+                              ↓ strongly consistent
+                        Durable Chat Control Bus
+                              ↓
+                       project-specific Bridge
+                              ↓
+                       existing ChatGPT chats
+                              ↓
+                   repository / GitHub / CI evidence
+                              ↑
+                   Supervisor / Guardian support
 ```
 
 ChatGPTは外部の別AIではない。
@@ -64,10 +69,32 @@ Cloudflare Worker、DeepSeek、MiniMax、OpenAI API等は、ChatGPTの代わり�
 - Human blockers
 - Resume / Handoff
 - Notification UI
+- Atomic Coordinatorの有効/無効診断
 
 Main Project画面とOperating Planの通常操作もChat Control Busへ直接送る。コピーはfallback。
 
 PWAはChatGPTチャット本文を非公式にスクレイピングしない。
+
+### Project Coordinator / strong consistency boundary
+
+productionの複数端末競合耐性を担うauthoritative state boundary。
+
+実装はSQLite-backed Cloudflare Durable Object `ProjectCoordinator`。
+
+担当:
+
+- project単位command enqueue / dedupe
+- FIFO claimの直列化
+- active claim ownerの一意性
+- stale claim takeover
+- claim ownerとresult reporterの一致確認
+- delivery failure回数 / backoff / terminal failure
+- terminal failureの明示retry
+- Cloud State revision compare-and-update
+
+Queue/stateの強整合な判断はCoordinator内で行う。KVは既存データのmigration、履歴mirror、互換fallbackとして残す。
+
+**KV-onlyのread → compare → writeをatomic guaranteeとは呼ばない。** `PROJECT_COORDINATOR` bindingが無効なWorkerは互換運転できるが、Setup Doctorがmulti-device safety警告を出す。
 
 ### Chat Control Bus
 
@@ -84,12 +111,16 @@ PWA / Supervisor / Guardian / Autopilotから各ChatGPTへ送る指示を、端�
 Bridge protocol:
 
 1. PWAまたはautomation layerがchat commandをqueue
-2. ChatGPT側Bridgeがproject単位でclaim
-3. 対象既存chatへ配送
-4. delivered / failedをWorkerへ返却
-5. PWAが状態を表示
+2. ProjectCoordinatorがdedupeし永続化
+3. ChatGPT側Bridgeがproject単位でclaim
+4. Coordinatorが同時に1 Bridgeだけへownershipを与える
+5. 対象既存chatへ配送
+6. owner Bridgeがdelivered / failedをWorkerへ返却
+7. PWAが状態を表示
 
 Autopilot / recovery由来のcommandにはdedupe keyを付け、監視ループの重複配送を防ぐ。
+
+Delivery failureはcommand IDを変えずにbackoff再試行する。既定の自動配送上限後のみterminal `failed` とし、PWA/Bridgeから同じcommandを明示再queueできる。
 
 ### ChatGPT Bridge
 
@@ -98,12 +129,19 @@ Autopilot / recovery由来のcommandにはdedupe keyを付け、監視ループ�
 - project allowlist
 - server-side Worker token
 - heartbeat
-- claim
+- atomic claim
 - same-conversation follow-up
-- result report
+- claim-owner result report
 - stale claim recovery
+- delivery backoff
+- terminal failed command retry
+- delivery receipt
 
 Bridgeが完全にunmount/suspendされている間はcommandをQueueへ保持し、active復帰時に再開する。
+
+`sendFollowUpMessage` 成功後にWorkerへのackだけ失敗した場合は、Widgetがdelivery receiptを保持し、本文をすぐ再送せずack同期を優先する。
+
+各配送promptにはAI DEV DECK command IDを付ける。外部hostとの境界を跨ぐため完全なtransactional exactly-onceを偽装せず、同じIDをすでに実行済みなら重複実行しないようChatGPTへ明示する。
 
 **完全に閉じた任意の既存ChatGPT会話を外部から無条件にwakeできる、とは扱わない。**
 
@@ -325,21 +363,27 @@ Implemented foundation:
 
 1. Multi Chat Control UI
 2. Durable Chat Control Bus
-3. project-specific Bridge heartbeat / claim / result
-4. official ChatGPT Apps Bridge companion
-5. stale claim recovery + command dedupe
-6. Main Project / Operating Plan direct Queue path
-7. human-only WAITING_USER semantics
-8. AUTO/GUARDIAN next-turn + recovery auto-queue
-9. Autopilot Route continuation contract
-10. Concept Guard + mobile bundle budget
+3. SQLite Durable Object `ProjectCoordinator`
+4. atomic command enqueue / dedupe / claim / result ownership
+5. atomic Cloud State revision compare-and-update
+6. KV migration + history mirror / compatibility fallback
+7. delivery backoff / terminal retry / persisted receipt
+8. project-specific Bridge heartbeat / claim / result
+9. official ChatGPT Apps Bridge companion
+10. Main Project / Operating Plan direct Queue path
+11. human-only WAITING_USER semantics
+12. AUTO/GUARDIAN next-turn + recovery auto-queue
+13. Autopilot Route continuation contract
+14. Setup Doctor atomic-coordinator diagnosis
+15. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
 
 Next high-priority gaps:
 
-1. ChatGPT host上でのreal E2E: `PWA → Queue → Bridge → same conversation`
-2. Durable Object/D1等によるatomic project lock / multi-device coordination
-3. structured Autopilot route progressをchat textとは独立して永続化
-4. real-device PWA / Push / reconnect E2E
-5. 公式に可能になった場合のみChatGPT response/statusのより深いreadback
+1. production Workerへ `PROJECT_COORDINATOR` binding/exportを実際にdeployし、healthで `atomicCoordinator:true` を確認
+2. ChatGPT host上でのreal E2E: `PWA → Queue → Bridge → same conversation`
+3. Guardian/Developer transition自体のconcurrent Cron/manual refresh競合をstrong-consistency境界へ寄せる
+4. structured Autopilot route progressをchat textとは独立して永続化
+5. real-device PWA / Push / reconnect E2E
+6. 公式に可能になった場合のみChatGPT response/statusのより深いreadback
 
 GuardianやAutopilotの高度化より、**PWA内から複数ChatGPTを自然に操作できることを常に優先する。**
