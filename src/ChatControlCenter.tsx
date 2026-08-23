@@ -8,6 +8,7 @@ import {
   enqueueProjectChatCommand,
   getChatBridgeStatus,
   listProjectChatCommands,
+  retryProjectChatCommand,
 } from './chatControl';
 
 const continueAction = quickActions.find((item) => item.id === 'continue')!;
@@ -96,6 +97,20 @@ export default function ChatControlCenter() {
       if (source === 'free') setPrompt('');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'ChatGPT指示をキューへ追加できませんでした。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function retryFailed(command: ChatCommand) {
+    setBusy(`${command.projectId}:retry:${command.id}`);
+    setMessage('');
+    try {
+      await retryProjectChatCommand(command.projectId, command.id);
+      await refreshCommands();
+      setMessage('送信失敗commandを同じIDのまま再キューしました。Bridge接続後に再配送します。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'commandを再試行できませんでした。');
     } finally {
       setBusy('');
     }
@@ -223,10 +238,18 @@ export default function ChatControlCenter() {
                             <time>{new Date(command.createdAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
                           </div>
                           <p>{command.prompt}</p>
+                          {command.status === 'queued' && Boolean(command.deliveryFailures) && (
+                            <small>自動再試行 {Math.min((command.deliveryFailures || 0) + 1, command.maxDeliveryAttempts || 3)}/{command.maxDeliveryAttempts || 3}
+                              {command.nextAttemptAt ? ` ・ ${new Date(command.nextAttemptAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}以降` : ''}
+                            </small>
+                          )}
                           {command.bridgeId && <small>Bridge: {command.bridgeId}</small>}
                           {command.detail && <small>{command.detail}</small>}
+                          {command.status === 'failed' && (
+                            <button className="chat-manual-fallback" disabled={Boolean(busy)} onClick={() => void retryFailed(command)}>同じcommandを再試行 ↻</button>
+                          )}
                           {(command.status === 'queued' || command.status === 'failed') && (
-                            <button className="chat-manual-fallback" onClick={() => void manualFallback(command)}>手動Bridgeで送る ↗</button>
+                            <button className="chat-manual-fallback" onClick={() => void manualFallback(command)}>ChatGPTで手動送信 ↗</button>
                           )}
                         </article>
                       ))}
