@@ -66,6 +66,9 @@ jobs:
       - name: Run worker regression tests
         working-directory: worker
         run: npm test
+      - name: Dry-run Worker + SQLite Durable Object bundle
+        working-directory: worker
+        run: npm run dry-run
 
   chatgpt-bridge-check:
     needs: concept-guard
