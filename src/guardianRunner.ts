@@ -49,6 +49,7 @@ export async function startGuardianRun(
   connection: WorkerConnection = loadWorkerConnection(),
 ): Promise<GuardianRun> {
   if (!project.githubUrl) throw new Error('この案件にはGitHub URLが登録されていません。');
+  if (!project.chatUrl) throw new Error('Guardian自動運転には対象ChatGPT URLが必要です。');
   const result = await api<{ run: GuardianRun }>(connection, '/api/guardian-runs', {
     method: 'POST',
     body: JSON.stringify({
@@ -62,6 +63,8 @@ export async function startGuardianRun(
       maxToolTurns: clamp(options.maxToolTurns ?? 10, 1, 16),
       maxMinutes: clamp(options.maxMinutes ?? 180, 15, 360),
       maxAutoCiReruns: 2,
+      chatUrl: project.chatUrl,
+      autoDispatch: true,
     }),
   });
   return result.run;
@@ -84,7 +87,7 @@ export async function getLatestGuardianRun(
 }
 
 async function api<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
-  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にBackground Workerの接続設定を保存してください。');
+  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にSupervisor Workerの接続設定を保存してください。');
   const response = await fetch(`${connection.baseUrl.trim().replace(/\/$/, '')}${path}`, {
     ...init,
     headers: {
