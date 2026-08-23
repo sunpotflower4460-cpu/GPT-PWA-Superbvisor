@@ -55,6 +55,8 @@ export interface ChatProjectOverview {
   error?: string;
 }
 
+const OVERVIEW_BATCH_SIZE = 30;
+
 export function chatCommandStatusLabel(status: ChatCommandStatus) {
   if (status === 'queued') return '送信待ち';
   if (status === 'claimed') return 'Bridge処理中';
@@ -120,12 +122,19 @@ export async function getChatControlOverview(
   projectIds: string[],
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
-  const unique = [...new Set(projectIds.map((value) => value.trim()).filter(Boolean))].slice(0, 30);
+  const unique = [...new Set(projectIds.map((value) => value.trim()).filter(Boolean))];
   if (!unique.length) return { projects: [] as ChatProjectOverview[] };
-  return workerFetch<{ projects: ChatProjectOverview[] }>(connection, '/api/chat-control/overview', {
-    method: 'POST',
-    body: JSON.stringify({ projectIds: unique }),
-  });
+
+  const batches: string[][] = [];
+  for (let offset = 0; offset < unique.length; offset += OVERVIEW_BATCH_SIZE) {
+    batches.push(unique.slice(offset, offset + OVERVIEW_BATCH_SIZE));
+  }
+  const results = await Promise.all(batches.map((batch) => workerFetch<{ projects: ChatProjectOverview[] }>(
+    connection,
+    '/api/chat-control/overview',
+    { method: 'POST', body: JSON.stringify({ projectIds: batch }) },
+  )));
+  return { projects: results.flatMap((result) => result.projects) };
 }
 
 async function workerFetch<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
