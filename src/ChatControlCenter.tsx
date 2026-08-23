@@ -4,9 +4,12 @@ import { getOperatingPlan, formatOperatingPlanPrompt } from './operatingPlan';
 import {
   ChatBridgeStatus,
   ChatCommand,
+  ChatProjectOverview,
   chatCommandStatusLabel,
+  chatProjectActivityLabel,
   enqueueProjectChatCommand,
   getChatBridgeStatus,
+  getChatControlOverview,
   listProjectChatCommands,
   retryProjectChatCommand,
 } from './chatControl';
@@ -20,6 +23,7 @@ export default function ChatControlCenter() {
   const [prompt, setPrompt] = useState('');
   const [commands, setCommands] = useState<ChatCommand[]>([]);
   const [bridge, setBridge] = useState<ChatBridgeStatus>({ connected: false, capabilities: [] });
+  const [overviews, setOverviews] = useState<Record<string, ChatProjectOverview>>({});
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
 
@@ -27,6 +31,19 @@ export default function ChatControlCenter() {
     () => projects.find((project) => project.id === selectedId) ?? projects[0] ?? null,
     [projects, selectedId],
   );
+  const overviewProjectIds = useMemo(
+    () => projects.filter((project) => Boolean(project.chatUrl)).map((project) => project.id),
+    [projects],
+  );
+  const overviewKey = overviewProjectIds.join('|');
+  const overviewSummary = useMemo(() => {
+    const values = Object.values(overviews);
+    return {
+      connected: values.filter((item) => item.bridgeConnected).length,
+      active: values.filter((item) => ['DELIVERING', 'RETRY_SCHEDULED', 'QUEUED', 'WAITING_BRIDGE'].includes(item.activity)).length,
+      attention: values.filter((item) => item.activity === 'NEEDS_ATTENTION').length,
+    };
+  }, [overviews]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -59,6 +76,25 @@ export default function ChatControlCenter() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [open, selected?.id]);
 
+  useEffect(() => {
+    if (!open || !overviewProjectIds.length) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const result = await getChatControlOverview(overviewProjectIds);
+        if (!cancelled) {
+          setOverviews(Object.fromEntries(result.projects.map((item) => [item.projectId, item])));
+        }
+      } catch (error) {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : '複数ChatGPTの状態一覧を更新できませんでした。');
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 8000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  // overviewKey gives this polling effect a stable dependency across project-array reloads.
+  }, [open, overviewKey]);
+
   function openCenter(preferredProjectId?: string) {
     const next = loadProjects();
     const nextId = preferredProjectId && next.some((project) => project.id === preferredProjectId)
@@ -69,6 +105,7 @@ export default function ChatControlCenter() {
     setPrompt('');
     setCommands([]);
     setBridge({ connected: false, capabilities: [] });
+    setOverviews({});
     setMessage('');
     setOpen(true);
   }
@@ -83,6 +120,12 @@ export default function ChatControlCenter() {
     setBridge(bridgeResult);
   }
 
+  async function refreshProjectOverview(projectId: string) {
+    const result = await getChatControlOverview([projectId]);
+    const item = result.projects[0];
+    if (item) setOverviews((current) => ({ ...current, [item.projectId]: item }));
+  }
+
   async function queue(project: DevProject, value: string, source: string) {
     const text = value.trim();
     if (!text) return;
@@ -90,8 +133,12 @@ export default function ChatControlCenter() {
     setMessage('');
     try {
       await enqueueProjectChatCommand(project, text);
-      if (project.id === selected?.id) await refreshCommands(project);
-      setMessage(bridge.connected && bridge.projectId === project.id
+      await Promise.all([
+        project.id === selected?.id ? refreshCommands(project) : Promise.resolve(),
+        refreshProjectOverview(project.id),
+      ]);
+      const projectOverview = overviews[project.id];
+      setMessage(projectOverview?.bridgeConnected || (project.id === selected?.id && bridge.connected)
         ? `${project.name} の送信キューへ追加しました。接続中Bridgeが取得して対象ChatGPTへ配送します。`
         : `${project.name} の送信キューへ追加しました。PWAを閉じてもWorker側に残り、この案件のBridge接続後に配送できます。`);
       if (source === 'free') setPrompt('');
@@ -107,7 +154,7 @@ export default function ChatControlCenter() {
     setMessage('');
     try {
       await retryProjectChatCommand(command.projectId, command.id);
-      await refreshCommands();
+      await Promise.all([refreshCommands(), refreshProjectOverview(command.projectId)]);
       setMessage('送信失敗commandを同じIDのまま再キューしました。Bridge接続後に再配送します。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'commandを再試行できませんでした。');
@@ -171,7 +218,10 @@ export default function ChatControlCenter() {
             <div className="chat-control-note">
               <b>複数の開発ChatGPTを、このPWAからまとめて動かす。</b>
               <span>指示はWorkerへ永続キュー保存。案件ごとのChatGPT Bridgeが接続されると、PWAを離れずその既存チャットへ配送します。</span>
-              {bridge.lastSeenAt && <small>Bridge: {bridge.bridgeId || 'unknown'} ・ 最終heartbeat {new Date(bridge.lastSeenAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small>}
+              {overviewProjectIds.length > 0 && (
+                <small>全体: {overviewSummary.connected}/{overviewProjectIds.length}接続 ・ {overviewSummary.active}進行/待機 ・ {overviewSummary.attention}要確認</small>
+              )}
+              {bridge.lastSeenAt && <small>選択中Bridge: {bridge.bridgeId || 'unknown'} ・ 最終heartbeat {new Date(bridge.lastSeenAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small>}
             </div>
 
             {!projects.length ? (
@@ -179,20 +229,38 @@ export default function ChatControlCenter() {
             ) : (
               <div className="chat-control-layout">
                 <aside className="chat-project-rail">
-                  {projects.map((project) => (
-                    <div className={`chat-project-row ${project.id === selected?.id ? 'active' : ''}`} key={project.id}>
-                      <button className="chat-project-select" onClick={() => { setSelectedId(project.id); setCommands([]); setBridge({ connected: false, capabilities: [] }); setMessage(''); }}>
-                        <span className={`chat-project-dot ${project.status.toLowerCase()}`} />
-                        <span><b>{project.name}</b><small>{project.currentPhase}</small></span>
-                      </button>
-                      <button
-                        className="chat-project-continue"
-                        disabled={!project.chatUrl || Boolean(busy)}
-                        onClick={() => void queueContinue(project)}
-                        title="このChatGPTへ続行指示をキュー"
-                      >▶</button>
-                    </div>
-                  ))}
+                  {projects.map((project) => {
+                    const projectOverview = overviews[project.id];
+                    const remoteClass = projectOverview ? activityClass(projectOverview.activity) : 'loading';
+                    const countLabel = projectOverview
+                      ? `${projectOverview.approximate ? '直近 ' : ''}${projectOverview.pendingRecentCount ? `${projectOverview.pendingRecentCount}待機` : ''}${projectOverview.failedRecentCount ? `${projectOverview.pendingRecentCount ? ' ・ ' : ''}${projectOverview.failedRecentCount}失敗` : ''}`
+                      : '';
+                    return (
+                      <div className={`chat-project-row ${project.id === selected?.id ? 'active' : ''}`} key={project.id}>
+                        <button className="chat-project-select" onClick={() => { setSelectedId(project.id); setCommands([]); setBridge({ connected: false, capabilities: [] }); setMessage(''); }}>
+                          <span className={`chat-project-dot ${project.status.toLowerCase()}`} />
+                          <span className="chat-project-copy">
+                            <b>{project.name}</b>
+                            <small>{project.currentPhase}</small>
+                            {project.chatUrl ? (
+                              <span className={`chat-project-remote ${remoteClass}`} title={projectOverview?.error || undefined}>
+                                <i />{projectOverview ? chatProjectActivityLabel(projectOverview.activity) : '状態確認中'}
+                                {countLabel && <em>{countLabel}</em>}
+                              </span>
+                            ) : (
+                              <span className="chat-project-remote no-url"><i />Chat URL未登録</span>
+                            )}
+                          </span>
+                        </button>
+                        <button
+                          className="chat-project-continue"
+                          disabled={!project.chatUrl || Boolean(busy)}
+                          onClick={() => void queueContinue(project)}
+                          title="このChatGPTへ続行指示をキュー"
+                        >▶</button>
+                      </div>
+                    );
+                  })}
                 </aside>
 
                 {selected && (
@@ -264,6 +332,10 @@ export default function ChatControlCenter() {
       )}
     </>
   );
+}
+
+function activityClass(activity: ChatProjectOverview['activity']) {
+  return activity.toLowerCase().replace(/_/g, '-');
 }
 
 function safeChatUrl(value?: string) {
