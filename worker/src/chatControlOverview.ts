@@ -14,7 +14,8 @@ export type ChatProjectActivity =
   | 'NEEDS_ATTENTION'
   | 'DELIVERED'
   | 'CONNECTED_IDLE'
-  | 'BRIDGE_OFFLINE';
+  | 'BRIDGE_OFFLINE'
+  | 'OVERVIEW_ERROR';
 
 export interface ChatProjectOverview {
   projectId: string;
@@ -47,7 +48,7 @@ export async function getChatControlOverview(env: ChatControlOverviewEnv, projec
     } catch (error) {
       return {
         projectId,
-        activity: 'BRIDGE_OFFLINE',
+        activity: 'OVERVIEW_ERROR',
         bridgeConnected: false,
         pendingRecentCount: 0,
         failedRecentCount: 0,
