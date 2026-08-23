@@ -115,6 +115,7 @@ productionの複数端末競合耐性を担うauthoritative state boundary。
 - delivery failure回数 / backoff / terminal failure
 - terminal failureの明示retry
 - retry/requeue時の旧Bridge ownership解放
+- manual fallback前のqueued/failed command cancel
 - **read-only command overview summary**
 - Cloud State revision compare-and-update
 - Guardian runの短期execution lease取得 / renew / release
@@ -150,6 +151,27 @@ Bridge protocol:
 Autopilot / recovery由来のcommandにはdedupe keyを付け、監視ループの重複配送を防ぐ。
 
 Delivery failureはcommand IDを変えずにbackoff再試行する。既定の自動配送上限後のみterminal `failed` とし、PWA/Bridgeから同じcommandを明示再queueできる。requeue時には以前の`bridgeId` ownershipを外し、次のclaimで新しいownerを設定する。
+
+#### Manual fallback handoff
+
+自動Queueに残っているcommandをそのままClipboardへコピーして別ChatGPTタブから送ると、Bridge復帰後に同じ本文が再配送される可能性がある。したがってmanual fallbackは「別経路追加」ではなく、**automatic delivery ownershipからmanual deliveryへ安全に切り替える状態遷移**として扱う。
+
+PWAの順序:
+
+1. ChatGPT用のblank tabをユーザー操作中に確保
+2. command promptをClipboardへコピー
+3. `POST /api/chat-commands/<id>/cancel` でqueued/failed commandをcancel
+4. cancel成功後だけ確保済みtabをChatGPT URLへ遷移
+
+Failure rule:
+
+- popup block → cancelしない
+- Clipboard failure → cancelしない
+- Bridgeが先にclaim済み → Coordinatorがcancelを409拒否し、PWAは手動送信しない
+- cancel成功 → commandはterminal `cancelled` となり、Bridgeは後からclaimできない
+- cancel失敗 → reserved blank tabを閉じる
+
+Coordinator有効時、`/commands/cancel` と `/commands/claim` は同じproject Durable Object内で直列化される。cancelが先ならBridgeはclaimできず、claimが先ならmanual fallbackが停止する。KV fallbackでは同等の状態ルールは持つが、productionのatomic race guaranteeとは扱わない。
 
 ### ChatGPT Bridge
 
@@ -416,15 +438,16 @@ Implemented foundation:
 8. KV migration + history mirror / compatibility fallback
 9. delivery backoff / terminal retry / persisted receipt
 10. retry/requeue時のstale Bridge ownership解放
-11. project-specific Bridge heartbeat / claim / result
-12. official ChatGPT Apps Bridge companion
-13. Main Project / Operating Plan direct Queue path
-14. human-only WAITING_USER semantics
-15. AUTO/GUARDIAN next-turn + recovery auto-queue
-16. Autopilot Route continuation contract
-17. Setup Doctor atomic-coordinator diagnosis
-18. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
-19. Guardian Cron/manual advance execution lease + lease regression tests
+11. **duplicate-safe manual fallback cancel / claim race handling**
+12. project-specific Bridge heartbeat / claim / result
+13. official ChatGPT Apps Bridge companion
+14. Main Project / Operating Plan direct Queue path
+15. human-only WAITING_USER semantics
+16. AUTO/GUARDIAN next-turn + recovery auto-queue
+17. Autopilot Route continuation contract
+18. Setup Doctor atomic-coordinator diagnosis
+19. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
+20. Guardian Cron/manual advance execution lease + lease regression tests
 
 Next high-priority gaps:
 
