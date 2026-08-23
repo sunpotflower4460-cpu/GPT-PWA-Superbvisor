@@ -2,14 +2,19 @@ import {
   AtomicCoordinatorEnv,
   CoordinatorChatCommand,
   CoordinatorChatCommandStatus,
+  CoordinatorCommandOverview,
   applyCommandResult,
   coordinatorFetch,
   hasAtomicCoordinator,
   isCoordinatorCommandClaimable,
+  summarizeCoordinatorCommands,
 } from './projectCoordinator';
 
 export type ChatCommandStatus = CoordinatorChatCommandStatus;
 export interface ChatCommand extends CoordinatorChatCommand {}
+export interface ChatCommandOverviewSnapshot extends CoordinatorCommandOverview {
+  approximate: boolean;
+}
 
 export interface ChatCommandEnv extends AtomicCoordinatorEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -131,6 +136,26 @@ export async function listProjectChatCommands(env: ChatCommandEnv, projectId: st
   const commands = result.data.commands ?? [];
   await Promise.all(commands.map((command) => mirrorCommand(env, command)));
   return commands;
+}
+
+export async function getProjectChatCommandOverview(env: ChatCommandEnv, projectId: string): Promise<ChatCommandOverviewSnapshot> {
+  const normalizedProjectId = projectId.trim().slice(0, 200);
+  if (!normalizedProjectId) return { pendingCount: 0, failedCount: 0, totalCount: 0, approximate: false };
+
+  if (hasAtomicCoordinator(env)) {
+    await ensureCoordinatorCommandsMigrated(env, normalizedProjectId);
+    const result = await coordinatorFetch<{ overview?: CoordinatorCommandOverview; error?: string }>(
+      env,
+      chatScope(normalizedProjectId),
+      '/commands/overview',
+      { method: 'GET' },
+    );
+    if (!result.ok || !result.data.overview) throw new Error(result.data.error || `atomic_overview_failed_${result.status}`);
+    return { ...result.data.overview, approximate: false };
+  }
+
+  const commands = await listProjectChatCommandsKv(env, normalizedProjectId, 100);
+  return { ...summarizeCoordinatorCommands(commands), approximate: commands.length >= 100 };
 }
 
 export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string, projectId?: string) {
