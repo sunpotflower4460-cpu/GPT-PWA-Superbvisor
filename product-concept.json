@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "conceptId": "multi-chat-remote-v1",
   "productName": "AI DEV DECK",
   "primaryPurpose": "普段使っている複数のChatGPT開発チャットを、スマホPWAからまとめて同時並行・軽量・バックグラウンド耐性ありで操作する",
@@ -16,7 +16,8 @@
     "pwa": "multi-chat-control-plane",
     "worker": "durable-orchestration-and-evidence",
     "externalLlm": "orchestration-only",
-    "bridge": "official-chatgpt-apps-transport"
+    "bridge": "official-chatgpt-apps-transport",
+    "coordinator": "strongly-consistent-multi-device-control"
   },
   "experience": {
     "primarySendPath": "pwa-to-chat-control-bus-to-chatgpt-bridge",
@@ -27,6 +28,9 @@
     "recoveryNextTurnAutoQueue": true,
     "legacyApiWorkerExecutorVisible": false,
     "responseMirrorRequiresOfficialTransport": true,
+    "atomicCoordinatorRequiredForMultiDevice": true,
+    "singleClaimOwnerRequired": true,
+    "deliveryRetryPreservesCommandIdentity": true,
     "mobileJsGzipBudgetKiB": 130,
     "mobileCssGzipBudgetKiB": 20
   },
@@ -78,6 +82,14 @@
     {
       "id": "C12",
       "rule": "Unsupported host capabilities such as arbitrary closed-thread wakeup or response mirroring are represented honestly and are not emulated with unofficial session automation."
+    },
+    {
+      "id": "C13",
+      "rule": "Multi-device command ownership and cloud-state revision updates require a strongly consistent coordinator; KV-only read-then-write is compatibility fallback, not the production concurrency guarantee."
+    },
+    {
+      "id": "C14",
+      "rule": "A Chat command has one active claim owner at a time; delivery retries preserve command identity and stale or non-owner bridges must not overwrite the authoritative result."
     }
   ],
   "antiGoals": [
@@ -90,7 +102,9 @@
     "unofficial ChatGPT cookie/session automation",
     "clipboard-first normal command flow",
     "routine ChatGPT or recovery states mislabeled as human waiting",
-    "fake response mirroring through unsupported ChatGPT internals"
+    "fake response mirroring through unsupported ChatGPT internals",
+    "KV-only concurrency presented as atomic multi-device safety",
+    "multiple bridges concurrently owning the same chat command"
   ],
   "protectedArchitectureFiles": [
     "product-concept.json",
@@ -102,10 +116,15 @@
     "src/core.ts",
     "src/RuntimeProjectSync.tsx",
     "src/supervisor.ts",
+    "src/SetupDoctorCenter.tsx",
     "worker/src/index.ts",
     "worker/src/chatCommandQueue.ts",
+    "worker/src/projectCoordinator.ts",
+    "worker/src/stateSync.ts",
     "worker/src/developerAgent.ts",
     "worker/src/guardianRunner.ts",
+    "worker/wrangler.example.jsonc",
+    "worker/wrangler.ci.jsonc",
     "chatgpt-bridge/src/bridgeApp.ts"
   ],
   "safety": {
