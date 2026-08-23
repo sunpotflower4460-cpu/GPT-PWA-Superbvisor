@@ -265,6 +265,43 @@ export async function retryChatCommand(env: ChatCommandEnv, projectId: string, i
   return updated;
 }
 
+export async function cancelChatCommand(env: ChatCommandEnv, projectId: string, id: string, detail?: string) {
+  const normalizedProjectId = projectId.trim().slice(0, 200);
+  if (!normalizedProjectId || !id.trim()) throw new Error('projectId and command id are required');
+
+  if (hasAtomicCoordinator(env)) {
+    await ensureCoordinatorCommandsMigrated(env, normalizedProjectId);
+    const result = await coordinatorFetch<{ command?: ChatCommand; error?: string }>(env, chatScope(normalizedProjectId), '/commands/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ id, projectId: normalizedProjectId, detail }),
+    });
+    if (result.status === 404) return null;
+    if (result.status === 409) throw new ChatCommandConflictError(result.data.error || 'chat_command_conflict', result.data.error || 'chat_command_conflict');
+    if (!result.ok || !result.data.command) throw new Error(result.data.error || `atomic_cancel_failed_${result.status}`);
+    await mirrorCommand(env, result.data.command);
+    return result.data.command;
+  }
+
+  const current = await getChatCommand(env, id);
+  if (!current) return null;
+  if (current.projectId !== normalizedProjectId) throw new ChatCommandConflictError('project_mismatch', 'project_mismatch');
+  if (current.status === 'cancelled') return current;
+  if (current.status !== 'queued' && current.status !== 'failed') {
+    throw new ChatCommandConflictError('only_queued_or_failed_commands_can_cancel', 'only_queued_or_failed_commands_can_cancel');
+  }
+  const updated: ChatCommand = {
+    ...current,
+    status: 'cancelled',
+    bridgeId: undefined,
+    claimedAt: undefined,
+    nextAttemptAt: undefined,
+    updatedAt: new Date().toISOString(),
+    detail: detail?.trim().slice(0, 2000) || 'Cancelled before switching to manual ChatGPT fallback.',
+  };
+  await saveCommand(env, updated);
+  return updated;
+}
+
 async function enqueueChatCommandKv(env: ChatCommandEnv, input: {
   projectId: string;
   projectName?: string;
