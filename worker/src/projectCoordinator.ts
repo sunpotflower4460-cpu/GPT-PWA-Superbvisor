@@ -194,6 +194,7 @@ export class ProjectCoordinator {
       const updated: CoordinatorChatCommand = {
         ...current,
         status: 'queued',
+        bridgeId: undefined,
         updatedAt: now,
         claimedAt: undefined,
         nextAttemptAt: undefined,
@@ -344,6 +345,7 @@ export function applyCommandResult(
       return {
         ...current,
         status: 'queued',
+        bridgeId: undefined,
         updatedAt: now,
         claimedAt: undefined,
         nextAttemptAt: new Date(nowMs + backoffMs).toISOString(),
