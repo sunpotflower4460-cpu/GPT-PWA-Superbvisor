@@ -3,8 +3,27 @@
 普段ChatGPTでGitHubリポジトリをつないで行っている開発を、**スマホPWAから複数チャット同時並行で、軽く、止まりにくく操作する**ための Multi Chat Remote / 開発コックピットです。
 
 > **主役は複数の既存ChatGPT開発チャット。PWAはそれらを束ね、Workerは状態・Queue・CI・復旧を支える。**
+>
+> **実作業はChatGPT。Workerと外部LLM APIはオーケストレーション専用。**
 
 実装・デバッグ・GitHub編集の実行者は、ここで普段使っているChatGPTチャットです。DeepSeek / MiniMax / OpenAI API等の外部LLMは、状態整理・次手生成・復旧補助だけに使います。
+
+## Product Constitution — ここを最優先で守る
+
+このリポジトリでは、将来の機能追加やAIによる自動修正で製品コンセプトがずれないよう、以下を最上位ルールとして固定しています。
+
+- 人間向け: [`docs/PRODUCT_CONSTITUTION.md`](docs/PRODUCT_CONSTITUTION.md)
+- 機械可読manifest: [`product-concept.json`](product-concept.json)
+- AI coding agent向け: [`AGENTS.md`](AGENTS.md)
+- 自動検査: [`scripts/concept-guard.mjs`](scripts/concept-guard.mjs)
+
+重要な原則は、**Multi Chat Remoteが第一価値であり、Supervisor / Guardian / Autopilot / Provider Routerは補助層であること**です。
+
+```bash
+npm run concept:guard
+```
+
+Concept Guardに失敗した場合は、CIを通すためだけにガードを弱めず、まず実装がProduct Constitutionからずれていないか確認します。
 
 ## 目指す体験
 
@@ -215,6 +234,7 @@ human-required
 
 ## 初回設定
 
+- Product Constitution: [`docs/PRODUCT_CONSTITUTION.md`](docs/PRODUCT_CONSTITUTION.md)
 - PWA: [`docs/SETUP.md`](docs/SETUP.md)
 - Supervisor Worker: [`worker/README.md`](worker/README.md)
 - ChatGPT Bridge: [`chatgpt-bridge/README.md`](chatgpt-bridge/README.md)
@@ -222,6 +242,12 @@ human-required
 - Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## ローカル開発
+
+Product direction check:
+
+```bash
+npm run concept:guard
+```
 
 PWA:
 
@@ -245,15 +271,14 @@ ChatGPT Bridge:
 ```bash
 cd chatgpt-bridge
 npm install
-npm run typecheck
-npm start
+npm run check
 ```
 
-CIでは3系統を検証します。
+CIではConcept Guardを最初に実行し、通過した場合だけ次の3系統を検証します。
 
 - app build
 - worker typecheck + regression tests
-- ChatGPT bridge typecheck
+- ChatGPT bridge typecheck + Cloudflare dry-run
 
 ## セキュリティ
 
