@@ -85,7 +85,7 @@ export class PublicGitHubSnapshotProvider implements GitHubSnapshotProvider {
     const [pullsResponse, commitResponse, runsResponse] = await Promise.all([
       fetch(`https://api.github.com/repos/${fullName}/pulls?state=open&per_page=1`, { headers }),
       fetch(`https://api.github.com/repos/${fullName}/commits/${encodeURIComponent(branch)}`, { headers }),
-      fetch(`https://api.github.com/repos/${fullName}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=1`, { headers }),
+      fetch(`https://api.github.com/repos/${fullName}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=10`, { headers }),
     ]);
 
     const pulls = pullsResponse.ok ? await pullsResponse.json() : [];
@@ -97,16 +97,20 @@ export class PublicGitHubSnapshotProvider implements GitHubSnapshotProvider {
     const issueCount = repoOpenCount !== undefined && pullCount !== undefined
       ? Math.max(0, repoOpenCount - pullCount)
       : undefined;
-    const latestRun = Array.isArray(runsData?.workflow_runs) ? runsData.workflow_runs[0] : undefined;
+    const latestCommitSha = typeof commit?.sha === 'string' ? commit.sha : undefined;
+    const workflowRuns = Array.isArray(runsData?.workflow_runs) ? runsData.workflow_runs : [];
+    const matchingRun = latestCommitSha
+      ? workflowRuns.find((run: { head_sha?: string }) => run.head_sha === latestCommitSha)
+      : undefined;
 
     return {
       repository,
       defaultBranch: branch,
-      latestCommitSha: typeof commit?.sha === 'string' ? commit.sha : undefined,
+      latestCommitSha,
       latestCommitAt: commit?.commit?.committer?.date ?? repoData.pushed_at,
       openPullRequests: pullCount,
       openIssues: issueCount,
-      ciState: mapWorkflowState(latestRun),
+      ciState: mapWorkflowState(matchingRun),
       rateLimitRemaining: Number.isFinite(rateLimitRemaining) ? rateLimitRemaining : undefined,
       fetchedAt: new Date().toISOString(),
     };
