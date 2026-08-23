@@ -7,10 +7,17 @@ import {
 } from './developerAgent';
 import { GitHubEnv } from './githubExecutor';
 import { OrchestrationEnv } from './orchestrationModel';
+import {
+  acquireCoordinatorLease,
+  hasAtomicCoordinator,
+  releaseCoordinatorLease,
+  renewCoordinatorLease,
+} from './projectCoordinator';
 import { PushEnv, sendSupervisorPush } from './push';
 
 interface GuardianEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
+  PROJECT_COORDINATOR?: DurableObjectNamespace;
 }
 
 export interface CreateGuardianRunBody extends CreateDeveloperJobBody {
@@ -64,6 +71,8 @@ const RUN_TTL = 60 * 60 * 24 * 14;
 const MAX_CYCLES = 4;
 const MAX_MINUTES = 360;
 const PROCESSING_GRACE_MS = 60_000;
+const GUARDIAN_ADVANCE_LEASE_MS = 5 * 60_000;
+const GUARDIAN_ADVANCE_LEASE_NAME = 'guardian-advance';
 
 export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRunBody): Promise<GuardianRun> {
   if (!body.repository?.trim() || !body.goal?.trim() || !body.prompt?.trim()) throw new Error('repository, goal and prompt are required');
@@ -121,6 +130,42 @@ export async function advanceGuardianRun(
   id: string,
   options: { force?: boolean } = {},
 ): Promise<GuardianRun> {
+  const existing = await readRun(env, id);
+  if (!existing) throw new Error('Guardian run not found');
+  if (isFinal(existing.status)) return existing;
+
+  if (!hasAtomicCoordinator(env)) return advanceGuardianRunUnlocked(env, id, options);
+
+  const scope = `guardian:${id}`;
+  const owner = `${options.force ? 'manual' : 'sweep'}:${crypto.randomUUID()}`;
+  const acquired = await acquireCoordinatorLease(env, scope, {
+    name: GUARDIAN_ADVANCE_LEASE_NAME,
+    owner,
+    ttlMs: GUARDIAN_ADVANCE_LEASE_MS,
+  });
+  if (acquired.status === 409 || acquired.data.acquired === false) {
+    return await readRun(env, id) ?? existing;
+  }
+  const token = acquired.data.lease?.token;
+  if (!acquired.ok || !token) throw new Error(acquired.data.error || `guardian_advance_lease_failed_${acquired.status}`);
+
+  try {
+    return await advanceGuardianRunUnlocked(env, id, options, { scope, token });
+  } finally {
+    try {
+      await releaseCoordinatorLease(env, scope, { name: GUARDIAN_ADVANCE_LEASE_NAME, token });
+    } catch {
+      // Lease expiry provides crash recovery; release is best-effort.
+    }
+  }
+}
+
+async function advanceGuardianRunUnlocked(
+  env: GuardianEnv,
+  id: string,
+  options: { force?: boolean },
+  lease?: { scope: string; token: string },
+): Promise<GuardianRun> {
   let run = await readRun(env, id);
   if (!run) throw new Error('Guardian run not found');
   if (isFinal(run.status)) return run;
@@ -136,6 +181,15 @@ export async function advanceGuardianRun(
 
   let job = await getDeveloperJob(env, run.currentDeveloperJobId);
   if (!job) return recordRecoverableError(env, run, 'Developer orchestration job was temporarily unavailable. Guardian will retry on the next sweep.');
+
+  if (lease) {
+    const renewed = await renewCoordinatorLease(env, lease.scope, {
+      name: GUARDIAN_ADVANCE_LEASE_NAME,
+      token: lease.token,
+      ttlMs: GUARDIAN_ADVANCE_LEASE_MS,
+    });
+    if (!renewed.ok || !renewed.data.renewed) throw new Error(renewed.data.error || 'guardian_advance_lease_lost');
+  }
 
   try {
     job = await refreshDeveloperJob(env, job.id) ?? job;
