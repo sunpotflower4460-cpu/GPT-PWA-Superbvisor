@@ -7,6 +7,13 @@
   "vars": {
     "OPENAI_MODEL": "gpt-5.6-luna",
     "SMART_REPLY_MODEL": "gpt-5.4-nano",
+    "ORCHESTRATOR_PROVIDER": "deepseek",
+    "ORCHESTRATOR_FALLBACKS": "minimax,openai",
+    "DEEPSEEK_ORCHESTRATOR_MODEL": "deepseek-v4-flash",
+    "MINIMAX_ORCHESTRATOR_MODEL": "MiniMax-M3",
+    "OPENAI_ORCHESTRATOR_MODEL": "gpt-5.4-nano",
+    "MINIMAX_BASE_URL": "https://api.minimax.io/v1",
+    "ORCHESTRATOR_TIMEOUT_MS": "15000",
     "ALLOWED_ORIGIN": "https://YOUR_GITHUB_PAGES_ORIGIN.example",
     "VAPID_PUBLIC_KEY": "REPLACE_WITH_VAPID_PUBLIC_KEY",
     "VAPID_SUBJECT": "mailto:you@example.com",
