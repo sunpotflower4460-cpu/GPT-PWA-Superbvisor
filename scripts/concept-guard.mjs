@@ -52,13 +52,23 @@ if (manifest) {
   assert(manifest.roles?.executor === 'chatgpt', 'manifest: ChatGPT remains executor');
   assert(manifest.roles?.pwa === 'multi-chat-control-plane', 'manifest: PWA remains the multi-chat control plane');
   assert(manifest.roles?.externalLlm === 'orchestration-only', 'manifest: external LLM remains orchestration-only');
+  assert(manifest.experience?.primarySendPath === 'pwa-to-chat-control-bus-to-chatgpt-bridge', 'manifest: normal send path remains PWA -> Control Bus -> ChatGPT Bridge');
+  assert(manifest.experience?.clipboardIsFallbackOnly === true, 'manifest: clipboard remains fallback-only');
+  assert(manifest.experience?.routineChatWaitingIsHumanRequired === false, 'manifest: routine ChatGPT waiting is not human-required');
+  assert(manifest.experience?.chatCanAutoContinue === true, 'manifest: CHAT can auto-continue in automation modes');
+  assert(manifest.experience?.autopilotNextTurnAutoQueue === true, 'manifest: Autopilot next turns auto-queue');
+  assert(manifest.experience?.recoveryNextTurnAutoQueue === true, 'manifest: recoverable next turns auto-queue');
+  assert(manifest.experience?.legacyApiWorkerExecutorVisible === false, 'manifest: legacy API worker executor remains hidden/removed');
+  assert(manifest.experience?.responseMirrorRequiresOfficialTransport === true, 'manifest: response mirroring requires supported transport');
+  assert(manifest.experience?.mobileJsGzipBudgetKiB === 130, 'manifest: JavaScript mobile budget remains 130 KiB gzip');
+  assert(manifest.experience?.mobileCssGzipBudgetKiB === 20, 'manifest: CSS mobile budget remains 20 KiB gzip');
   assert(manifest.safety?.externalLlmGithubWrite === false, 'manifest: external LLM GitHub write remains disabled');
   assert(manifest.safety?.automaticMerge === false, 'manifest: automatic merge remains disabled');
   assert(manifest.safety?.automaticProductionDeploy === false, 'manifest: automatic production deploy remains disabled');
   assert(manifest.safety?.chatSessionCookieAutomation === false, 'manifest: ChatGPT session-cookie automation remains disabled');
   assert(manifest.safety?.evidenceRequiredForCompletion === true, 'manifest: evidence remains required for completion');
-  assert(Array.isArray(manifest.invariants) && manifest.invariants.length >= 9, 'manifest: product invariants remain explicit');
-  assert(Array.isArray(manifest.antiGoals) && manifest.antiGoals.length >= 5, 'manifest: anti-goals remain explicit');
+  assert(Array.isArray(manifest.invariants) && manifest.invariants.length >= 12, 'manifest: product invariants remain explicit');
+  assert(Array.isArray(manifest.antiGoals) && manifest.antiGoals.length >= 10, 'manifest: anti-goals remain explicit');
 
   for (const protectedFile of manifest.protectedArchitectureFiles ?? []) {
     assert(fs.existsSync(path.join(root, protectedFile)), `manifest: protected architecture file exists: ${protectedFile}`);
@@ -73,6 +83,9 @@ containsAll('docs/PRODUCT_CONSTITUTION.md', [
   'Multi Chat Remote first',
   'Evidence over self-report',
   'No implicit merge/deploy',
+  'Control Bus first, clipboard fallback second',
+  'AUTO means ChatGPT can continue',
+  'Platform limitations must be represented honestly',
 ]);
 
 containsAll('docs/ARCHITECTURE.md', [
@@ -81,6 +94,8 @@ containsAll('docs/ARCHITECTURE.md', [
   'Multi Chat Remoteをより放置可能にするための補助層',
   'ChatGPT execution',
   'Supervisor自身はコードを実装しない',
+  '通常の送信経路は `PWA → Chat Control Bus → ChatGPT Bridge → 対象ChatGPT`',
+  'ChatGPT返答本文を外部PWAへ読み戻す公式transport',
 ]);
 
 containsAll('README.md', [
@@ -95,6 +110,13 @@ const app = containsAll('src/App.tsx', [
 ]);
 assert(!app.includes("'API_WORKER'"), 'app: legacy API_WORKER executor is not exposed in the primary UI');
 assert(!app.includes('タップでコピー'), 'app: primary quick actions are not clipboard-first');
+
+const operatingPlan = containsAll('src/OperatingPlanCenter.tsx', [
+  'enqueueProjectChatCommand',
+  '手動fallback: 実行指示をコピー',
+  'Chat Control Busへ自動投入',
+]);
+assert(!operatingPlan.includes('copyAndOpenChat'), 'operating plan: primary path does not copy and open ChatGPT');
 
 const core = containsAll('src/core.ts', [
   "export type ExecutionMode = 'CHAT' | 'WORK'",
@@ -123,6 +145,13 @@ const workerIndex = containsAll('worker/src/index.ts', [
 ]);
 assert(/\/webhooks\/openai[\s\S]{0,500}deprecated_background_executor/.test(workerIndex), 'worker: deprecated external background executor stays disabled');
 
+const commandQueue = containsAll('worker/src/chatCommandQueue.ts', [
+  'dedupeKey',
+  'DEDUPE_PREFIX',
+  'isClaimableCommand',
+]);
+assert(commandQueue.includes('dedupeStorageKey'), 'worker: auto-dispatched commands retain dedupe storage');
+
 const developerAgent = containsAll('worker/src/developerAgent.ts', [
   'enqueueChatCommand',
   'autoDispatch',
@@ -143,11 +172,13 @@ const bridge = containsAll('chatgpt-bridge/src/bridgeApp.ts', [
 ]);
 assert(/allowedProjectIds/.test(bridge), 'bridge: project allowlist remains part of runtime boundary');
 
-containsAll('scripts/check-bundle-size.mjs', [
+const bundleBudget = containsAll('scripts/check-bundle-size.mjs', [
   'JS_GZIP_BUDGET',
   'CSS_GZIP_BUDGET',
   'Mobile-first bundle budget failed',
 ]);
+assert(bundleBudget.includes('130 * 1024'), 'performance: JS gzip budget matches the product manifest');
+assert(bundleBudget.includes('20 * 1024'), 'performance: CSS gzip budget matches the product manifest');
 
 noMatch('chatgpt-bridge/src/bridgeApp.ts', [
   /document\.cookie/i,
