@@ -192,28 +192,34 @@ export async function advanceGuardianRun(
 }
 
 export async function sweepGuardianRuns(env: GuardianEnv): Promise<{ checked: number; advanced: number; recoverableErrors: number }> {
-  const listed = await env.SUPERVISOR_STATE.list({ prefix: 'guardian-run:', limit: 100 });
   let checked = 0;
   let advanced = 0;
   let recoverableErrors = 0;
-  for (const key of listed.keys) {
-    const id = key.name.slice('guardian-run:'.length);
-    const run = await readRun(env, id);
-    if (!run || isFinal(run.status)) continue;
-    checked += 1;
-    const before = `${run.status}:${run.phase || ''}:${run.recoveryCount || 0}:${run.updatedAt}`;
-    try {
-      const afterRun = await advanceGuardianRun(env, id);
-      const after = `${afterRun.status}:${afterRun.phase || ''}:${afterRun.recoveryCount || 0}:${afterRun.updatedAt}`;
-      if (after !== before) advanced += 1;
-    } catch (error) {
-      recoverableErrors += 1;
-      const current = await readRun(env, id);
-      if (current && !isFinal(current.status)) {
-        await recordRecoverableError(env, current, error instanceof Error ? error.message : 'Guardian sweep failed');
+  let cursor: string | undefined;
+
+  do {
+    const listed = await env.SUPERVISOR_STATE.list({ prefix: 'guardian-run:', limit: 100, cursor });
+    for (const key of listed.keys) {
+      const id = key.name.slice('guardian-run:'.length);
+      const run = await readRun(env, id);
+      if (!run || isFinal(run.status)) continue;
+      checked += 1;
+      const before = `${run.status}:${run.phase || ''}:${run.recoveryCount || 0}:${run.updatedAt}`;
+      try {
+        const afterRun = await advanceGuardianRun(env, id);
+        const after = `${afterRun.status}:${afterRun.phase || ''}:${afterRun.recoveryCount || 0}:${afterRun.updatedAt}`;
+        if (after !== before) advanced += 1;
+      } catch (error) {
+        recoverableErrors += 1;
+        const current = await readRun(env, id);
+        if (current && !isFinal(current.status)) {
+          await recordRecoverableError(env, current, error instanceof Error ? error.message : 'Guardian sweep failed');
+        }
       }
     }
-  }
+    cursor = listed.list_complete ? undefined : listed.cursor;
+  } while (cursor);
+
   return { checked, advanced, recoverableErrors };
 }
 
