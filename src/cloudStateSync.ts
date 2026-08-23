@@ -47,7 +47,9 @@ export async function getCloudState<T>(connection: WorkerConnection = loadWorker
   if (response.status === 404) return null;
   const payload = await readPayload<{ state?: CloudStateRecord<T>; error?: string }>(response);
   if (!response.ok || !payload.state) throw new Error(payload.error || `Cloud sync request failed (${response.status})`);
-  rememberCloudRevision(payload.state.revision);
+  // Reading the remote copy must not advance the local write base. Otherwise a
+  // mere "check Cloud state" action can accidentally authorize overwriting a
+  // revision that has never been merged into this device.
   return payload.state;
 }
 
