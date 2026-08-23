@@ -229,6 +229,7 @@ export async function retryChatCommand(env: ChatCommandEnv, projectId: string, i
   const updated: ChatCommand = {
     ...current,
     status: 'queued',
+    bridgeId: undefined,
     updatedAt: new Date().toISOString(),
     claimedAt: undefined,
     nextAttemptAt: undefined,
