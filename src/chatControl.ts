@@ -20,6 +20,7 @@ export interface ChatCommand {
 
 export interface ChatBridgeStatus {
   connected: boolean;
+  projectId?: string;
   bridgeId?: string;
   lastSeenAt?: string;
   capabilities: string[];
@@ -57,8 +58,11 @@ export async function listProjectChatCommands(
   return workerFetch<{ commands: ChatCommand[] }>(connection, `/api/projects/${encodeURIComponent(projectId)}/chat-commands`, { method: 'GET' });
 }
 
-export async function getChatBridgeStatus(connection: WorkerConnection = loadWorkerConnection()) {
-  return workerFetch<ChatBridgeStatus>(connection, '/api/chat-bridge/status', { method: 'GET' });
+export async function getChatBridgeStatus(
+  projectId: string,
+  connection: WorkerConnection = loadWorkerConnection(),
+) {
+  return workerFetch<ChatBridgeStatus>(connection, `/api/chat-bridge/status?projectId=${encodeURIComponent(projectId)}`, { method: 'GET' });
 }
 
 async function workerFetch<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
