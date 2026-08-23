@@ -36,6 +36,10 @@ export interface DeveloperJob {
   ciChecks?: Array<{ id: number; name: string; status: string; conclusion: string | null; url: string; headSha: string }>;
   changedFiles?: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }>;
   pullRequest?: { number: number; url: string; draft: true };
+  chatUrl?: string;
+  autoDispatch?: boolean;
+  lastQueuedCommandId?: string;
+  lastDispatchError?: string;
 }
 
 export interface DeveloperConfig {
@@ -70,6 +74,8 @@ export async function startDeveloperJob(
       prompt,
       maxToolTurns: Math.max(1, Math.min(16, Math.trunc(maxToolTurns))),
       maxAutoCiReruns: 2,
+      chatUrl: project.chatUrl,
+      autoDispatch: project.automationLevel === 'AUTO' || project.automationLevel === 'GUARDIAN',
     }),
   });
   return result.job;
