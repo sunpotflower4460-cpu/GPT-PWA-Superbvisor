@@ -14,15 +14,16 @@ const BRIDGE_PREFIX = 'chat-bridge-project:';
 const BRIDGE_TTL = 60 * 10;
 const CONNECTED_WINDOW_MS = 90_000;
 
-export async function recordChatBridgeHeartbeat(env: ChatBridgeEnv, input: { projectId: string; bridgeId: string; capabilities?: string[] }) {
-  const projectId = sanitizeId(input.projectId);
-  const bridgeId = sanitizeId(input.bridgeId);
-  if (!projectId || !bridgeId) throw new Error('projectId and bridgeId are required');
-  const lastSeenAt = new Date().toISOString();
+export async function recordChatBridgeHeartbeat(env: ChatBridgeEnv, input: { projectId?: string; bridgeId: string; capabilities?: string[] }) {
   const capabilities = [...new Set((input.capabilities ?? [])
     .filter((item) => typeof item === 'string' && item.trim())
     .map((item) => item.trim().slice(0, 100)))]
     .slice(0, 30);
+  const projectCapability = capabilities.find((item) => item.startsWith('project:'));
+  const projectId = sanitizeId(input.projectId || projectCapability?.slice('project:'.length) || '');
+  const bridgeId = sanitizeId(input.bridgeId);
+  if (!projectId || !bridgeId) throw new Error('projectId and bridgeId are required');
+  const lastSeenAt = new Date().toISOString();
   const status = { projectId, bridgeId, lastSeenAt, capabilities };
   await env.SUPERVISOR_STATE.put(projectBridgeKey(projectId), JSON.stringify(status), { expirationTtl: BRIDGE_TTL });
   return bridgeStatus(status);
