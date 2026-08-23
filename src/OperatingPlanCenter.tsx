@@ -141,7 +141,7 @@ export default function OperatingPlanCenter() {
 
   async function copyAndOpenChat() {
     if (!selected || !persistPlan()) return;
-    const target = selected.chatUrl || 'https://chatgpt.com/';
+    const target = safeChatUrl(selected.chatUrl) || 'https://chatgpt.com/';
     const nextWindow = window.open(target, '_blank', 'noopener,noreferrer');
     setBusy('chat-open');
     try {
@@ -345,4 +345,16 @@ function routeLabel(route: ExecutionRoute) {
   if (route === 'GUARDIAN') return 'Guardian';
   if (route === 'BACKGROUND') return 'Background';
   return 'Chat';
+}
+
+function safeChatUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com')) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
