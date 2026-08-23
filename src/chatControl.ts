@@ -145,12 +145,28 @@ export async function getChatControlOverview(
   for (let offset = 0; offset < unique.length; offset += OVERVIEW_BATCH_SIZE) {
     batches.push(unique.slice(offset, offset + OVERVIEW_BATCH_SIZE));
   }
-  const results = await Promise.all(batches.map((batch) => workerFetch<{ projects: ChatProjectOverview[] }>(
+
+  const results = await Promise.allSettled(batches.map((batch) => workerFetch<{ projects: ChatProjectOverview[] }>(
     connection,
     '/api/chat-control/overview',
     { method: 'POST', body: JSON.stringify({ projectIds: batch }) },
   )));
-  return { projects: results.flatMap((result) => result.projects) };
+
+  const projects = results.flatMap((result, index): ChatProjectOverview[] => {
+    if (result.status === 'fulfilled') return result.value.projects;
+    const error = result.reason instanceof Error ? result.reason.message : 'chat_overview_batch_failed';
+    return batches[index].map((projectId) => ({
+      projectId,
+      activity: 'OVERVIEW_ERROR',
+      bridgeConnected: false,
+      pendingRecentCount: 0,
+      failedRecentCount: 0,
+      approximate: true,
+      error,
+    }));
+  });
+
+  return { projects };
 }
 
 async function workerFetch<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
