@@ -308,7 +308,8 @@ async function prepareRecovery(
 ): Promise<DeveloperJob> {
   const fingerprint = checks.length ? failureFingerprint(headSha, checks) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
-    const stable = { ...job, phase: classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready', error: reason, updatedAt: new Date().toISOString() };
+    const phase: DeveloperJobPhase = classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready';
+    const stable: DeveloperJob = { ...job, phase, error: reason, updatedAt: new Date().toISOString() };
     await saveJob(env, stable);
     return stable;
   }
