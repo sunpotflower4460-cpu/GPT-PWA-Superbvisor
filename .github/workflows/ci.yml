@@ -15,7 +15,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  concept-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify product constitution and architecture boundaries
+        run: node scripts/concept-guard.mjs
+
   app-build:
+    needs: concept-guard
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -31,6 +45,7 @@ jobs:
         run: npm run build
 
   worker-check:
+    needs: concept-guard
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -51,6 +66,7 @@ jobs:
         run: npm test
 
   chatgpt-bridge-check:
+    needs: concept-guard
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
