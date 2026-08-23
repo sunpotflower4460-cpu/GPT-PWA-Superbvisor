@@ -52,6 +52,7 @@ if (manifest) {
   assert(manifest.roles?.executor === 'chatgpt', 'manifest: ChatGPT remains executor');
   assert(manifest.roles?.pwa === 'multi-chat-control-plane', 'manifest: PWA remains the multi-chat control plane');
   assert(manifest.roles?.externalLlm === 'orchestration-only', 'manifest: external LLM remains orchestration-only');
+  assert(manifest.roles?.coordinator === 'strongly-consistent-multi-device-control', 'manifest: coordinator remains the strong-consistency boundary');
   assert(manifest.experience?.primarySendPath === 'pwa-to-chat-control-bus-to-chatgpt-bridge', 'manifest: normal send path remains PWA -> Control Bus -> ChatGPT Bridge');
   assert(manifest.experience?.clipboardIsFallbackOnly === true, 'manifest: clipboard remains fallback-only');
   assert(manifest.experience?.routineChatWaitingIsHumanRequired === false, 'manifest: routine ChatGPT waiting is not human-required');
@@ -60,6 +61,9 @@ if (manifest) {
   assert(manifest.experience?.recoveryNextTurnAutoQueue === true, 'manifest: recoverable next turns auto-queue');
   assert(manifest.experience?.legacyApiWorkerExecutorVisible === false, 'manifest: legacy API worker executor remains hidden/removed');
   assert(manifest.experience?.responseMirrorRequiresOfficialTransport === true, 'manifest: response mirroring requires supported transport');
+  assert(manifest.experience?.atomicCoordinatorRequiredForMultiDevice === true, 'manifest: multi-device control requires atomic coordination');
+  assert(manifest.experience?.singleClaimOwnerRequired === true, 'manifest: one active command claim owner is required');
+  assert(manifest.experience?.deliveryRetryPreservesCommandIdentity === true, 'manifest: delivery retries preserve command identity');
   assert(manifest.experience?.mobileJsGzipBudgetKiB === 130, 'manifest: JavaScript mobile budget remains 130 KiB gzip');
   assert(manifest.experience?.mobileCssGzipBudgetKiB === 20, 'manifest: CSS mobile budget remains 20 KiB gzip');
   assert(manifest.safety?.externalLlmGithubWrite === false, 'manifest: external LLM GitHub write remains disabled');
@@ -67,8 +71,8 @@ if (manifest) {
   assert(manifest.safety?.automaticProductionDeploy === false, 'manifest: automatic production deploy remains disabled');
   assert(manifest.safety?.chatSessionCookieAutomation === false, 'manifest: ChatGPT session-cookie automation remains disabled');
   assert(manifest.safety?.evidenceRequiredForCompletion === true, 'manifest: evidence remains required for completion');
-  assert(Array.isArray(manifest.invariants) && manifest.invariants.length >= 12, 'manifest: product invariants remain explicit');
-  assert(Array.isArray(manifest.antiGoals) && manifest.antiGoals.length >= 10, 'manifest: anti-goals remain explicit');
+  assert(Array.isArray(manifest.invariants) && manifest.invariants.length >= 14, 'manifest: product invariants remain explicit');
+  assert(Array.isArray(manifest.antiGoals) && manifest.antiGoals.length >= 12, 'manifest: anti-goals remain explicit');
 
   for (const protectedFile of manifest.protectedArchitectureFiles ?? []) {
     assert(fs.existsSync(path.join(root, protectedFile)), `manifest: protected architecture file exists: ${protectedFile}`);
@@ -79,6 +83,7 @@ containsAll('docs/PRODUCT_CONSTITUTION.md', [
   '複数のChatGPT開発チャット',
   'ChatGPT = executor',
   'PWA = multi-chat control plane',
+  'Project Coordinator = strong consistency boundary',
   'External LLM = orchestration-only',
   'Multi Chat Remote first',
   'Evidence over self-report',
@@ -86,12 +91,16 @@ containsAll('docs/PRODUCT_CONSTITUTION.md', [
   'Control Bus first, clipboard fallback second',
   'AUTO means ChatGPT can continue',
   'Platform limitations must be represented honestly',
+  'Multi-device coordination must be strongly consistent',
+  'One command, one active claim owner',
 ]);
 
 containsAll('docs/ARCHITECTURE.md', [
   '複数チャット同時並行',
   'ここで使っているChatGPT開発チャットを、そのまま複数束ねて遠隔操作すること',
   'Multi Chat Remoteをより放置可能にするための補助層',
+  'Project Coordinator / strong consistency boundary',
+  'SQLite-backed Cloudflare Durable Object',
   'ChatGPT execution',
   'Supervisor自身はコードを実装しない',
   '通常の送信経路は `PWA → Chat Control Bus → ChatGPT Bridge → 対象ChatGPT`',
@@ -142,6 +151,8 @@ const workerIndex = containsAll('worker/src/index.ts', [
   'orchestrationOnly: true',
   'deprecated_background_executor',
   'chatCommandBus: true',
+  'atomicCoordinator: Boolean(env.PROJECT_COORDINATOR)',
+  'ChatCommandConflictError',
 ]);
 assert(/\/webhooks\/openai[\s\S]{0,500}deprecated_background_executor/.test(workerIndex), 'worker: deprecated external background executor stays disabled');
 
@@ -149,8 +160,42 @@ const commandQueue = containsAll('worker/src/chatCommandQueue.ts', [
   'dedupeKey',
   'DEDUPE_PREFIX',
   'isClaimableCommand',
+  'hasAtomicCoordinator',
+  'getProjectChatCommand',
+  'retryChatCommand',
+  'claim_owner_mismatch',
 ]);
-assert(commandQueue.includes('dedupeStorageKey'), 'worker: auto-dispatched commands retain dedupe storage');
+assert(commandQueue.includes('dedupeStorageKey'), 'worker: auto-dispatched commands retain KV-compatible dedupe storage');
+assert(commandQueue.includes('coordinatorFetch'), 'worker: production queue can route through the atomic coordinator');
+
+const coordinator = containsAll('worker/src/projectCoordinator.ts', [
+  'export class ProjectCoordinator',
+  'blockConcurrencyWhile',
+  '/commands/enqueue',
+  '/commands/claim',
+  '/commands/result',
+  '/commands/retry',
+  '/state/save',
+  'claim_owner_mismatch',
+  'deliveryFailures',
+]);
+assert(coordinator.includes('COMMANDS_MIGRATED_KEY'), 'coordinator: legacy queue migration remains explicit');
+assert(coordinator.includes('STATE_MIGRATED_KEY'), 'coordinator: legacy state migration remains explicit');
+
+const stateSync = containsAll('worker/src/stateSync.ts', [
+  'hasAtomicCoordinator',
+  'coordinatorFetch',
+  'revision_conflict',
+  'ensureCoordinatorStateMigrated',
+]);
+assert(stateSync.includes("STATE_SCOPE = 'state-sync:v1'"), 'state sync: one strongly-consistent coordinator scope owns cloud revision decisions');
+
+const setupDoctor = containsAll('src/SetupDoctorCenter.tsx', [
+  'Atomic Multi-device Coordinator',
+  'PROJECT_COORDINATOR binding',
+  'atomicCoordinator',
+]);
+assert(setupDoctor.includes('複数端末競合耐性は完全ではありません'), 'setup doctor: non-atomic fallback is represented honestly');
 
 const developerAgent = containsAll('worker/src/developerAgent.ts', [
   'enqueueChatCommand',
@@ -169,8 +214,29 @@ const bridge = containsAll('chatgpt-bridge/src/bridgeApp.ts', [
   'sendFollowUpMessage',
   'ai_dev_deck_bridge_claim',
   'ai_dev_deck_bridge_result',
+  'ai_dev_deck_bridge_retry',
+  'delivery-receipt',
+  'AI DEV DECK COMMAND ID',
 ]);
 assert(/allowedProjectIds/.test(bridge), 'bridge: project allowlist remains part of runtime boundary');
+assert(bridge.includes('saveReceipt'), 'bridge: successful ChatGPT sends persist a delivery receipt before ack sync');
+assert(bridge.includes('flushReceipt'), 'bridge: ack recovery is attempted before claiming another command');
+
+for (const configFile of ['worker/wrangler.example.jsonc', 'worker/wrangler.ci.jsonc']) {
+  const config = containsAll(configFile, [
+    'PROJECT_COORDINATOR',
+    'ProjectCoordinator',
+    '"type": "durable-object"',
+    '"storage": "sqlite"',
+  ]);
+  assert(config.includes('"exports"'), `${configFile}: declarative Durable Object export remains configured`);
+}
+
+const workflow = containsAll('.github/workflows/ci.yml', [
+  'Dry-run Worker + SQLite Durable Object bundle',
+  'npm run dry-run',
+]);
+assert(workflow.includes('Enforce mobile bundle budget'), 'ci: mobile bundle budget remains enforced');
 
 const bundleBudget = containsAll('scripts/check-bundle-size.mjs', [
   'JS_GZIP_BUDGET',
@@ -206,4 +272,4 @@ if (failures.length) {
   console.error('\nRead docs/PRODUCT_CONSTITUTION.md before changing protected architecture boundaries.');
   process.exit(1);
 }
-console.log('Concept Guard: product direction, primary UX and safety boundaries are intact.');
+console.log('Concept Guard: product direction, primary UX, atomic multi-device control and safety boundaries are intact.');
