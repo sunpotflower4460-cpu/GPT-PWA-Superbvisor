@@ -67,6 +67,8 @@ Coordinatorが担当する強整合境界:
 - transient delivery failureを同じcommand IDでbackoff再試行
 - retry/requeue時に古いBridge ownershipを解放
 - terminal failureを明示retryで同じcommand IDのまま再queue
+- queued/failed commandのmanual fallback切替時にatomic cancelし、後続Bridge配送との二重実行を防ぐ
+- claimed中のcommandはPWA側cancelを409拒否し、配送中にownershipを奪わない
 - Cloud Stateのrevision conflictをatomicに判定
 - 同一Guardian runのCron/manual advance入口を短期execution leaseで1本に絞る
 - high-frequency UI overviewへcommand本文を返さずread-only summaryを提供
@@ -121,6 +123,9 @@ KV fallback時は最大100件からsummary化し、上限に達した場合は`a
 - retry/requeue → 古いBridge ownershipを解除して次claimへ渡す
 - ChatGPT send成功 / Worker ack失敗 → Bridge delivery receiptを再同期し、本文の即再送を避ける
 - stale Bridge claim → 2分後に回収可能
+- PWAで「手動送信」へ切り替える場合 → 新しいタブ確保とClipboard copy成功後にqueued/failed commandをcancelし、cancel成功後だけChatGPTへ遷移
+- popup block / Clipboard failure → commandをcancelせず自動Queueを維持
+- Bridgeがすでにclaim済み → manual cancelを409拒否し、PWAは手動送信を開始しない
 - Guardian Cron/manual refresh競合 → Coordinator有効時は同一runのadvance leaseを1実行だけ取得
 - CI `cancelled` / `timed_out` / `startup_failure` / `stale` → failed jobsを最大2回再実行
 - CI `failure` → 同じ失敗をfingerprintしてChatGPT修正指示へ変換
@@ -295,8 +300,11 @@ POST /api/chat-commands
 POST /api/chat-commands/claim
 POST /api/chat-commands/<id>/result
 POST /api/chat-commands/<id>/retry
+POST /api/chat-commands/<id>/cancel
 GET  /api/projects/<project-id>/chat-commands
 ```
+
+`/cancel` はmanual fallbackへ切り替える前の二重配送防止用です。Coordinator有効時はqueued/failed→cancelledの遷移とBridge claimが同じproject scopeで直列化され、claimed中のcancelは409になります。
 
 Coordinator有効時はproject単位でauthoritative stateを持ちます。KVはmirror/fallbackです。
 
@@ -367,7 +375,7 @@ POST /api/push/test
 状態の扱いを3段階に分けます。
 
 **Strongly consistent / authoritative:**
-- Chat command ownership / dedupe / delivery retry
+- Chat command ownership / dedupe / delivery retry / manual fallback cancel
 - compact command overview summary
 - Cloud State revision compare-and-update
 - SQLite Durable Object `ProjectCoordinator`
@@ -388,6 +396,7 @@ POST /api/push/test
 - all-chat overviewはsummary-only + batch transport
 - overview pollでfull prompt/historyを繰り返し読まない
 - overview pollでKV mirror writeを増幅しない
+- manual fallbackはautomatic Queueとの二重配送を残さない
 - 低コストproviderをprimaryにできる
 - 高価なmodelを毎回使わない
 - provider failureで別providerへfallback
