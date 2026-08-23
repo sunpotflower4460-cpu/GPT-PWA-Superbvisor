@@ -132,30 +132,39 @@ const chatControlUi = containsAll('src/ChatControlCenter.tsx', [
   'chat-project-remote',
   '全体:',
   '8000',
+  'OVERVIEW_ERROR',
   'cancelProjectChatCommand',
   '自動Queueを止めて手動送信',
 ]);
 assert(chatControlUi.includes('chatProjectActivityLabel'), 'chat control: every project can surface live remote activity in the rail');
 assert(chatControlUi.includes('Object.fromEntries'), 'chat control: batch overview is mapped across all visible projects');
 assert(
-  /manualFallback[\s\S]{0,1600}window\.open\('about:blank'[\s\S]{0,1600}cancelProjectChatCommand[\s\S]{0,1600}popup\.location\.replace/.test(chatControlUi),
-  'chat control: manual fallback reserves a tab, cancels the durable command, then navigates to ChatGPT',
+  /manualFallback[\s\S]{0,2000}window\.open\('about:blank'[\s\S]{0,2200}navigator\.clipboard\.writeText\(command\.prompt\)[\s\S]{0,2200}cancelProjectChatCommand[\s\S]{0,1800}popup\.location\.replace/.test(chatControlUi),
+  'chat control: manual fallback reserves a tab, copies the prompt, cancels the durable command, then navigates to ChatGPT',
 );
 assert(
   /if \(!popup\)[\s\S]{0,500}Queueは取消していません/.test(chatControlUi),
   'chat control: popup-block failure leaves the automatic queue intact',
 );
+assert(
+  /Clipboardへコピーできなかった[\s\S]{0,300}Queueは取消していません/.test(chatControlUi),
+  'chat control: clipboard failure leaves the automatic queue intact',
+);
 assert(/catch \(error\)[\s\S]{0,500}popup\.close\(\)/.test(chatControlUi), 'chat control: cancel failure closes the reserved blank tab');
+assert(/connectBridge[\s\S]{0,1200}window\.open\('about:blank'/.test(chatControlUi), 'chat control: Bridge setup reserves its tab before async clipboard work on mobile');
 
 const chatControlClient = containsAll('src/chatControl.ts', [
   'getChatControlOverview',
   'OVERVIEW_BATCH_SIZE = 30',
   '/api/chat-control/overview',
+  'Promise.allSettled',
+  'OVERVIEW_ERROR',
   'flatMap',
   'cancelProjectChatCommand',
   '/cancel',
 ]);
 assert(!chatControlClient.includes('unique.slice(0, 30)'), 'chat control: projects beyond the first batch are not silently dropped');
+assert(chatControlClient.includes("result.status === 'fulfilled'"), 'chat control: one failed overview batch does not discard successful batches');
 
 const operatingPlan = containsAll('src/OperatingPlanCenter.tsx', [
   'enqueueProjectChatCommand',
@@ -220,8 +229,15 @@ const chatOverview = containsAll('worker/src/chatControlOverview.ts', [
   'RETRY_SCHEDULED',
   'WAITING_BRIDGE',
   'NEEDS_ATTENTION',
+  'OVERVIEW_ERROR',
 ]);
 assert(!chatOverview.includes('listProjectChatCommands('), 'multi-chat overview: frequent polling does not fetch full command bodies or trigger list mirror writes');
+assert(/catch \(error\)[\s\S]{0,500}activity: 'OVERVIEW_ERROR'/.test(chatOverview), 'multi-chat overview: transport/storage failures are not mislabeled as Bridge offline');
+
+const chatControlCss = containsAll('src/chat-control.css', [
+  '.chat-project-remote.overview-error',
+]);
+assert(chatControlCss.includes('#fee2e2'), 'chat control: overview acquisition failures remain visually distinct');
 
 const coordinator = containsAll('worker/src/projectCoordinator.ts', [
   'export class ProjectCoordinator',
