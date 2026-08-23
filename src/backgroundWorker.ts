@@ -66,6 +66,16 @@ export interface WorkerConnection {
   token: string;
 }
 
+export interface WorkerHealth {
+  ok: boolean;
+  service: string;
+  executor?: 'chatgpt';
+  orchestrationOnly?: boolean;
+  chatCommandBus?: boolean;
+  chatBridgeHeartbeat?: boolean;
+  atomicCoordinator?: boolean;
+}
+
 const SETTINGS_KEY = 'gpt-pwa-supervisor.worker-connection.v1';
 const JOB_IDS_KEY = 'gpt-pwa-supervisor.background-jobs.v1';
 
@@ -110,7 +120,7 @@ export function rememberBackgroundJob(projectId: string, jobId: string) {
 export async function checkWorkerHealth(connection: WorkerConnection) {
   const response = await fetch(`${normalizeBaseUrl(connection.baseUrl)}/health`);
   if (!response.ok) throw new Error(`Worker health check failed (${response.status})`);
-  return response.json() as Promise<{ ok: boolean; service: string; executor?: 'chatgpt'; orchestrationOnly?: boolean }>;
+  return response.json() as Promise<WorkerHealth>;
 }
 
 export async function startBackgroundJob(
