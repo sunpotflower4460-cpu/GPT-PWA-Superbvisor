@@ -1,13 +1,15 @@
-export interface StateSyncEnv {
+import {
+  AtomicCoordinatorEnv,
+  CoordinatorCloudState,
+  coordinatorFetch,
+  hasAtomicCoordinator,
+} from './projectCoordinator';
+
+export interface StateSyncEnv extends AtomicCoordinatorEnv {
   SUPERVISOR_STATE: KVNamespace;
 }
 
-export interface CloudStateRecord {
-  revision: string;
-  updatedAt: string;
-  deviceId: string;
-  data: unknown;
-}
+export interface CloudStateRecord extends CoordinatorCloudState {}
 
 export interface SaveCloudStateBody {
   deviceId?: string;
@@ -18,21 +20,21 @@ export interface SaveCloudStateBody {
 
 export type SaveCloudStateResult =
   | { ok: true; state: CloudStateRecord }
-  | { ok: false; status: 400 | 409 | 413; error: string; current?: Pick<CloudStateRecord, 'revision' | 'updatedAt' | 'deviceId'> };
+  | { ok: false; status: 400 | 409 | 413 | 503; error: string; current?: Pick<CloudStateRecord, 'revision' | 'updatedAt' | 'deviceId'> };
 
 const STATE_KEY = 'client-state:v1';
+const STATE_SCOPE = 'state-sync:v1';
 const MAX_STATE_BYTES = 900_000;
+let coordinatorStateMigrated = false;
 
 export async function getCloudState(env: StateSyncEnv): Promise<CloudStateRecord | null> {
-  const raw = await env.SUPERVISOR_STATE.get(STATE_KEY);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as CloudStateRecord;
-    if (!isStoredState(parsed)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+  if (!hasAtomicCoordinator(env)) return getCloudStateKv(env);
+  await ensureCoordinatorStateMigrated(env);
+  const result = await coordinatorFetch<{ state?: CloudStateRecord | null; error?: string }>(env, STATE_SCOPE, '/state/get', { method: 'GET' });
+  if (!result.ok) throw new Error(result.data.error || `atomic_state_get_failed_${result.status}`);
+  const state = result.data.state ?? null;
+  if (state) await env.SUPERVISOR_STATE.put(STATE_KEY, JSON.stringify(state));
+  return state;
 }
 
 export async function saveCloudState(env: StateSyncEnv, body: SaveCloudStateBody): Promise<SaveCloudStateResult> {
@@ -44,7 +46,57 @@ export async function saveCloudState(env: StateSyncEnv, body: SaveCloudStateBody
     return { ok: false, status: 413, error: 'state_payload_too_large' };
   }
 
-  const current = await getCloudState(env);
+  if (hasAtomicCoordinator(env)) {
+    await ensureCoordinatorStateMigrated(env);
+    const result = await coordinatorFetch<{
+      state?: CloudStateRecord;
+      error?: string;
+      current?: Pick<CloudStateRecord, 'revision' | 'updatedAt' | 'deviceId'>;
+    }>(env, STATE_SCOPE, '/state/save', {
+      method: 'POST',
+      body: JSON.stringify({
+        deviceId: body.deviceId.trim().slice(0, 128),
+        baseRevision: body.baseRevision ?? null,
+        force: body.force === true,
+        data: body.data,
+      }),
+    });
+    if (result.status === 409) {
+      return { ok: false, status: 409, error: result.data.error || 'revision_conflict', current: result.data.current };
+    }
+    if (!result.ok || !result.data.state) {
+      return { ok: false, status: 503, error: result.data.error || `atomic_state_save_failed_${result.status}` };
+    }
+    await env.SUPERVISOR_STATE.put(STATE_KEY, JSON.stringify(result.data.state));
+    return { ok: true, state: result.data.state };
+  }
+
+  return saveCloudStateKv(env, body);
+}
+
+export async function deleteCloudState(env: StateSyncEnv) {
+  if (hasAtomicCoordinator(env)) {
+    await ensureCoordinatorStateMigrated(env);
+    const result = await coordinatorFetch<{ ok?: boolean; error?: string }>(env, STATE_SCOPE, '/state/delete', { method: 'DELETE' });
+    if (!result.ok) throw new Error(result.data.error || `atomic_state_delete_failed_${result.status}`);
+  }
+  await env.SUPERVISOR_STATE.delete(STATE_KEY);
+}
+
+async function getCloudStateKv(env: StateSyncEnv): Promise<CloudStateRecord | null> {
+  const raw = await env.SUPERVISOR_STATE.get(STATE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as CloudStateRecord;
+    if (!isStoredState(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function saveCloudStateKv(env: StateSyncEnv, body: SaveCloudStateBody): Promise<SaveCloudStateResult> {
+  const current = await getCloudStateKv(env);
   if (current && body.force !== true && body.baseRevision !== current.revision) {
     return {
       ok: false,
@@ -57,15 +109,22 @@ export async function saveCloudState(env: StateSyncEnv, body: SaveCloudStateBody
   const state: CloudStateRecord = {
     revision: crypto.randomUUID(),
     updatedAt: new Date().toISOString(),
-    deviceId: body.deviceId.trim().slice(0, 128),
+    deviceId: body.deviceId!.trim().slice(0, 128),
     data: body.data,
   };
   await env.SUPERVISOR_STATE.put(STATE_KEY, JSON.stringify(state));
   return { ok: true, state };
 }
 
-export async function deleteCloudState(env: StateSyncEnv) {
-  await env.SUPERVISOR_STATE.delete(STATE_KEY);
+async function ensureCoordinatorStateMigrated(env: StateSyncEnv) {
+  if (!hasAtomicCoordinator(env) || coordinatorStateMigrated) return;
+  const legacy = await getCloudStateKv(env);
+  const result = await coordinatorFetch<{ ok?: boolean; error?: string }>(env, STATE_SCOPE, '/state/import', {
+    method: 'POST',
+    body: JSON.stringify({ state: legacy }),
+  });
+  if (!result.ok) throw new Error(result.data.error || `atomic_state_migration_failed_${result.status}`);
+  coordinatorStateMigrated = true;
 }
 
 function isStoredState(value: unknown): value is CloudStateRecord {
