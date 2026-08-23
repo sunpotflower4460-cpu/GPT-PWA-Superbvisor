@@ -1,6 +1,6 @@
 # Supervisor Worker
 
-AI DEV DECKの**外部オーケストレーション層**です。
+AI DEV DECKの**外部オーケストレーション / durable control層**です。
 
 ## 最重要ルール
 
@@ -8,6 +8,8 @@ AI DEV DECKの**外部オーケストレーション層**です。
 
 Cloudflare Workerと外部LLM APIは、次だけを担当します。
 
+- Chat Control Bus
+- multi-device command coordination
 - 状態整理
 - ChatGPTへ渡す次手の生成
 - GitHub作業branchの準備
@@ -24,14 +26,20 @@ Cloudflare Workerと外部LLM APIは、次だけを担当します。
 ## Architecture
 
 ```text
-PWA
+PWA / Supervisor / Guardian
  ↓
 Cloudflare Worker
+ ├─ ProjectCoordinator (SQLite Durable Object)
+ │    ├─ atomic enqueue / dedupe
+ │    ├─ one active Bridge claim owner
+ │    ├─ delivery retry / stale claim recovery
+ │    └─ Cloud State revision compare-and-update
+ │
+ ├─ KV
+ │    └─ migration / history mirror / compatibility fallback
+ │
  ├─ Provider Router
  │    DeepSeek → MiniMax → OpenAI → deterministic fallback
- │
- ├─ Generic Supervisor
- │    state → ChatGPT handoff prompt
  │
  └─ GitHub Guardian
       protected branch準備
@@ -39,22 +47,35 @@ Cloudflare Worker
       ChatGPTが実装
         ↓
       exact head SHAのCI監視
-        ├─ green → Draft PR / review
-        ├─ transient → CI rerun
-        ├─ code failure → ChatGPT recovery prompt
-        └─ human required → safe stop
 ```
+
+## Atomic coordinator
+
+productionで複数端末・複数Bridgeを安全に扱うため、`PROJECT_COORDINATOR` はSQLite-backed Durable Objectとして設定します。
+
+Coordinatorが担当する強整合境界:
+
+- 同じdedupe keyの同時enqueueを1 commandへ集約
+- 1 commandへ同時に複数Bridgeがclaimしない
+- stale/non-owner Bridgeからのresult overwriteを409で拒否
+- transient delivery failureを同じcommand IDでbackoff再試行
+- terminal failureを明示retryで同じcommand IDのまま再queue
+- Cloud Stateのrevision conflictをatomicに判定
+
+`PROJECT_COORDINATOR` がない場合は既存KV fallbackで基本動作しますが、**atomic multi-device guaranteeはありません**。`GET /health` の `atomicCoordinator` とPWAのSetup Doctorで確認できます。
 
 ## Failure resilience
 
 - Provider 408 / 409 / 425 / 429 / 5xx → 同providerを最大3 attempt
 - Provider失敗 → 次providerへfallback
 - 全provider失敗 → deterministic ChatGPT handoff
+- Bridge send failure → 同じcommand IDでbackoff再queue、上限後のみterminal failed
+- ChatGPT send成功 / Worker ack失敗 → Bridge delivery receiptを再同期し、本文の即再送を避ける
+- stale Bridge claim → 2分後に回収可能
 - CI `cancelled` / `timed_out` / `startup_failure` / `stale` → failed jobsを最大2回再実行
 - CI `failure` → 同じ失敗をfingerprintしてChatGPT修正指示へ変換
 - GitHub/API一時エラー → Guardianをfailed終了せず次Cronで再試行
 - Push失敗 → 監督状態を壊さない
-- Guardian一覧 → KV paginationで全件巡回
 - CI未検出 → successと推測しない
 
 ## 1. Install
@@ -65,6 +86,12 @@ npm install
 npm run check
 ```
 
+`npm run check` は次をまとめて検証します。
+
+- TypeScript typecheck
+- regression tests
+- SQLite Durable Objectを含むWrangler dry-run
+
 ## 2. Cloudflare Worker設定
 
 ```bash
@@ -73,6 +100,29 @@ npx wrangler kv namespace create SUPERVISOR_STATE
 ```
 
 返されたKV namespace IDを `wrangler.jsonc` の `SUPERVISOR_STATE` に設定します。
+
+`wrangler.example.jsonc` には以下のDurable Object設定が含まれています。
+
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROJECT_COORDINATOR",
+        "class_name": "ProjectCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "ProjectCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}
+```
+
+このbinding/exportを削除した状態でproduction deployしないでください。互換KV fallbackへ落ち、複数端末競合耐性が弱くなります。
 
 `ALLOWED_ORIGIN` はPWAの公開Originへ変更します。
 
@@ -123,8 +173,6 @@ npx wrangler secret put OPENAI_API_KEY
 }
 ```
 
-モデル名やendpointはprovider側の変更時にvarsだけで差し替えられるよう、コードから分離しています。
-
 ## 5. Web Push / VAPID
 
 ```bash
@@ -150,7 +198,27 @@ npm run check
 npm run deploy
 ```
 
-Worker URLと `SUPERVISOR_CLIENT_TOKEN` をPWAのSupervisor Worker設定へ入力します。
+deploy後、必ずhealthを確認します。
+
+```http
+GET /health
+```
+
+期待値:
+
+```json
+{
+  "ok": true,
+  "executor": "chatgpt",
+  "orchestrationOnly": true,
+  "chatCommandBus": true,
+  "atomicCoordinator": true
+}
+```
+
+`atomicCoordinator: false` の場合はproduction multi-device安全性が未設定です。
+
+Worker URLと `SUPERVISOR_CLIENT_TOKEN` をPWAのSupervisor Worker設定へ入力し、Setup DoctorでもAtomic Multi-device CoordinatorがPASSになることを確認します。
 
 ## API
 
@@ -160,17 +228,29 @@ Worker URLと `SUPERVISOR_CLIENT_TOKEN` をPWAのSupervisor Worker設定へ入�
 GET /health
 ```
 
-返り値には次が含まれます。
+PWAはここからChatGPT executor境界とAtomic Coordinator bindingを確認します。
 
-```json
-{
-  "ok": true,
-  "executor": "chatgpt",
-  "orchestrationOnly": true
-}
+### Chat Control Bus
+
+```http
+POST /api/chat-commands
+POST /api/chat-commands/claim
+POST /api/chat-commands/<id>/result
+POST /api/chat-commands/<id>/retry
+GET  /api/projects/<project-id>/chat-commands
 ```
 
-PWAはこれを使って旧Background Executorへ接続していないか確認できます。
+Coordinator有効時はproject単位でauthoritative stateを持ちます。KVはmirror/fallbackです。
+
+### Cloud State
+
+```http
+GET    /api/state-sync
+POST   /api/state-sync
+DELETE /api/state-sync
+```
+
+Coordinator有効時はrevision compare-and-updateがstrongly consistentです。
 
 ### Generic orchestration handoff
 
@@ -187,7 +267,7 @@ Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
 GET /api/github-agent/config
 ```
 
-GitHub allowlist、ChatGPT executor boundary、利用可能provider、deterministic fallback有無を確認できます。
+GitHub allowlist、ChatGPT executor boundary、Atomic Coordinator、利用可能provider、deterministic fallback有無を確認できます。
 
 ### Guardian
 
@@ -224,9 +304,19 @@ POST /api/push/test
 
 ## State and consistency
 
-Guardian / handoff / Push subscription / Cloud sync stateはKVへ保存します。
+状態の扱いを2種類に分けます。
 
-KVは監督スナップショット用途には適していますが、厳密なmulti-device atomic transactionではありません。Cloud syncの完全なCASが必要になった場合はDurable Objectsまたはtransactional storageへ移行する前提です。
+**Strongly consistent / authoritative:**
+- Chat command ownership / dedupe / delivery retry
+- Cloud State revision compare-and-update
+- SQLite Durable Object `ProjectCoordinator`
+
+**Durable snapshot / mirror:**
+- KV migration source
+- command history mirror
+- Guardian/handoff/Push等の既存監督snapshot
+
+Guardian transition自体のCron/manual refresh競合は次のhardening対象です。command queueのatomic化だけでGuardian全体が完全transactionalになったとは扱いません。
 
 ## Cost / safety
 
