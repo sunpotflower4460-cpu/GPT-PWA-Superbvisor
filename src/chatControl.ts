@@ -16,6 +16,10 @@ export interface ChatCommand {
   deliveredAt?: string;
   bridgeId?: string;
   detail?: string;
+  claimAttempts?: number;
+  deliveryFailures?: number;
+  maxDeliveryAttempts?: number;
+  nextAttemptAt?: string;
 }
 
 export interface ChatBridgeStatus {
@@ -48,6 +52,17 @@ export async function enqueueProjectChatCommand(
       chatUrl: project.chatUrl,
       prompt,
     }),
+  });
+}
+
+export async function retryProjectChatCommand(
+  projectId: string,
+  commandId: string,
+  connection: WorkerConnection = loadWorkerConnection(),
+) {
+  return workerFetch<{ command: ChatCommand }>(connection, `/api/chat-commands/${encodeURIComponent(commandId)}/retry`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
   });
 }
 
