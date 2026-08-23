@@ -2,10 +2,13 @@ import { generateSmartReplies, SmartReplyRequest } from './smartReplies';
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import { buildGenericChatGptHandoff } from './orchestratorPolicy';
 import {
+  ChatCommandConflictError,
   claimNextChatCommand,
   enqueueChatCommand,
   getChatCommand,
+  getProjectChatCommand,
   listProjectChatCommands,
+  retryChatCommand,
   updateChatCommandResult,
 } from './chatCommandQueue';
 import { getChatBridgeStatus, recordChatBridgeHeartbeat } from './chatBridge';
@@ -24,6 +27,7 @@ interface Env extends OrchestrationEnv {
   VAPID_PRIVATE_JWK?: string;
   VAPID_SUBJECT?: string;
   SUPERVISOR_STATE: KVNamespace;
+  PROJECT_COORDINATOR?: DurableObjectNamespace;
 }
 
 type JobStatus = 'queued' | 'in_progress' | 'completed' | 'failed' | 'incomplete' | 'cancelled';
@@ -98,6 +102,7 @@ export default {
         orchestrationOnly: true,
         chatCommandBus: true,
         chatBridgeHeartbeat: true,
+        atomicCoordinator: Boolean(env.PROJECT_COORDINATOR),
       }, 200, env, request);
     }
 
@@ -147,13 +152,22 @@ export default {
 
     const chatCommandMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)$/);
     if (chatCommandMatch && request.method === 'GET') {
-      const command = await getChatCommand(env, decodeURIComponent(chatCommandMatch[1]));
+      const id = decodeURIComponent(chatCommandMatch[1]);
+      const projectId = url.searchParams.get('projectId')?.trim() || '';
+      const command = projectId
+        ? await getProjectChatCommand(env, projectId, id)
+        : await getChatCommand(env, id);
       return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
     }
 
     const chatCommandResultMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)\/result$/);
     if (chatCommandResultMatch && request.method === 'POST') {
       return reportChatCommandResult(decodeURIComponent(chatCommandResultMatch[1]), request, env);
+    }
+
+    const chatCommandRetryMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)\/retry$/);
+    if (chatCommandRetryMatch && request.method === 'POST') {
+      return retryFailedChatCommand(decodeURIComponent(chatCommandRetryMatch[1]), request, env);
     }
 
     const projectCommandsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/chat-commands$/);
@@ -235,17 +249,51 @@ async function createChatCommand(request: Request, env: Env): Promise<Response> 
 async function claimChatCommand(request: Request, env: Env): Promise<Response> {
   const body = await readJson<{ bridgeId?: string; projectId?: string }>(request);
   if (!body?.bridgeId?.trim() || !body.projectId?.trim()) return json({ error: 'bridgeId and projectId are required' }, 400, env, request);
-  const command = await claimNextChatCommand(env, body.bridgeId, body.projectId.trim());
-  return json({ command }, 200, env, request);
+  try {
+    const command = await claimNextChatCommand(env, body.bridgeId, body.projectId.trim());
+    return json({ command }, 200, env, request);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : 'chat_command_claim_failed' }, 503, env, request);
+  }
 }
 
 async function reportChatCommandResult(id: string, request: Request, env: Env): Promise<Response> {
-  const body = await readJson<{ status?: 'delivered' | 'failed' | 'cancelled'; detail?: string }>(request);
-  if (!body?.status || !['delivered', 'failed', 'cancelled'].includes(body.status)) {
+  const body = await readJson<{
+    projectId?: string;
+    bridgeId?: string;
+    status?: 'delivered' | 'failed' | 'cancelled';
+    detail?: string;
+  }>(request);
+  if (!body?.projectId?.trim() || !body.bridgeId?.trim()) {
+    return json({ error: 'projectId and bridgeId are required' }, 400, env, request);
+  }
+  if (!body.status || !['delivered', 'failed', 'cancelled'].includes(body.status)) {
     return json({ error: 'status must be delivered, failed or cancelled' }, 400, env, request);
   }
-  const command = await updateChatCommandResult(env, id, { status: body.status, detail: body.detail });
-  return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+  try {
+    const command = await updateChatCommandResult(env, id, {
+      projectId: body.projectId,
+      bridgeId: body.bridgeId,
+      status: body.status,
+      detail: body.detail,
+    });
+    return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+  } catch (error) {
+    if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
+    return json({ error: error instanceof Error ? error.message : 'chat_command_result_failed' }, 503, env, request);
+  }
+}
+
+async function retryFailedChatCommand(id: string, request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectId?: string }>(request);
+  if (!body?.projectId?.trim()) return json({ error: 'projectId is required' }, 400, env, request);
+  try {
+    const command = await retryChatCommand(env, body.projectId, id);
+    return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+  } catch (error) {
+    if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
+    return json({ error: error instanceof Error ? error.message : 'chat_command_retry_failed' }, 503, env, request);
+  }
 }
 
 async function createOrchestrationJob(request: Request, env: Env): Promise<Response> {
