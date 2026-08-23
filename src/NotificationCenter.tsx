@@ -163,7 +163,7 @@ export default function NotificationCenter() {
     if (item.action === 'RECOVER_CHAT') {
       if (!item.actionPrompt) { setActionMessage('再開指示が保存されていません。Smart Supervisorから再生成してください。'); return; }
       const project = loadProjects().find((candidate) => candidate.id === item.projectId);
-      const nextWindow = window.open(project?.chatUrl || 'https://chatgpt.com/', '_blank', 'noopener,noreferrer');
+      const nextWindow = window.open(safeChatUrl(project?.chatUrl) || 'https://chatgpt.com/', '_blank', 'noopener,noreferrer');
       try {
         await navigator.clipboard.writeText(item.actionPrompt); markNotificationRead(item.id); setItems(loadNotifications());
         setActionMessage(nextWindow ? '再開指示をコピーしてChatを開きました。貼り付けて送信してください。' : '再開指示をコピーしました。ポップアップがブロックされたためChatは手動で開いてください。');
@@ -200,5 +200,6 @@ function persistDeveloper(projectId: string, projectName: string, job: Developer
   if (job.status === 'failed') return persist({ dedupeKey: `developer:${job.id}:failed`, projectId, projectName, kind: 'error', title: `${projectName}: GitHub Agent停止`, detail: job.error || job.outputText || 'Developer Agentが停止しました。', ...(job.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${job.pullRequest.number} を確認`, actionUrl: job.pullRequest.url } : {}) });
   return 0;
 }
-function safeExternalUrl(value?: string) { if (!value) return null; try { const url = new URL(value); if (url.protocol !== 'https:' || url.hostname !== 'github.com') return null; return url.toString(); } catch { return null; } }
+function safeChatUrl(value?: string) { if (!value) return null; try { const url = new URL(value); const host = url.hostname.toLowerCase(); if (url.protocol !== 'https:' || (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com')) return null; return url.toString(); } catch { return null; } }
+function safeExternalUrl(value?: string) { if (!value) return null; try { const url = new URL(value); if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') return null; return url.toString(); } catch { return null; } }
 function icon(kind: SupervisorNotification['kind']) { if (kind === 'complete') return '✓'; if (kind === 'human') return '👤'; if (kind === 'error') return '!'; if (kind === 'handoff') return '↗'; return '•'; }
