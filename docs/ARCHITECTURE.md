@@ -91,10 +91,13 @@ productionの複数端末競合耐性を担うauthoritative state boundary。
 - delivery failure回数 / backoff / terminal failure
 - terminal failureの明示retry
 - Cloud State revision compare-and-update
+- Guardian runの短期execution lease取得 / renew / release
 
 Queue/stateの強整合な判断はCoordinator内で行う。KVは既存データのmigration、履歴mirror、互換fallbackとして残す。
 
 **KV-onlyのread → compare → writeをatomic guaranteeとは呼ばない。** `PROJECT_COORDINATOR` bindingが無効なWorkerは互換運転できるが、Setup Doctorがmulti-device safety警告を出す。
+
+Guardian leaseは同じrunへCron/manual refreshが同時に入る通常競合を抑えるための入口ロックであり、Guardian / Developerの全state writeをtransactional storageへ移したものではない。lease期限を超える異常に長い処理まで完全fencingできるとは扱わない。
 
 ### Chat Control Bus
 
@@ -207,6 +210,14 @@ Recover policy:
 4. 同じ指示を無限・重複配送しない
 5. 人間しか解決できない地点だけWAITING_USER
 6. Push失敗など補助機能障害を開発完了判定と混同しない
+
+Concurrency policy:
+
+1. Coordinator有効時は同一Guardian runの`advance`前に`guardian-advance` leaseを取得
+2. Cron sweepと手動refreshが競合した場合、lease取得者だけがadvanceする
+3. 長い処理の前にleaseをrenewする
+4. release失敗はlease expiryで回復可能なのでrunをterminal failureにしない
+5. leaseは通常競合抑止であり、Guardian / Developer KV state全体の完全transactional fencingとは区別する
 
 ### GitHub evidence
 
@@ -376,14 +387,15 @@ Implemented foundation:
 13. Autopilot Route continuation contract
 14. Setup Doctor atomic-coordinator diagnosis
 15. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
+16. Guardian Cron/manual advance execution lease + lease regression tests
 
 Next high-priority gaps:
 
 1. production Workerへ `PROJECT_COORDINATOR` binding/exportを実際にdeployし、healthで `atomicCoordinator:true` を確認
 2. ChatGPT host上でのreal E2E: `PWA → Queue → Bridge → same conversation`
-3. Guardian/Developer transition自体のconcurrent Cron/manual refresh競合をstrong-consistency境界へ寄せる
+3. real-device PWA / Push / reconnect / multi-device E2E
 4. structured Autopilot route progressをchat textとは独立して永続化
-5. real-device PWA / Push / reconnect E2E
+5. 実運用で必要性が確認された場合、Guardian / Developer authoritative state自体をCoordinator/D1等へ寄せて完全fencingを追加
 6. 公式に可能になった場合のみChatGPT response/statusのより深いreadback
 
 GuardianやAutopilotの高度化より、**PWA内から複数ChatGPTを自然に操作できることを常に優先する。**
