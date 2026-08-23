@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ChatCommandConflictError,
+  cancelChatCommand,
   claimNextChatCommand,
   enqueueChatCommand,
   isClaimableCommand,
@@ -125,6 +126,7 @@ describe('chat command delivery recovery', () => {
     };
     const first = applyCommandResult(claimed, { status: 'failed', detail: 'host unavailable' }, Date.parse('2026-08-23T00:00:01.000Z'));
     expect(first.status).toBe('queued');
+    expect(first.bridgeId).toBeUndefined();
     expect(first.deliveryFailures).toBe(1);
     expect(first.nextAttemptAt).toBe('2026-08-23T00:00:06.000Z');
 
@@ -149,5 +151,31 @@ describe('chat command delivery recovery', () => {
       bridgeId: 'bridge-b',
       status: 'delivered',
     })).rejects.toBeInstanceOf(ChatCommandConflictError);
+  });
+
+  it('cancels queued work before a manual fallback so it cannot be claimed later', async () => {
+    const { env } = fakeEnv();
+    const queued = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue manually',
+    });
+
+    const cancelled = await cancelChatCommand(env, 'project-1', queued.id, 'manual fallback');
+    expect(cancelled?.status).toBe('cancelled');
+    expect(cancelled?.bridgeId).toBeUndefined();
+    expect(await claimNextChatCommand(env, 'bridge-a', 'project-1')).toBeNull();
+  });
+
+  it('refuses to cancel work that a bridge already owns', async () => {
+    const { env } = fakeEnv();
+    const queued = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue',
+    });
+    await claimNextChatCommand(env, 'bridge-a', 'project-1');
+
+    await expect(cancelChatCommand(env, 'project-1', queued.id)).rejects.toBeInstanceOf(ChatCommandConflictError);
   });
 });
