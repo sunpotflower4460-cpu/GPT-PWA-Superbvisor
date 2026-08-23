@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import BackgroundWorkerCenter from './BackgroundWorkerCenter';
+import ChatControlCenter from './ChatControlCenter';
 import DataBackupCenter from './DataBackupCenter';
 import DeveloperAgentCenter from './DeveloperAgentCenter';
 import DeveloperAgentLauncher from './DeveloperAgentLauncher';
@@ -28,6 +29,7 @@ import './execution-router.css';
 import './setup-doctor.css';
 import './release-update.css';
 import './data-backup.css';
+import './chat-control.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -39,6 +41,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <SmartActionCenter />
     <BackgroundWorkerCenter />
     <OperatingPlanCenter />
+    <ChatControlCenter />
     <DeveloperAgentLauncher />
     <DeveloperAgentCenter />
     <EvidenceCenter />
