@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeChatUrl, sanitizePrompt } from './chatCommandQueue';
+import { isClaimableCommand, normalizeChatUrl, sanitizePrompt, type ChatCommand } from './chatCommandQueue';
+
+const baseCommand: ChatCommand = {
+  id: 'command-1',
+  projectId: 'project-1',
+  chatUrl: 'https://chatgpt.com/c/abc123',
+  prompt: 'continue',
+  status: 'queued',
+  createdAt: '2026-08-23T00:00:00.000Z',
+  updatedAt: '2026-08-23T00:00:00.000Z',
+};
 
 describe('chat command validation', () => {
   it('accepts canonical ChatGPT conversation URLs', () => {
@@ -16,5 +26,32 @@ describe('chat command validation', () => {
   it('trims prompts and caps payload size', () => {
     expect(sanitizePrompt('  continue  ')).toBe('continue');
     expect(sanitizePrompt('x'.repeat(30_000))).toHaveLength(24_000);
+  });
+});
+
+describe('chat command claim recovery', () => {
+  it('allows queued commands to be claimed immediately', () => {
+    expect(isClaimableCommand(baseCommand, Date.parse('2026-08-23T00:00:01.000Z'))).toBe(true);
+  });
+
+  it('does not steal a fresh claim from another active bridge', () => {
+    expect(isClaimableCommand({
+      ...baseCommand,
+      status: 'claimed',
+      claimedAt: '2026-08-23T00:01:00.000Z',
+    }, Date.parse('2026-08-23T00:02:00.000Z'))).toBe(false);
+  });
+
+  it('recovers a claim after the bridge has been silent for two minutes', () => {
+    expect(isClaimableCommand({
+      ...baseCommand,
+      status: 'claimed',
+      claimedAt: '2026-08-23T00:01:00.000Z',
+    }, Date.parse('2026-08-23T00:03:01.000Z'))).toBe(true);
+  });
+
+  it('never reclaims terminal commands', () => {
+    expect(isClaimableCommand({ ...baseCommand, status: 'delivered' }, Date.parse('2026-08-23T00:10:00.000Z'))).toBe(false);
+    expect(isClaimableCommand({ ...baseCommand, status: 'failed' }, Date.parse('2026-08-23T00:10:00.000Z'))).toBe(false);
   });
 });
