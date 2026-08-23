@@ -1,108 +1,179 @@
 # GPT-PWA-Superbvisor
 
-スマホから複数のAI開発案件を並行管理するための **ChatGPT-first PWAコックピット** です。
+普段ChatGPTでGitHubリポジトリをつないで行っている開発を、**スマホPWAから複数チャット同時並行で、軽く、止まりにくく操作する**ための Multi Chat Remote / 開発コックピットです。
 
-> **実作業はChatGPT。Cloudflare Workerと外部LLM APIはオーケストレーション専用。**
+> **主役は複数の既存ChatGPT開発チャット。PWAはそれらを束ね、Workerは状態・Queue・CI・復旧を支える。**
 
-WorkerはChatGPTが閉じている間もGitHub branch / CI / 状態を監視し、失敗時の復旧指示を準備できます。ただし外部APIがコード実装やGitHub編集を代行したことにはしません。
+実装・デバッグ・GitHub編集の実行者は、ここで普段使っているChatGPTチャットです。DeepSeek / MiniMax / OpenAI API等の外部LLMは、状態整理・次手生成・復旧補助だけに使います。
 
-## まず使う
+## 目指す体験
 
-最短の初回設定は [`docs/SETUP.md`](docs/SETUP.md) を参照してください。
+通常:
 
-Chat-onlyで使うだけなら、外部LLM APIキー・Cloudflare Worker・GitHub tokenは不要です。
+```text
+Chat Aを開く → 指示 → 待つ
+Chat Bへ移動 → 指示 → 待つ
+Chat Cへ移動 → 指示 → 待つ
+```
 
-1. GitHub Pagesを `Source: GitHub Actions` にする
-2. `Deploy PWA to GitHub Pages` workflowを実行
-3. 公開URLをスマホで開き、ホーム画面へ追加
-4. `＋` から案件を登録
-5. ChatGPT URL / GitHub URL / Goalを入れて使い始める
+AI DEV DECK:
 
-Supervisor / Guardian / Pushは必要になった時だけ追加設定します。
+```text
+PWA
+  ├─ Chat Aへ「続けて」
+  ├─ Chat Bへ「問題点も確認」
+  ├─ Chat Cへ「CI成功まで」
+  └─ Chat DへAutopilot Route
 
-## 設計方針
+        ↓
 
-- **ChatGPT Chat = 実装・デバッグ・レビューの実行主体**
-- **Cloudflare Worker = 外部監督・状態保持・CI監視**
-- **DeepSeek / MiniMax / OpenAI API = 状態分類・要約・次手/復旧指示生成のみ**
-- 外部LLMへGitHub write/delete/merge toolを渡さない
-- Workへは勝手に切り替えない
-- 通常Chatを外部PWAからスクレイピング・自動投稿しない
-- GitHub状態やCIなど、AIの自己申告だけに依存しない情報を重視する
-- recoverableな失敗は終端にせず、原因分類→再試行/復旧指示→再監視へ進める
-- 本人しかできない操作だけ `あなた待ち` として分離する
+複数ChatGPTがそれぞれ進行
+        ↓
+
+PWAで待機 / エラー / あなた待ち / 完了を確認
+```
+
+さらにAutopilotでは、例えば以下のような自然文ルートを指定できます。
+
+> 3回デバッグ。問題があればあと数回デバッグ。大丈夫なら機能Aを追加。その後3回補強、3回デバッグ、最後にUI/UX改善を3回。
+
+途中のCI成功を最終完了と誤認せず、順序・反復・条件分岐を守って指定地点まで進める設計です。
+
+## 第一優先の設計原則
+
+1. **複数ChatGPT開発チャットをPWAから一元操作**
+2. **複数案件を同時並行で扱える**
+3. **スマホで軽く、PWAを閉じても状態・指示Queueを失わない**
+4. GitHub / CI / Pushで外部状態を監視
+5. Supervisorが途中の「続けて」「直して再確認」を代行
+6. Autopilot Routeで複数工程を自動運転
+
+Supervisor / Guardianは製品の主役ではなく、Multi Chat Remoteをより放置可能にするための補助層です。
 
 ## 現在できること
+
+### Multi Chat Control
+
+- 複数Project / ChatGPT URLを登録
+- PWA内の **Chat Control Center** から案件を切り替え
+- 自由文指示を案件ごとに投入
+- Quick Command
+  - そのまま続ける
+  - 問題点も確認
+  - 手動だけまで
+  - Autopilot Route
+- 案件一覧から▶で複数chatへ続行指示を連続投入
+- projectごとの送信Queue / 履歴を表示
+- `queued / claimed / delivered / failed / cancelled` を表示
+
+### Durable Chat Control Bus
+
+ChatGPTへの指示は端末上だけで持たず、WorkerのKVへ保存します。
+
+```text
+PWA
+  ↓
+queued
+  ↓
+ChatGPT Bridgeがclaim
+  ↓
+delivered / failed
+```
+
+- PWAを閉じてもcommandを保持
+- project単位でQueueを分離
+- ChatGPT URL以外への配送を拒否
+- Bridgeがclaim直後に落ちても、stale claimを回収して再配送可能
+
+### ChatGPT Apps Bridge
+
+`chatgpt-bridge/` にChatGPT Apps SDK / MCP companionを実装しています。
+
+```text
+PWA
+  ↓
+Supervisor Worker Queue
+  ↓
+ChatGPT Bridge Widget
+  ↓
+window.openai.sendFollowUpMessage(...)
+  ↓
+そのWidgetが置かれている同じChatGPT会話
+```
+
+- ChatGPT側Widgetから同じ会話へfollow-up message
+- app-only MCP toolでheartbeat / claim / result
+- Worker tokenはMCP serverだけが保持し、Widgetへ渡さない
+- project allowlist必須
+- projectごとのBridge heartbeat
+- 複数案件を独立して接続可能
+
+詳細: [`chatgpt-bridge/README.md`](chatgpt-bridge/README.md)
+
+**現在の重要な制約:** Worker QueueはPWAを閉じても残りますが、ChatGPT側Widgetが完全にunmount/suspendされている間は会話へ注入できません。Bridgeが再びactiveになればQueueから再開します。完全に閉じた任意の既存ChatGPT会話へサーバー側から無条件にメッセージを注入できる、と過大評価はしません。
 
 ### Project cockpit
 
 - モバイル優先PWA
-- 案件ごとのGoal / Definition of Done
-- ChatGPT URL / GitHub URL登録
-- 状態モデル
-  - RUNNING
-  - WAITING_AI
-  - WAITING_USER
-  - STALLED
-  - ERROR
-  - RATE_LIMITED
-  - CONTEXT_LIMIT
-  - COMPLETED
-- 工程・進捗・Activityタイムライン
+- Goal / Definition of Done
+- ChatGPT URL / GitHub URL
+- RUNNING / WAITING_AI / WAITING_USER / STALLED / ERROR / RATE_LIMITED / CONTEXT_LIMIT / COMPLETED
+- 工程・進捗・Activity
 - `あなた待ち` 専用表示
-- 実行者と監督レベルの表示
-
-### Chat-first control
-
-- Quick Reply
-- Smart Reply
-  - DeepSeek / MiniMax / OpenAI provider router
-  - 全provider障害時rule-based fallback
 - Operating Plan
-  - 到達地点
-  - 標準手順
-  - 途中確認で止まらない
-  - テスト・検証
-  - 失敗時復旧
-  - 自己レビュー
-  - 最終報告
-- Plan Execution Router
-  - 💬 ChatGPT
-  - ⚡ Supervisor
-  - 🛡 Guardian
-- Chat再開プロンプト
-- Context Limit時のCheckpoint / Handoff packet
+
+### Autopilot Route
+
+- 自然文の順序・反復・条件分岐を実行契約化
+- 「3回」「問題があれば」「その後」などをrouteとして扱う
+- 完了済み工程を中断後にやり直さない
+- 未完了地点から復旧
+- route途中のCI成功では止めない
+- 全route終了 + `[AUTOPILOT_ROUTE_COMPLETE]` + 最新head CI成功で最終完了判定
 
 ### Supervisor / recovery
 
-- Watchdogによる停止疑い検出
-- 停止・エラー・引き継ぎ推奨をSupervisor Inboxへ保存
-- Inboxから再開プロンプトをコピーしてChatを開く
-- WorkerからChatGPT handoff promptを生成
-- Provider retry / fallback
-- Push通知
+- Smart Reply
+- DeepSeek / MiniMax / OpenAI provider router
+- deterministic fallback
+- Watchdog
+- Supervisor Inbox
+- Context Handoff
+- Push
 - Cloud state sync
 
 ### GitHub Guardian
 
 Guardianは外部AI開発者ではなく、**ChatGPT作業を監督するハーネス**です。
 
-- allowlist repoへ安全な `ai-dev-deck/*` branchを準備
-- ChatGPT用の作業指示を生成
-- ChatGPTのcommitを検出
-- 現在branch head SHAと一致するGitHub Actionsだけ監視
+- allowlist repoに安全な `ai-dev-deck/*` branch
+- ChatGPT用作業指示
+- ChatGPT commit検出
+- exact current head SHAのCIだけを証拠に採用
 - pending → 待機
-- cancelled / timed_out / startup_failure / stale → failed jobs再実行
-- code failure → ChatGPT recovery prompt生成
-- action_required → 人間操作へ安全停止
-- GitHub/API一時エラー → Guardianをfailed終了せず次Cronで再試行
-- CI成功 → Draft PR / review導線
+- transient CI → failed jobs再実行
+- code failure → ChatGPT recovery prompt
+- action_required → あなた待ち
+- 一時GitHub/API障害 → 非終端で再監視
+- CI成功 → Draft PR導線
 - 自動mergeなし
 - production deployなし
 
-### Low-cost orchestration
+## 実行境界
 
-Provider Routerの標準例:
+| 層 | 役割 |
+|---|---|
+| ChatGPT | 実装・デバッグ・レビュー・GitHub編集・検証 |
+| PWA | 複数chat操作・状態表示・route指定 |
+| Chat Control Bus | 指示Queueの永続化・配送状態 |
+| ChatGPT Bridge | Queue commandを同じChatGPT会話へfollow-up送信 |
+| Supervisor | 状態整理・次手生成・completion判断 |
+| Guardian | branch / CI監視・retry・recovery |
+| DeepSeek / MiniMax / OpenAI API | 安価な分類・要約・次手/復旧生成のみ |
+
+外部LLMへGitHub write/delete/merge toolは渡しません。
+
+## Low-cost orchestration
 
 ```text
 DeepSeek V4 Flash
@@ -114,73 +185,49 @@ OpenAI fallback
 Deterministic ChatGPT handoff
 ```
 
-モデルはvarsで差し替え可能です。全providerが利用不能でも、監督UIと安全なChatGPT引き継ぎは維持します。
-
-### Setup / delivery
-
-- Setup Doctor
-  - HTTPS
-  - Service Worker
-  - PWA起動
-  - 通知権限
-  - Push購読
-  - Supervisor Worker接続
-  - GitHub Guardian設定
-- GitHub Pages自動deploy workflow
-- Pagesが未設定またはSourceがGitHub Actionsでない時はdeployだけskip
-
-## 実行 / 監督モード
-
-| ルート | 実際の作業者 | 外部APIの役割 | 端末を閉じた時 |
-|---|---|---|---|
-| 💬 ChatGPT | ChatGPT | なし | ChatGPT側仕様による |
-| ⚡ Supervisor | ChatGPT | 状態整理・次手生成・通知 | 指示/状態を保持できる |
-| 🛡 Guardian | ChatGPT | branch/CI監視・失敗分類・復旧指示 | Worker監督は継続 |
-| 🟣 Work | ChatGPT Work | Work側仕様 | Work側仕様による |
-
-重要: Supervisor / Guardianが端末非依存で継続するのは**監督処理**です。WorkerがChatGPTの会話を勝手に送信・継続するものではありません。
+全providerが利用不能でも、Queue・監督状態・安全なhandoffは残します。
 
 ## 失敗時の考え方
 
 ```text
 Provider error
-  → retry
-  → provider fallback
-  → deterministic fallback
+  → retry / fallback
+
+Bridge crash after claim
+  → stale claim recovery
+  → next active bridgeが再claim
 
 CI transient failure
   → rerun failed jobs
   → re-check
 
 CI code failure
-  → evidenceを整理
-  → ChatGPT recovery prompt
-  → ChatGPTが修正
-  → new headを再監視
+  → evidence整理
+  → ChatGPT recovery command
+  → ChatGPT修正
+  → new head再監視
 
 human-required
   → safe stop + notification
 ```
 
-「失敗したので終了」ではなく、**失敗を次の状態として扱う**設計です。
+**失敗は終了ではなく状態**として扱います。
 
 ## 初回設定
 
 - PWA: [`docs/SETUP.md`](docs/SETUP.md)
 - Supervisor Worker: [`worker/README.md`](worker/README.md)
+- ChatGPT Bridge: [`chatgpt-bridge/README.md`](chatgpt-bridge/README.md)
 - Guardian: [`worker/GUARDIAN_RUNNER.md`](worker/GUARDIAN_RUNNER.md)
-- アーキテクチャ: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## ローカル開発
+
+PWA:
 
 ```bash
 npm install
 npm run dev
-```
-
-ビルド:
-
-```bash
 npm run build
 ```
 
@@ -189,18 +236,36 @@ Worker:
 ```bash
 cd worker
 npm install
-npm run check
+npm run typecheck
+npm test
 ```
+
+ChatGPT Bridge:
+
+```bash
+cd chatgpt-bridge
+npm install
+npm run typecheck
+npm start
+```
+
+CIでは3系統を検証します。
+
+- app build
+- worker typecheck + regression tests
+- ChatGPT bridge typecheck
 
 ## セキュリティ
 
-- LLM APIキーをPWAへ保存しない
+- LLM API keyをPWAへ保存しない
 - GitHub tokenをPWAへ保存しない
-- Worker secretsはCloudflare側で管理
-- 通常ChatGPTへの外部自動投稿はしない
+- Supervisor Worker tokenをChatGPT Widgetへ渡さない
+- ChatGPT cookie/session tokenを取得・保存しない
+- 非公式スクレイピングや認証回避を前提にしない
+- Bridge project allowlistをfail-closedにする
 - 外部LLMにGitHub write/delete/merge権限を与えない
 - main/default branchへWorkerからコードwriteしない
-- GitHubリンクは安全なhostだけ開く
 - 自動merge / production deployなし
 - CI未確認を成功扱いしない
-- Provider/Push/GitHub一時障害を可能な限り非終端状態として扱う
+
+より詳しい設計判断は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照してください。
