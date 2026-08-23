@@ -2,6 +2,13 @@ import { generateSmartReplies, SmartReplyRequest } from './smartReplies';
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import { buildGenericChatGptHandoff } from './orchestratorPolicy';
 import {
+  claimNextChatCommand,
+  enqueueChatCommand,
+  getChatCommand,
+  listProjectChatCommands,
+  updateChatCommandResult,
+} from './chatCommandQueue';
+import {
   getVapidPublicKey,
   registerPushSubscription,
   sendSupervisorPush,
@@ -88,6 +95,7 @@ export default {
         service: 'gpt-pwa-supervisor-worker',
         executor: 'chatgpt',
         orchestrationOnly: true,
+        chatCommandBus: true,
       }, 200, env, request);
     }
 
@@ -105,6 +113,31 @@ export default {
 
     if (url.pathname === '/api/smart-replies' && request.method === 'POST') {
       return createSmartReplies(request, env);
+    }
+
+    if (url.pathname === '/api/chat-commands' && request.method === 'POST') {
+      return createChatCommand(request, env);
+    }
+
+    if (url.pathname === '/api/chat-commands/claim' && request.method === 'POST') {
+      return claimChatCommand(request, env);
+    }
+
+    const chatCommandMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)$/);
+    if (chatCommandMatch && request.method === 'GET') {
+      const command = await getChatCommand(env, decodeURIComponent(chatCommandMatch[1]));
+      return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+    }
+
+    const chatCommandResultMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)\/result$/);
+    if (chatCommandResultMatch && request.method === 'POST') {
+      return reportChatCommandResult(decodeURIComponent(chatCommandResultMatch[1]), request, env);
+    }
+
+    const projectCommandsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/chat-commands$/);
+    if (projectCommandsMatch && request.method === 'GET') {
+      const commands = await listProjectChatCommands(env, decodeURIComponent(projectCommandsMatch[1]), 40);
+      return json({ commands }, 200, env, request);
     }
 
     if (url.pathname === '/api/push/public-key' && request.method === 'GET') {
@@ -160,6 +193,37 @@ async function createSmartReplies(request: Request, env: Env): Promise<Response>
   const result = await generateSmartReplies(body, env);
   if (!result.ok) return json({ error: result.error }, result.status, env, request);
   return json(result, 200, env, request);
+}
+
+async function createChatCommand(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectId?: string; projectName?: string; chatUrl?: string; prompt?: string }>(request);
+  try {
+    const command = await enqueueChatCommand(env, {
+      projectId: body?.projectId || '',
+      projectName: body?.projectName,
+      chatUrl: body?.chatUrl || '',
+      prompt: body?.prompt || '',
+    });
+    return json({ command, transport: 'waiting_bridge' }, 202, env, request);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : 'invalid_chat_command' }, 400, env, request);
+  }
+}
+
+async function claimChatCommand(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ bridgeId?: string; projectId?: string }>(request);
+  if (!body?.bridgeId?.trim()) return json({ error: 'bridgeId is required' }, 400, env, request);
+  const command = await claimNextChatCommand(env, body.bridgeId, body.projectId?.trim() || undefined);
+  return json({ command }, 200, env, request);
+}
+
+async function reportChatCommandResult(id: string, request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ status?: 'delivered' | 'failed' | 'cancelled'; detail?: string }>(request);
+  if (!body?.status || !['delivered', 'failed', 'cancelled'].includes(body.status)) {
+    return json({ error: 'status must be delivered, failed or cancelled' }, 400, env, request);
+  }
+  const command = await updateChatCommandResult(env, id, { status: body.status, detail: body.detail });
+  return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
 }
 
 async function createOrchestrationJob(request: Request, env: Env): Promise<Response> {
