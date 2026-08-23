@@ -43,7 +43,7 @@ export default function ChatControlCenter() {
       try {
         const [commandResult, bridgeResult] = await Promise.all([
           listProjectChatCommands(selected.id),
-          getChatBridgeStatus(),
+          getChatBridgeStatus(selected.id),
         ]);
         if (!cancelled) {
           setCommands(commandResult.commands);
@@ -76,7 +76,7 @@ export default function ChatControlCenter() {
     if (!project) return;
     const [commandResult, bridgeResult] = await Promise.all([
       listProjectChatCommands(project.id),
-      getChatBridgeStatus(),
+      getChatBridgeStatus(project.id),
     ]);
     setCommands(commandResult.commands);
     setBridge(bridgeResult);
@@ -90,9 +90,9 @@ export default function ChatControlCenter() {
     try {
       await enqueueProjectChatCommand(project, text);
       if (project.id === selected?.id) await refreshCommands(project);
-      setMessage(bridge.connected
+      setMessage(bridge.connected && bridge.projectId === project.id
         ? `${project.name} の送信キューへ追加しました。接続中Bridgeが取得して対象ChatGPTへ配送します。`
-        : `${project.name} の送信キューへ追加しました。PWAを閉じてもWorker側に残り、Bridge接続後に配送できます。`);
+        : `${project.name} の送信キューへ追加しました。PWAを閉じてもWorker側に残り、この案件のBridge接続後に配送できます。`);
       if (source === 'free') setPrompt('');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'ChatGPT指示をキューへ追加できませんでした。');
@@ -132,14 +132,14 @@ export default function ChatControlCenter() {
             <header className="chat-control-header">
               <div><p className="eyebrow">MULTI CHAT REMOTE</p><h2>Chat Control</h2></div>
               <div className="chat-control-header-actions">
-                <span className={`bridge-live ${bridge.connected ? 'connected' : 'offline'}`}>{bridge.connected ? '● Bridge接続中' : '○ Bridge待ち'}</span>
+                <span className={`bridge-live ${bridge.connected ? 'connected' : 'offline'}`}>{bridge.connected ? '● このChatGPTに接続中' : '○ このChatGPTはBridge待ち'}</span>
                 <button className="icon-button" onClick={() => setOpen(false)}>×</button>
               </div>
             </header>
 
             <div className="chat-control-note">
               <b>複数の開発ChatGPTを、このPWAからまとめて動かす。</b>
-              <span>指示はWorkerへ永続キュー保存。ChatGPT側Bridgeが接続されると、PWAを離れず各既存チャットへ配送できる設計です。</span>
+              <span>指示はWorkerへ永続キュー保存。案件ごとのChatGPT Bridgeが接続されると、PWAを離れずその既存チャットへ配送します。</span>
               {bridge.lastSeenAt && <small>Bridge: {bridge.bridgeId || 'unknown'} ・ 最終heartbeat {new Date(bridge.lastSeenAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small>}
             </div>
 
@@ -150,7 +150,7 @@ export default function ChatControlCenter() {
                 <aside className="chat-project-rail">
                   {projects.map((project) => (
                     <div className={`chat-project-row ${project.id === selected?.id ? 'active' : ''}`} key={project.id}>
-                      <button className="chat-project-select" onClick={() => { setSelectedId(project.id); setCommands([]); setMessage(''); }}>
+                      <button className="chat-project-select" onClick={() => { setSelectedId(project.id); setCommands([]); setBridge({ connected: false, capabilities: [] }); setMessage(''); }}>
                         <span className={`chat-project-dot ${project.status.toLowerCase()}`} />
                         <span><b>{project.name}</b><small>{project.currentPhase}</small></span>
                       </button>
