@@ -12,6 +12,7 @@ import {
   updateChatCommandResult,
 } from './chatCommandQueue';
 import { getChatBridgeStatus, recordChatBridgeHeartbeat } from './chatBridge';
+import { getChatControlOverview } from './chatControlOverview';
 import {
   getVapidPublicKey,
   registerPushSubscription,
@@ -85,6 +86,7 @@ interface StoredJob {
 }
 
 const JOB_TTL_SECONDS = 60 * 60 * 24 * 14;
+const MAX_OVERVIEW_PROJECTS = 30;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -128,6 +130,10 @@ export default {
 
     if (url.pathname === '/api/chat-commands/claim' && request.method === 'POST') {
       return claimChatCommand(request, env);
+    }
+
+    if (url.pathname === '/api/chat-control/overview' && request.method === 'POST') {
+      return createChatControlOverview(request, env);
     }
 
     if (url.pathname === '/api/chat-bridge/status' && request.method === 'GET') {
@@ -229,6 +235,21 @@ async function createSmartReplies(request: Request, env: Env): Promise<Response>
   const result = await generateSmartReplies(body, env);
   if (!result.ok) return json({ error: result.error }, result.status, env, request);
   return json(result, 200, env, request);
+}
+
+async function createChatControlOverview(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectIds?: unknown }>(request);
+  if (!Array.isArray(body?.projectIds)) return json({ error: 'projectIds must be an array' }, 400, env, request);
+  const projectIds = [...new Set(body.projectIds
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim().slice(0, 200))
+    .filter(Boolean))];
+  if (projectIds.length > MAX_OVERVIEW_PROJECTS) {
+    return json({ error: `projectIds must contain at most ${MAX_OVERVIEW_PROJECTS} unique projects` }, 400, env, request);
+  }
+  if (!projectIds.length) return json({ projects: [] }, 200, env, request);
+  const projects = await getChatControlOverview(env, projectIds);
+  return json({ projects }, 200, env, request);
 }
 
 async function createChatCommand(request: Request, env: Env): Promise<Response> {
