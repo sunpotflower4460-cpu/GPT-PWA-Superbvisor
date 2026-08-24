@@ -13,9 +13,21 @@ function createAtomicMigrationHarness() {
       get: async <T>(key: string) => coordinatorValues.get(key) as T | undefined,
       put: async (key: string, value: unknown) => { coordinatorValues.set(key, value); },
       delete: async (key: string) => coordinatorValues.delete(key),
-      list: async <T>({ prefix = '' }: { prefix?: string } = {}) => new Map(
-        [...coordinatorValues.entries()].filter(([key]) => key.startsWith(prefix)) as Array<[string, T]>,
-      ),
+      list: async <T>({
+        prefix = '',
+        limit = Number.POSITIVE_INFINITY,
+        startAfter,
+      }: {
+        prefix?: string;
+        limit?: number;
+        startAfter?: string;
+      } = {}) => {
+        const matching = [...coordinatorValues.entries()]
+          .filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter))
+          .sort(([a], [b]) => a.localeCompare(b))
+          .slice(0, limit) as Array<[string, T]>;
+        return new Map(matching);
+      },
     },
     blockConcurrencyWhile: <T>(callback: () => Promise<T>) => {
       const run = tail.then(callback, callback);
