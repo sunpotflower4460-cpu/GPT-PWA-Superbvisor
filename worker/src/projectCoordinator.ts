@@ -111,7 +111,10 @@ export class ProjectCoordinator {
         const existingId = await this.state.storage.get<string>(dedupeKey(body.dedupeKey));
         if (existingId) {
           const existing = await this.state.storage.get<CoordinatorChatCommand>(`${COMMAND_PREFIX}${existingId}`);
-          if (existing) return json({ command: existing });
+          if (existing) {
+            if (!sameCommandPayload(existing, body)) return json({ error: 'dedupe_payload_mismatch' }, 409);
+            return json({ command: existing });
+          }
         }
       }
 
@@ -503,6 +506,15 @@ function commandActivity(command: CoordinatorChatCommand): CoordinatorCommandAct
     deliveryFailures: command.deliveryFailures,
     nextAttemptAt: command.nextAttemptAt,
   };
+}
+
+function sameCommandPayload(
+  command: CoordinatorChatCommand,
+  input: { projectId?: string; chatUrl?: string; prompt?: string },
+) {
+  return command.projectId === input.projectId
+    && command.chatUrl === input.chatUrl
+    && command.prompt === input.prompt;
 }
 
 function isStoredCommand(value: unknown): value is CoordinatorChatCommand {
