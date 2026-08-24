@@ -259,13 +259,14 @@ async function createChatControlOverview(request: Request, env: Env): Promise<Re
 }
 
 async function createChatCommand(request: Request, env: Env): Promise<Response> {
-  const body = await readJson<{ projectId?: string; projectName?: string; chatUrl?: string; prompt?: string }>(request);
+  const body = await readJson<{ projectId?: string; projectName?: string; chatUrl?: string; prompt?: string; dedupeKey?: string }>(request);
   try {
     const command = await enqueueChatCommand(env, {
       projectId: body?.projectId || '',
       projectName: body?.projectName,
       chatUrl: body?.chatUrl || '',
       prompt: body?.prompt || '',
+      dedupeKey: body?.dedupeKey,
     });
     return json({ command, transport: 'waiting_bridge' }, 202, env, request);
   } catch (error) {
