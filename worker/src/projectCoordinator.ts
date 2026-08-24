@@ -61,12 +61,13 @@ export interface AtomicCoordinatorEnv {
 const COMMAND_PREFIX = 'command:';
 const DEDUPE_PREFIX = 'dedupe:';
 const LEASE_PREFIX = 'lease:';
-const COMMANDS_MIGRATED_KEY = 'meta:commands-migrated-v1';
+const COMMANDS_MIGRATED_KEY = 'meta:commands-migrated-v2';
 const STATE_KEY = 'client-state:v1';
 const STATE_MIGRATED_KEY = 'meta:state-migrated-v1';
 const COMMAND_RETENTION_MS = 14 * 24 * 60 * 60_000;
 const CLAIM_STALE_MS = 2 * 60_000;
 const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
+const COMMAND_IMPORT_BATCH_SIZE = 20;
 const MIN_LEASE_MS = 5_000;
 const MAX_LEASE_MS = 10 * 60_000;
 
@@ -81,19 +82,43 @@ export class ProjectCoordinator {
     const url = new URL(request.url);
 
     if (url.pathname === '/commands/import' && request.method === 'POST') {
-      const body = await readJson<{ commands?: CoordinatorChatCommand[] }>(request);
+      const body = await readJson<{ commands?: CoordinatorChatCommand[]; finalize?: boolean }>(request);
+      if (!body) return json({ error: 'invalid_command_import' }, 400);
+
       const migrated = await this.state.storage.get<boolean>(COMMANDS_MIGRATED_KEY);
-      if (!migrated) {
-        const commands = Array.isArray(body?.commands) ? body.commands.slice(0, 500) : [];
-        for (const command of commands) {
-          if (!isStoredCommand(command) || isExpiredCommand(command)) continue;
-          const key = `${COMMAND_PREFIX}${command.id}`;
-          if (!await this.state.storage.get(key)) await this.state.storage.put(key, command);
-          if (command.dedupeKey) await this.state.storage.put(dedupeKey(command.dedupeKey), command.id);
-        }
-        await this.state.storage.put(COMMANDS_MIGRATED_KEY, true);
+      if (migrated) return json({ ok: true, migrated: true, imported: 0 });
+
+      const commands = Array.isArray(body.commands) ? body.commands : [];
+      if (commands.length > COMMAND_IMPORT_BATCH_SIZE) {
+        return json({ error: 'command_import_batch_too_large', maxBatchSize: COMMAND_IMPORT_BATCH_SIZE }, 413);
       }
-      return json({ ok: true });
+
+      let imported = 0;
+      for (const command of commands) {
+        if (!isStoredCommand(command) || isExpiredCommand(command)) continue;
+        const key = `${COMMAND_PREFIX}${command.id}`;
+        const existing = await this.state.storage.get<CoordinatorChatCommand>(key);
+        if (!existing) {
+          await this.state.storage.put(key, command);
+          imported += 1;
+        }
+
+        if (!command.dedupeKey) continue;
+        const indexKey = dedupeKey(command.dedupeKey);
+        const indexedCommandId = await this.state.storage.get<string>(indexKey);
+        if (!indexedCommandId || indexedCommandId === command.id) {
+          await this.state.storage.put(indexKey, command.id);
+          continue;
+        }
+
+        const indexedCommand = await this.state.storage.get<CoordinatorChatCommand>(`${COMMAND_PREFIX}${indexedCommandId}`);
+        if (!indexedCommand || indexedCommand.createdAt < command.createdAt) {
+          await this.state.storage.put(indexKey, command.id);
+        }
+      }
+
+      if (body.finalize === true) await this.state.storage.put(COMMANDS_MIGRATED_KEY, true);
+      return json({ ok: true, migrated: body.finalize === true, imported });
     }
 
     if (url.pathname === '/commands/enqueue' && request.method === 'POST') {
