@@ -27,10 +27,14 @@ const baseCommand: ChatCommand = {
 
 function fakeEnv() {
   const store = new Map<string, string>();
+  const ttlByKey = new Map<string, number | undefined>();
   const env = {
     SUPERVISOR_STATE: {
       get: async (key: string) => store.get(key) ?? null,
-      put: async (key: string, value: string) => { store.set(key, value); },
+      put: async (key: string, value: string, options?: { expirationTtl?: number }) => {
+        store.set(key, value);
+        ttlByKey.set(key, options?.expirationTtl);
+      },
       delete: async (key: string) => { store.delete(key); },
       list: async ({
         prefix = '',
@@ -55,7 +59,7 @@ function fakeEnv() {
       },
     },
   } as unknown as ChatCommandEnv;
-  return { env, store };
+  return { env, store, ttlByKey };
 }
 
 describe('chat command validation', () => {
@@ -246,6 +250,33 @@ describe('chat command delivery recovery', () => {
     expect(exhausted.status).toBe('failed');
     expect(exhausted.deliveryFailures).toBe(3);
     expect(exhausted.nextAttemptAt).toBeUndefined();
+  });
+
+  it('does not extend the original 14-day KV retention window when an old command is updated', async () => {
+    const { env, store, ttlByKey } = fakeEnv();
+    const createdAt = new Date(Date.now() - (13 * 24 * 60 * 60_000)).toISOString();
+    const claimed: ChatCommand = {
+      ...baseCommand,
+      id: 'old-claimed-command',
+      status: 'claimed',
+      bridgeId: 'bridge-a',
+      claimedAt: new Date().toISOString(),
+      createdAt,
+      updatedAt: createdAt,
+    };
+    store.set(`chat-command:${claimed.id}`, JSON.stringify(claimed));
+
+    const delivered = await updateChatCommandResult(env, claimed.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'delivered',
+    });
+    expect(delivered?.status).toBe('delivered');
+
+    const ttl = ttlByKey.get(`chat-command:${claimed.id}`);
+    expect(ttl).toBeDefined();
+    expect(ttl).toBeGreaterThanOrEqual(60);
+    expect(ttl).toBeLessThanOrEqual((24 * 60 * 60) + 5);
   });
 
   it('rejects a result from a bridge that no longer owns the claim', async () => {
