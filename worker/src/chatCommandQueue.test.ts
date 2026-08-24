@@ -152,6 +152,26 @@ describe('chat command claim recovery', () => {
     expect(isClaimableCommand({ ...baseCommand, status: 'delivered' }, Date.parse('2026-08-23T00:10:00.000Z'))).toBe(false);
     expect(isClaimableCommand({ ...baseCommand, status: 'failed' }, Date.parse('2026-08-23T00:10:00.000Z'))).toBe(false);
   });
+
+  it('returns the same fresh KV claim to the same bridge after a lost response', async () => {
+    const { env } = fakeEnv();
+    const first = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'first',
+    });
+    const second = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'second',
+    });
+
+    const firstClaim = await claimNextChatCommand(env, 'bridge-a', 'project-1');
+    const repeatedClaim = await claimNextChatCommand(env, 'bridge-a', 'project-1');
+    expect(firstClaim?.id).toBe(first.id);
+    expect(repeatedClaim?.id).toBe(first.id);
+    expect(first.id).not.toBe(second.id);
+  });
 });
 
 describe('chat command delivery recovery', () => {
@@ -191,6 +211,38 @@ describe('chat command delivery recovery', () => {
       bridgeId: 'bridge-b',
       status: 'delivered',
     })).rejects.toBeInstanceOf(ChatCommandConflictError);
+  });
+
+  it('keeps terminal KV result retries idempotent only for the original claim owner', async () => {
+    const { env } = fakeEnv();
+    const queued = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue',
+    });
+    await claimNextChatCommand(env, 'bridge-a', 'project-1');
+    const delivered = await updateChatCommandResult(env, queued.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'delivered',
+    });
+    expect(delivered?.status).toBe('delivered');
+
+    const ownerRetry = await updateChatCommandResult(env, queued.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'delivered',
+    });
+    expect(ownerRetry?.status).toBe('delivered');
+
+    await expect(updateChatCommandResult(env, queued.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-b',
+      status: 'delivered',
+    })).rejects.toMatchObject({
+      name: 'ChatCommandConflictError',
+      code: 'claim_owner_mismatch',
+    });
   });
 
   it('cancels queued work before a manual fallback so it cannot be claimed later', async () => {
