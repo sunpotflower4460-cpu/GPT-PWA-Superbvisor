@@ -171,18 +171,25 @@ const chatControlClient = containsAll('src/chatControl.ts', [
   '/cancel',
   'WORKER_REQUEST_TIMEOUT_MS = 12_000',
   'IDEMPOTENT_TRANSPORT_ATTEMPTS = 2',
+  'PENDING_DEDUPE_TTL_MS = 30 * 60_000',
+  'PENDING_DEDUPE_PREFIX',
   'WorkerRequestError',
   'AbortController',
   'retryIdempotentTransport',
+  'getOrCreatePendingCommandDedupe',
+  'clearPendingCommandDedupe',
   'createClientCommandDedupeKey',
   'dedupeKey',
+  'localStorage',
 ]);
 assert(!chatControlClient.includes('unique.slice(0, 30)'), 'chat control: projects beyond the first batch are not silently dropped');
 assert(chatControlClient.includes("result.status === 'fulfilled'"), 'chat control: one failed overview batch does not discard successful batches');
-assert(/enqueueProjectChatCommand[\s\S]{0,900}const dedupeKey = createClientCommandDedupeKey[\s\S]{0,900}retryIdempotentTransport/.test(chatControlClient), 'chat control: PWA enqueue retries reuse one per-action dedupe key');
+assert(/enqueueProjectChatCommand[\s\S]{0,900}const pending = getOrCreatePendingCommandDedupe[\s\S]{0,1200}dedupeKey: pending\.dedupeKey/.test(chatControlClient), 'chat control: PWA enqueue reuses a persisted pending dedupe identity while transport result is ambiguous');
+assert(/enqueueProjectChatCommand[\s\S]{0,1700}clearPendingCommandDedupe\(pending\)[\s\S]{0,500}error\.retryable/.test(chatControlClient), 'chat control: pending enqueue identity is cleared on success/definite rejection but retained after ambiguous transport failure');
 assert(/cancelProjectChatCommand[\s\S]{0,700}retryIdempotentTransport/.test(chatControlClient), 'chat control: idempotent cancel can recover from lost transport responses');
 assert(/retryProjectChatCommand[\s\S]{0,700}return workerFetch/.test(chatControlClient), 'chat control: non-idempotent failed-command retry is not blindly transport-retried');
 assert(/setTimeout\([\s\S]{0,220}controller\.abort\(\)[\s\S]{0,120}WORKER_REQUEST_TIMEOUT_MS/.test(chatControlClient), 'chat control: stalled mobile Worker requests have a bounded timeout');
+assert(/response\.json\(\)[\s\S]{0,500}応答本文が12秒以内に完了しませんでした/.test(chatControlClient), 'chat control: a stalled response body is not mistaken for a successful empty JSON response');
 
 const operatingPlan = containsAll('src/OperatingPlanCenter.tsx', [
   'enqueueProjectChatCommand',
