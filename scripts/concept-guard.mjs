@@ -307,10 +307,18 @@ const bridge = containsAll('chatgpt-bridge/src/bridgeApp.ts', [
   'ai_dev_deck_bridge_retry',
   'delivery-receipt',
   'AI DEV DECK COMMAND ID',
+  'cachedBridgeProjectId',
+  'cachedBridgeId',
+  "document.addEventListener('visibilitychange'",
+  "window.addEventListener('online'",
+  "window.addEventListener('pageshow'",
 ]);
 assert(/allowedProjectIds/.test(bridge), 'bridge: project allowlist remains part of runtime boundary');
 assert(bridge.includes('saveReceipt'), 'bridge: successful ChatGPT sends persist a delivery receipt before ack sync');
 assert(bridge.includes('flushReceipt'), 'bridge: ack recovery is attempted before claiming another command');
+assert(/catch \{[\s\S]{0,200}cachedBridgeId = createBridgeId\(pid\)/.test(bridge), 'bridge: storage failure keeps one stable in-memory claim owner instead of generating a new id per call');
+assert(/visibilityState === 'visible'[\s\S]{0,120}tick\(false\)/.test(bridge), 'bridge: foreground resume immediately re-enters polling without bypassing command cooldown');
+assert(/addEventListener\('online'[\s\S]{0,100}tick\(false\)/.test(bridge), 'bridge: network recovery immediately re-enters polling');
 
 for (const configFile of ['worker/wrangler.example.jsonc', 'worker/wrangler.ci.jsonc']) {
   const config = containsAll(configFile, [
