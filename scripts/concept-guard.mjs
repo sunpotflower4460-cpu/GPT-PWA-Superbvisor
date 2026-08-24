@@ -135,9 +135,16 @@ const chatControlUi = containsAll('src/ChatControlCenter.tsx', [
   'OVERVIEW_ERROR',
   'cancelProjectChatCommand',
   '自動Queueを止めて手動送信',
+  "document.addEventListener('visibilitychange'",
+  "window.addEventListener('online'",
+  "window.addEventListener('focus'",
 ]);
 assert(chatControlUi.includes('chatProjectActivityLabel'), 'chat control: every project can surface live remote activity in the rail');
 assert(chatControlUi.includes('Object.fromEntries'), 'chat control: batch overview is mapped across all visible projects');
+assert((chatControlUi.match(/let refreshing = false;/g) ?? []).length >= 2, 'chat control: selected-detail and all-chat polling prevent overlapping refresh races');
+assert((chatControlUi.match(/visibilitychange/g) ?? []).length >= 4, 'chat control: both polling layers subscribe and unsubscribe foreground wake refresh');
+assert((chatControlUi.match(/addEventListener\('online'/g) ?? []).length >= 2, 'chat control: both polling layers refresh immediately after network recovery');
+assert((chatControlUi.match(/addEventListener\('focus'/g) ?? []).length >= 2, 'chat control: both polling layers refresh immediately when the PWA regains focus');
 assert(
   /manualFallback[\s\S]{0,2000}window\.open\('about:blank'[\s\S]{0,2200}navigator\.clipboard\.writeText\(command\.prompt\)[\s\S]{0,2200}cancelProjectChatCommand[\s\S]{0,1800}popup\.location\.replace/.test(chatControlUi),
   'chat control: manual fallback reserves a tab, copies the prompt, cancels the durable command, then navigates to ChatGPT',
