@@ -177,6 +177,7 @@ describe('chat command claim recovery', () => {
       chatUrl: 'https://chatgpt.com/c/abc123',
       prompt: 'first',
     });
+    await new Promise((resolve) => setTimeout(resolve, 2));
     const second = await enqueueChatCommand(env, {
       projectId: 'project-1',
       chatUrl: 'https://chatgpt.com/c/abc123',
