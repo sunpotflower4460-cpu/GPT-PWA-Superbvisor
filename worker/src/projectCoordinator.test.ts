@@ -96,6 +96,28 @@ describe('ProjectCoordinator command atomicity', () => {
     expect(claimed).toHaveLength(1);
   });
 
+  it('returns the same fresh claim to the same bridge after a lost claim response', async () => {
+    const coordinator = createCoordinator();
+    const firstQueued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'first',
+    });
+    const secondQueued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'second',
+    });
+    const firstId = (await firstQueued.json() as { command: { id: string } }).command.id;
+    const secondId = (await secondQueued.json() as { command: { id: string } }).command.id;
+
+    const firstClaim = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    const repeatedClaim = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    expect((await firstClaim.json() as { command: { id: string } }).command.id).toBe(firstId);
+    expect((await repeatedClaim.json() as { command: { id: string } }).command.id).toBe(firstId);
+    expect(firstId).not.toBe(secondId);
+  });
+
   it('rejects a delivery result from a bridge that does not own the claim', async () => {
     const coordinator = createCoordinator();
     const queued = await post(coordinator, '/commands/enqueue', {
@@ -113,6 +135,41 @@ describe('ProjectCoordinator command atomicity', () => {
     });
     expect(response.status).toBe(409);
     expect((await response.json() as { error: string }).error).toBe('claim_owner_mismatch');
+  });
+
+  it('keeps terminal result retries idempotent only for the original claim owner', async () => {
+    const coordinator = createCoordinator();
+    const queued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue',
+    });
+    const id = (await queued.json() as { command: { id: string } }).command.id;
+    await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    const delivered = await post(coordinator, '/commands/result', {
+      id,
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'delivered',
+    });
+    expect(delivered.status).toBe(200);
+
+    const ownerRetry = await post(coordinator, '/commands/result', {
+      id,
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'delivered',
+    });
+    expect(ownerRetry.status).toBe(200);
+
+    const nonOwnerRetry = await post(coordinator, '/commands/result', {
+      id,
+      projectId: 'project-1',
+      bridgeId: 'bridge-b',
+      status: 'delivered',
+    });
+    expect(nonOwnerRetry.status).toBe(409);
+    expect((await nonOwnerRetry.json() as { error: string }).error).toBe('claim_owner_mismatch');
   });
 
   it('releases bridge ownership when a failed delivery is queued for retry', async () => {
