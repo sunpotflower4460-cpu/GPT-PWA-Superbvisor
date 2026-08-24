@@ -27,6 +27,8 @@ export class ChatCommandConflictError extends Error {
   }
 }
 
+export const INVALID_CHAT_COMMAND_ERROR = 'projectId, valid ChatGPT chatUrl and prompt are required';
+
 const COMMAND_TTL = 60 * 60 * 24 * 14;
 const COMMAND_PREFIX = 'chat-command:';
 const PROJECT_PREFIX = 'chat-project:';
@@ -64,7 +66,7 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
   const chatUrl = normalizeChatUrl(input.chatUrl);
   const prompt = sanitizePrompt(input.prompt);
   const dedupeKey = input.dedupeKey?.trim().slice(0, 200) || undefined;
-  if (!projectId || !chatUrl || !prompt) throw new Error('projectId, valid ChatGPT chatUrl and prompt are required');
+  if (!projectId || !chatUrl || !prompt) throw new Error(INVALID_CHAT_COMMAND_ERROR);
 
   if (hasAtomicCoordinator(env)) {
     await ensureCoordinatorCommandsMigrated(env, projectId);
@@ -78,6 +80,9 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
         dedupeKey,
       }),
     });
+    if (result.status === 409) {
+      throw new ChatCommandConflictError(result.data.error || 'chat_command_conflict', result.data.error || 'chat_command_conflict');
+    }
     if (!result.ok || !result.data.command) throw new Error(result.data.error || `atomic_enqueue_failed_${result.status}`);
     await mirrorCommand(env, result.data.command);
     return result.data.command;
@@ -313,7 +318,12 @@ async function enqueueChatCommandKv(env: ChatCommandEnv, input: {
     const existingId = await env.SUPERVISOR_STATE.get(dedupeStorageKey(input.projectId, input.dedupeKey));
     if (existingId) {
       const existing = await getChatCommand(env, existingId);
-      if (existing) return existing;
+      if (existing) {
+        if (!sameCommandPayload(existing, input)) {
+          throw new ChatCommandConflictError('dedupe_payload_mismatch', 'dedupe_payload_mismatch');
+        }
+        return existing;
+      }
     }
   }
 
@@ -377,6 +387,15 @@ async function saveCommand(env: ChatCommandEnv, command: ChatCommand) {
 async function rememberProjectCommand(env: ChatCommandEnv, command: ChatCommand) {
   const sortable = command.createdAt.replace(/[^0-9]/g, '').slice(0, 17);
   await env.SUPERVISOR_STATE.put(`${PROJECT_PREFIX}${command.projectId}:${sortable}:${command.id}`, command.id, { expirationTtl: COMMAND_TTL });
+}
+
+function sameCommandPayload(
+  command: ChatCommand,
+  input: { projectId: string; chatUrl: string; prompt: string },
+) {
+  return command.projectId === input.projectId
+    && command.chatUrl === input.chatUrl
+    && command.prompt === input.prompt;
 }
 
 function chatScope(projectId: string) {
