@@ -88,6 +88,7 @@ interface StoredJob {
 
 const JOB_TTL_SECONDS = 60 * 60 * 24 * 14;
 const MAX_OVERVIEW_PROJECTS = 30;
+const INVALID_CHAT_COMMAND_ERROR = 'projectId, valid ChatGPT chatUrl and prompt are required';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -270,7 +271,8 @@ async function createChatCommand(request: Request, env: Env): Promise<Response> 
     });
     return json({ command, transport: 'waiting_bridge' }, 202, env, request);
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : 'invalid_chat_command' }, 400, env, request);
+    const message = error instanceof Error ? error.message : 'chat_command_enqueue_failed';
+    return json({ error: message }, message === INVALID_CHAT_COMMAND_ERROR ? 400 : 503, env, request);
   }
 }
 
