@@ -224,6 +224,7 @@ const workerIndex = containsAll('worker/src/index.ts', [
   'chatCommandBus: true',
   'atomicCoordinator: Boolean(env.PROJECT_COORDINATOR)',
   'ChatCommandConflictError',
+  'INVALID_CHAT_COMMAND_ERROR',
   '/api/chat-control/overview',
   'MAX_OVERVIEW_PROJECTS = 30',
   '/cancel',
@@ -233,10 +234,14 @@ const workerIndex = containsAll('worker/src/index.ts', [
 ]);
 assert(/\/webhooks\/openai[\s\S]{0,500}deprecated_background_executor/.test(workerIndex), 'worker: deprecated external background executor stays disabled');
 assert(/createChatCommand[\s\S]{0,1000}dedupeKey: body\?\.dedupeKey/.test(workerIndex), 'worker: PWA retry dedupe key reaches the authoritative command queue');
+assert(/createChatCommand[\s\S]{0,1300}ChatCommandConflictError[\s\S]{0,200}409/.test(workerIndex), 'worker: enqueue dedupe payload conflicts surface as non-retryable HTTP 409');
 
 const commandQueue = containsAll('worker/src/chatCommandQueue.ts', [
   'dedupeKey',
   'DEDUPE_PREFIX',
+  'INVALID_CHAT_COMMAND_ERROR',
+  'dedupe_payload_mismatch',
+  'sameCommandPayload',
   'isClaimableCommand',
   'hasAtomicCoordinator',
   'getProjectChatCommand',
@@ -250,6 +255,7 @@ const commandQueue = containsAll('worker/src/chatCommandQueue.ts', [
 assert(commandQueue.includes('dedupeStorageKey'), 'worker: auto-dispatched commands retain KV-compatible dedupe storage');
 assert(commandQueue.includes('coordinatorFetch'), 'worker: production queue can route through the atomic coordinator');
 assert(commandQueue.includes('only_queued_or_failed_commands_can_cancel'), 'worker: PWA cancellation cannot steal an actively claimed command');
+assert(/existing[\s\S]{0,250}!sameCommandPayload\(existing, input\)[\s\S]{0,250}dedupe_payload_mismatch/.test(commandQueue), 'worker: KV fallback never reuses a dedupe key for a different prompt/chat payload');
 
 const chatOverview = containsAll('worker/src/chatControlOverview.ts', [
   'getProjectChatCommandOverview',
@@ -277,6 +283,8 @@ const coordinator = containsAll('worker/src/projectCoordinator.ts', [
   '/commands/result',
   '/commands/retry',
   '/commands/cancel',
+  'dedupe_payload_mismatch',
+  'sameCommandPayload',
   'only_queued_or_failed_commands_can_cancel',
   '/state/save',
   '/lease/acquire',
@@ -289,6 +297,7 @@ assert(coordinator.includes('COMMANDS_MIGRATED_KEY'), 'coordinator: legacy queue
 assert(coordinator.includes('STATE_MIGRATED_KEY'), 'coordinator: legacy state migration remains explicit');
 assert(coordinator.includes('lease_owner_mismatch'), 'coordinator: stale/non-owner lease changes remain rejected');
 assert(coordinator.includes('bridgeId: undefined'), 'coordinator: requeued/cancelled commands release stale Bridge ownership');
+assert(/existing[\s\S]{0,250}!sameCommandPayload\(existing, body\)[\s\S]{0,250}dedupe_payload_mismatch/.test(coordinator), 'coordinator: atomic dedupe never aliases a changed command payload');
 
 const stateSync = containsAll('worker/src/stateSync.ts', [
   'hasAtomicCoordinator',
