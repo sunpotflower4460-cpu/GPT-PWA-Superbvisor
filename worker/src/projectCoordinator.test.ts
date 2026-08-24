@@ -35,7 +35,61 @@ async function post(coordinator: ProjectCoordinator, path: string, body: unknown
   }));
 }
 
+function migrationCommand(id: string, createdAt: string, dedupeKey?: string) {
+  return {
+    id,
+    projectId: 'project-1',
+    chatUrl: 'https://chatgpt.com/c/example',
+    prompt: `migrate ${id}`,
+    status: 'queued' as const,
+    createdAt,
+    updatedAt: createdAt,
+    dedupeKey,
+  };
+}
+
 describe('ProjectCoordinator command atomicity', () => {
+  it('accepts idempotent migration batches until explicit finalize, then treats later imports as no-op', async () => {
+    const { coordinator, values } = createCoordinatorHarness();
+    const now = new Date().toISOString();
+    const first = migrationCommand('legacy-1', now, 'legacy:key-1');
+    const second = migrationCommand('legacy-2', new Date(Date.now() + 1).toISOString(), 'legacy:key-2');
+
+    const firstBatch = await post(coordinator, '/commands/import', { commands: [first] });
+    expect(firstBatch.status).toBe(200);
+    expect(await firstBatch.json()).toMatchObject({ ok: true, migrated: false, imported: 1 });
+    expect(values.get('meta:commands-migrated-v2')).toBeUndefined();
+
+    const repeatedBatch = await post(coordinator, '/commands/import', { commands: [first] });
+    expect(await repeatedBatch.json()).toMatchObject({ ok: true, migrated: false, imported: 0 });
+
+    const secondBatch = await post(coordinator, '/commands/import', { commands: [second] });
+    expect(await secondBatch.json()).toMatchObject({ ok: true, migrated: false, imported: 1 });
+    expect(values.has('command:legacy-1')).toBe(true);
+    expect(values.has('command:legacy-2')).toBe(true);
+
+    const finalized = await post(coordinator, '/commands/import', { commands: [], finalize: true });
+    expect(await finalized.json()).toMatchObject({ ok: true, migrated: true, imported: 0 });
+    expect(values.get('meta:commands-migrated-v2')).toBe(true);
+
+    const late = migrationCommand('legacy-late', new Date(Date.now() + 2).toISOString());
+    const lateBatch = await post(coordinator, '/commands/import', { commands: [late] });
+    expect(await lateBatch.json()).toMatchObject({ ok: true, migrated: true, imported: 0 });
+    expect(values.has('command:legacy-late')).toBe(false);
+  });
+
+  it('rejects oversized migration batches instead of silently truncating them', async () => {
+    const { coordinator, values } = createCoordinatorHarness();
+    const createdAt = new Date().toISOString();
+    const commands = Array.from({ length: 21 }, (_, index) => migrationCommand(`legacy-${index}`, createdAt));
+
+    const response = await post(coordinator, '/commands/import', { commands, finalize: true });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ error: 'command_import_batch_too_large', maxBatchSize: 20 });
+    expect(values.get('meta:commands-migrated-v2')).toBeUndefined();
+    expect([...values.keys()].some((key) => key.startsWith('command:legacy-'))).toBe(false);
+  });
+
   it('deduplicates simultaneous enqueue requests with the same key', async () => {
     const coordinator = createCoordinator();
     const body = {
