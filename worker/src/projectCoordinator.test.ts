@@ -49,6 +49,35 @@ describe('ProjectCoordinator command atomicity', () => {
     expect(first.command.id).toBe(second.command.id);
   });
 
+  it('rejects the same dedupe key when the command payload changes', async () => {
+    const coordinator = createCoordinator();
+    const first = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue phase one',
+      dedupeKey: 'route:step-1',
+    });
+    expect(first.status).toBe(201);
+
+    const changedPrompt = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue a different phase',
+      dedupeKey: 'route:step-1',
+    });
+    expect(changedPrompt.status).toBe(409);
+    expect((await changedPrompt.json() as { error: string }).error).toBe('dedupe_payload_mismatch');
+
+    const changedChat = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/other',
+      prompt: 'continue phase one',
+      dedupeKey: 'route:step-1',
+    });
+    expect(changedChat.status).toBe(409);
+    expect((await changedChat.json() as { error: string }).error).toBe('dedupe_payload_mismatch');
+  });
+
   it('lets only one bridge own a simultaneous claim', async () => {
     const coordinator = createCoordinator();
     await post(coordinator, '/commands/enqueue', {
