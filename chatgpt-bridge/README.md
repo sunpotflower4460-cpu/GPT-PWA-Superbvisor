@@ -8,7 +8,8 @@ ChatGPT側に置く、AI DEV DECK Multi Chat Remote用の小さなApps SDK / MCP
 
 ```text
 AI DEV DECK PWA
-  -> Supervisor Worker durable chat-command queue
+  -> Supervisor Worker
+  -> ProjectCoordinator / durable chat-command queue
   -> ChatGPT Apps Bridge
   -> window.openai.sendFollowUpMessage(...)
   -> same ChatGPT conversation
@@ -26,6 +27,7 @@ Widgetはさらにapp-only MCP toolsを使って以下だけを行います。
 - heartbeat
 - command claim
 - delivery result
+- failed command retry
 
 GitHub編集・実装・debugはBridgeではなくChatGPT本体が行います。
 
@@ -135,10 +137,30 @@ Widgetがmountされると:
 
 ## Background resilience
 
-- PWAを閉じてもcommandはSupervisor Worker KVに残る
+- PWAを閉じてもcommandはWorker側のdurable queueに残る
+  - `PROJECT_COORDINATOR` 有効時はSQLite-backed Durable Objectがauthoritative
+  - KVはmigration / history mirror / compatibility fallback
 - ChatGPT Widgetが一時的に消えてもqueued commandは失われない
 - Bridgeがclaim直後に落ちた場合、stale claimは一定時間後に再claim可能
 - project AのBridgeがproject Bのcommandをclaimしない
+- Web Storageが利用できないWidget sandboxでも、Widget生存中はBridge IDをメモリに固定し、heartbeat / claim / resultのowner identityを変えない
+- `visibilitychange` で前面復帰した時、`online` でネット復帰した時、`pageshow` で復帰した時は次のintervalを待たずpollへ再入場する
+- 復帰時tickは通常cooldownを尊重し、直前command後の連投防止を回避しない
+- ChatGPT送信成功後にWorker ackだけ失敗した場合はdelivery receiptを保存し、本文の即再送よりack再同期を優先する
+
+## Atomic claim / retry boundary
+
+productionで `PROJECT_COORDINATOR` が有効な場合、command ownershipはproject単位のSQLite-backed Durable Objectで調停します。
+
+- 同じdedupe keyの同時enqueueを1 commandへ集約
+- 同じcommandを同時に2 Bridgeへclaimさせない
+- stale/non-owner Bridgeのresult overwriteを409拒否
+- transient delivery failureを同じcommand IDのままbackoff再試行
+- retry/requeue時は古いBridge ownershipを解放
+- terminal failed commandは同じIDのまま明示retry可能
+- PWAのmanual fallback cancelとBridge claimも同じCoordinator境界で直列化
+
+`PROJECT_COORDINATOR` が未設定の場合はKV compatibility fallbackで基本動作しますが、**atomic multi-device / multi-Bridge guaranteeとは扱いません**。
 
 ## Safety
 
@@ -156,6 +178,8 @@ Widgetがmountされると:
 
 Queueはバックグラウンドで保持できますが、ChatGPT側Widgetがmount/aliveである時にclaimして会話へ送ります。ChatGPTがWidgetをunmount/suspendした場合はQueueで待ち、Bridgeが再びactiveになった時に再開します。
 
+また、`sendFollowUpMessage` 成功とChatGPT hostの完全なモデル実行完了は同一transactionではありません。command IDとdelivery receiptで重複実行リスクを減らしますが、host境界を跨ぐ完全なexactly-onceを偽装しません。
+
 これは過大評価せず、実際のChatGPT host E2Eで挙動を確認しながら改善します。
 
 ## Files
@@ -172,6 +196,6 @@ wrangler.jsonc     lightweight Worker deployment config
 - real ChatGPT developer/private app E2E
 - real iPhone/Android PWA E2E
 - public distribution時のOAuth
-- per-project atomic lock / idempotency for competing bridge instances
-- structured Autopilot route progress persisted independently of chat text
 - reconnect / suspended-widget UX validation
+- host境界を跨ぐdelivery receipt recoveryの実機確認
+- structured Autopilot route progress persisted independently of chat text
