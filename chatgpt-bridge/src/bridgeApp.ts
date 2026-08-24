@@ -9,6 +9,7 @@ import { z } from 'zod';
 const SERVER_VERSION = '0.1.0';
 const TEMPLATE_URI = 'ui://ai-dev-deck/chat-bridge-v1.html';
 const DEFAULT_POLL_MS = 6_000;
+const SUPERVISOR_REQUEST_TIMEOUT_MS = 12_000;
 
 export interface BridgeRuntimeConfig {
   supervisorWorkerUrl: string;
@@ -47,17 +48,48 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
 
   const supervisorFetch = async <T>(path: string, init: RequestInit): Promise<T> => {
     if (!config.supervisorWorkerUrl || !config.supervisorClientToken) throw new Error('Supervisor Worker bridge connection is not configured');
-    const response = await fetch(`${config.supervisorWorkerUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${config.supervisorClientToken}`,
-        'Content-Type': 'application/json',
-        ...(init.headers ?? {}),
-      },
-    });
-    const payload = await response.json().catch(() => ({})) as T & { error?: string; detail?: string };
-    if (!response.ok) throw new Error(payload.detail || payload.error || `Supervisor request failed (${response.status})`);
-    return payload;
+
+    const controller = new AbortController();
+    const upstreamSignal = init.signal;
+    let timedOut = false;
+    const forwardAbort = () => controller.abort();
+    if (upstreamSignal?.aborted) controller.abort();
+    else upstreamSignal?.addEventListener('abort', forwardAbort, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, SUPERVISOR_REQUEST_TIMEOUT_MS);
+
+    try {
+      let response: Response;
+      try {
+        response = await fetch(`${config.supervisorWorkerUrl}${path}`, {
+          ...init,
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${config.supervisorClientToken}`,
+            'Content-Type': 'application/json',
+            ...(init.headers ?? {}),
+          },
+        });
+      } catch (error) {
+        if (timedOut) throw new Error('Supervisor Worker bridge request timed out after 12 seconds');
+        throw error instanceof Error ? error : new Error('Supervisor Worker bridge request failed');
+      }
+
+      let payload: T & { error?: string; detail?: string };
+      try {
+        payload = await response.json() as T & { error?: string; detail?: string };
+      } catch (error) {
+        if (timedOut) throw new Error('Supervisor Worker bridge response body timed out after 12 seconds');
+        throw error instanceof Error ? error : new Error('Supervisor Worker bridge returned invalid JSON');
+      }
+      if (!response.ok) throw new Error(payload.detail || payload.error || `Supervisor request failed (${response.status})`);
+      return payload;
+    } finally {
+      clearTimeout(timeout);
+      upstreamSignal?.removeEventListener('abort', forwardAbort);
+    }
   };
 
   registerAppTool(
@@ -323,6 +355,7 @@ function bridgeWidgetHtml() {
   let lastFailedCommandId = '';
   let cachedBridgeProjectId = '';
   let cachedBridgeId = '';
+  let cachedDeliveryReceipt = null;
 
   function input() {
     return window.openai?.toolInput || {};
@@ -371,22 +404,33 @@ function bridgeWidgetHtml() {
   }
 
   function readReceipt() {
+    const pid = projectId() || 'unknown';
+    if (cachedDeliveryReceipt) {
+      if (!cachedDeliveryReceipt.projectId || cachedDeliveryReceipt.projectId === pid) return cachedDeliveryReceipt;
+      cachedDeliveryReceipt = null;
+    }
     for (const storage of [window.localStorage, window.sessionStorage]) {
       try {
         const raw = storage.getItem(receiptKey());
-        if (raw) return JSON.parse(raw);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          cachedDeliveryReceipt = { ...parsed, projectId: parsed.projectId || pid };
+          return cachedDeliveryReceipt;
+        }
       } catch {}
     }
     return null;
   }
 
   function saveReceipt(receipt) {
+    cachedDeliveryReceipt = receipt;
     for (const storage of [window.localStorage, window.sessionStorage]) {
       try { storage.setItem(receiptKey(), JSON.stringify(receipt)); return; } catch {}
     }
   }
 
   function clearReceipt() {
+    cachedDeliveryReceipt = null;
     for (const storage of [window.localStorage, window.sessionStorage]) {
       try { storage.removeItem(receiptKey()); } catch {}
     }
@@ -514,6 +558,7 @@ function bridgeWidgetHtml() {
       }
 
       const receipt = {
+        projectId: pid,
         commandId: command.id,
         bridgeId: bridgeId(),
         detail: 'Sent through ChatGPT Apps SDK sendFollowUpMessage',
