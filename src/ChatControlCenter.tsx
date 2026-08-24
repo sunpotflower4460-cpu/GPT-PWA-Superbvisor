@@ -58,7 +58,10 @@ export default function ChatControlCenter() {
   useEffect(() => {
     if (!open || !selected) return;
     let cancelled = false;
+    let refreshing = false;
     const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
       try {
         const [commandResult, bridgeResult] = await Promise.all([
           listProjectChatCommands(selected.id),
@@ -70,17 +73,35 @@ export default function ChatControlCenter() {
         }
       } catch (error) {
         if (!cancelled) setMessage(error instanceof Error ? error.message : 'Chat Control状態を取得できませんでした。');
+      } finally {
+        refreshing = false;
       }
     };
+    const refreshOnVisible = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    const refreshOnWake = () => void refresh();
     void refresh();
     const timer = window.setInterval(() => void refresh(), 6000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    document.addEventListener('visibilitychange', refreshOnVisible);
+    window.addEventListener('online', refreshOnWake);
+    window.addEventListener('focus', refreshOnWake);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshOnVisible);
+      window.removeEventListener('online', refreshOnWake);
+      window.removeEventListener('focus', refreshOnWake);
+    };
   }, [open, selected?.id]);
 
   useEffect(() => {
     if (!open || !overviewProjectIds.length) return;
     let cancelled = false;
+    let refreshing = false;
     const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
       try {
         const result = await getChatControlOverview(overviewProjectIds);
         if (!cancelled) {
@@ -88,11 +109,26 @@ export default function ChatControlCenter() {
         }
       } catch (error) {
         if (!cancelled) setMessage(error instanceof Error ? error.message : '複数ChatGPTの状態一覧を更新できませんでした。');
+      } finally {
+        refreshing = false;
       }
     };
+    const refreshOnVisible = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    const refreshOnWake = () => void refresh();
     void refresh();
     const timer = window.setInterval(() => void refresh(), 8000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    document.addEventListener('visibilitychange', refreshOnVisible);
+    window.addEventListener('online', refreshOnWake);
+    window.addEventListener('focus', refreshOnWake);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshOnVisible);
+      window.removeEventListener('online', refreshOnWake);
+      window.removeEventListener('focus', refreshOnWake);
+    };
   // overviewKey gives this polling effect a stable dependency across project-array reloads.
   }, [open, overviewKey]);
 
