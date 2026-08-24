@@ -68,6 +68,7 @@ const COMMAND_RETENTION_MS = 14 * 24 * 60 * 60_000;
 const CLAIM_STALE_MS = 2 * 60_000;
 const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
 const COMMAND_IMPORT_BATCH_SIZE = 20;
+const COMMAND_STORAGE_PAGE_SIZE = 100;
 const MIN_LEASE_MS = 5_000;
 const MAX_LEASE_MS = 10 * 60_000;
 
@@ -164,15 +165,13 @@ export class ProjectCoordinator {
     }
 
     if (url.pathname === '/commands/overview' && request.method === 'GET') {
-      const commands = (await this.listCommands()).filter((command) => !isExpiredCommand(command));
-      return json({ overview: summarizeCoordinatorCommands(commands) });
+      return json({ overview: await this.summarizeStoredCommands() });
     }
 
     if (url.pathname === '/commands/list' && request.method === 'GET') {
       await this.cleanupCommands();
       const limit = clamp(Number(url.searchParams.get('limit') || 30), 1, 100);
-      const commands = await this.listCommands();
-      return json({ commands: commands.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit) });
+      return json({ commands: await this.listRecentCommands(limit) });
     }
 
     if (url.pathname === '/commands/get' && request.method === 'GET') {
@@ -186,17 +185,10 @@ export class ProjectCoordinator {
       const bridgeId = body?.bridgeId?.trim().slice(0, 200) || '';
       if (!bridgeId) return json({ error: 'bridgeId is required' }, 400);
       await this.cleanupCommands();
-      const commands = await this.listCommands();
       const nowMs = Date.now();
-      const existingOwnedClaim = commands
-        .filter((command) => isFreshClaimOwnedByBridge(command, bridgeId, nowMs))
-        .sort((a, b) => (a.claimedAt || '').localeCompare(b.claimedAt || ''))[0];
-      if (existingOwnedClaim) return json({ command: existingOwnedClaim });
-
-      const next = commands
-        .filter((command) => isCoordinatorCommandClaimable(command, nowMs))
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+      const next = await this.findClaimCandidate(bridgeId, nowMs);
       if (!next) return json({ command: null });
+      if (isFreshClaimOwnedByBridge(next, bridgeId, nowMs)) return json({ command: next });
 
       const now = new Date(nowMs).toISOString();
       const recoveredStaleClaim = next.status === 'claimed';
@@ -388,21 +380,97 @@ export class ProjectCoordinator {
     return json({ error: 'not_found' }, 404);
   }
 
-  private async listCommands() {
-    const stored = await this.state.storage.list<CoordinatorChatCommand>({ prefix: COMMAND_PREFIX });
-    return [...stored.values()].filter(isStoredCommand);
+  private async forEachCommandPage(callback: (page: Map<string, CoordinatorChatCommand>) => Promise<void> | void) {
+    let startAfter: string | undefined;
+    while (true) {
+      const page = await this.state.storage.list<CoordinatorChatCommand>({
+        prefix: COMMAND_PREFIX,
+        limit: COMMAND_STORAGE_PAGE_SIZE,
+        ...(startAfter ? { startAfter } : {}),
+      });
+      if (!page.size) return;
+      await callback(page);
+      const keys = [...page.keys()];
+      startAfter = keys[keys.length - 1];
+      if (page.size < COMMAND_STORAGE_PAGE_SIZE) return;
+    }
+  }
+
+  private async listRecentCommands(limit: number) {
+    let recent: CoordinatorChatCommand[] = [];
+    await this.forEachCommandPage((page) => {
+      for (const command of page.values()) {
+        if (!isStoredCommand(command) || isExpiredCommand(command)) continue;
+        recent.push(command);
+      }
+      recent.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      if (recent.length > limit) recent = recent.slice(0, limit);
+    });
+    return recent;
+  }
+
+  private async summarizeStoredCommands(): Promise<CoordinatorCommandOverview> {
+    let latest: CoordinatorChatCommand | undefined;
+    let unresolved: CoordinatorChatCommand | undefined;
+    let pendingCount = 0;
+    let failedCount = 0;
+    let totalCount = 0;
+
+    await this.forEachCommandPage((page) => {
+      for (const command of page.values()) {
+        if (!isStoredCommand(command) || isExpiredCommand(command)) continue;
+        totalCount += 1;
+        if (command.status === 'queued' || command.status === 'claimed') pendingCount += 1;
+        if (command.status === 'failed') failedCount += 1;
+        if (!latest || command.createdAt > latest.createdAt) latest = command;
+        if ((command.status === 'claimed' || command.status === 'queued' || command.status === 'failed')
+          && (!unresolved || command.createdAt > unresolved.createdAt)) {
+          unresolved = command;
+        }
+      }
+    });
+
+    return {
+      latest: latest ? commandActivity(latest) : undefined,
+      unresolved: unresolved ? commandActivity(unresolved) : undefined,
+      pendingCount,
+      failedCount,
+      totalCount,
+    };
+  }
+
+  private async findClaimCandidate(bridgeId: string, nowMs: number) {
+    let existingOwnedClaim: CoordinatorChatCommand | undefined;
+    let nextClaimable: CoordinatorChatCommand | undefined;
+
+    await this.forEachCommandPage((page) => {
+      for (const command of page.values()) {
+        if (!isStoredCommand(command) || isExpiredCommand(command)) continue;
+        if (isFreshClaimOwnedByBridge(command, bridgeId, nowMs)
+          && (!existingOwnedClaim || (command.claimedAt || '') < (existingOwnedClaim.claimedAt || ''))) {
+          existingOwnedClaim = command;
+        }
+        if (isCoordinatorCommandClaimable(command, nowMs)
+          && (!nextClaimable || command.createdAt < nextClaimable.createdAt)) {
+          nextClaimable = command;
+        }
+      }
+    });
+
+    return existingOwnedClaim ?? nextClaimable ?? null;
   }
 
   private async cleanupCommands() {
-    const stored = await this.state.storage.list<CoordinatorChatCommand>({ prefix: COMMAND_PREFIX });
-    for (const [key, command] of stored) {
-      if (!isStoredCommand(command) || !isExpiredCommand(command)) continue;
-      await this.state.storage.delete(key);
-      if (!command.dedupeKey) continue;
-      const indexKey = dedupeKey(command.dedupeKey);
-      const indexedCommandId = await this.state.storage.get<string>(indexKey);
-      if (indexedCommandId === command.id) await this.state.storage.delete(indexKey);
-    }
+    await this.forEachCommandPage(async (page) => {
+      for (const [key, command] of page) {
+        if (!isStoredCommand(command) || !isExpiredCommand(command)) continue;
+        await this.state.storage.delete(key);
+        if (!command.dedupeKey) continue;
+        const indexKey = dedupeKey(command.dedupeKey);
+        const indexedCommandId = await this.state.storage.get<string>(indexKey);
+        if (indexedCommandId === command.id) await this.state.storage.delete(indexKey);
+      }
+    });
   }
 }
 
