@@ -59,12 +59,19 @@ export interface ChatProjectOverview {
 const OVERVIEW_BATCH_SIZE = 30;
 const WORKER_REQUEST_TIMEOUT_MS = 12_000;
 const IDEMPOTENT_TRANSPORT_ATTEMPTS = 2;
+const PENDING_DEDUPE_TTL_MS = 30 * 60_000;
+const PENDING_DEDUPE_PREFIX = 'ai-dev-deck:pending-chat-command:';
 
 class WorkerRequestError extends Error {
   constructor(message: string, readonly status: number, readonly retryable: boolean) {
     super(message);
     this.name = 'WorkerRequestError';
   }
+}
+
+interface PendingCommandDedupe {
+  storageKey: string;
+  dedupeKey: string;
 }
 
 export function chatCommandStatusLabel(status: ChatCommandStatus) {
@@ -93,17 +100,24 @@ export async function enqueueProjectChatCommand(
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
   if (!project.chatUrl?.trim()) throw new Error('この案件にはChatGPTチャットURLが登録されていません。');
-  const dedupeKey = createClientCommandDedupeKey(project.id);
-  return retryIdempotentTransport(() => workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: project.id,
-      projectName: project.name,
-      chatUrl: project.chatUrl,
-      prompt,
-      dedupeKey,
-    }),
-  }));
+  const pending = getOrCreatePendingCommandDedupe(project.id, prompt);
+  try {
+    const result = await retryIdempotentTransport(() => workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: project.id,
+        projectName: project.name,
+        chatUrl: project.chatUrl,
+        prompt,
+        dedupeKey: pending.dedupeKey,
+      }),
+    }));
+    clearPendingCommandDedupe(pending);
+    return result;
+  } catch (error) {
+    if (!(error instanceof WorkerRequestError) || !error.retryable) clearPendingCommandDedupe(pending);
+    throw error;
+  }
 }
 
 export async function retryProjectChatCommand(
@@ -263,11 +277,53 @@ async function workerFetch<T>(connection: WorkerConnection, path: string, init: 
   }
 }
 
+function getOrCreatePendingCommandDedupe(projectId: string, prompt: string): PendingCommandDedupe {
+  const storageKey = pendingCommandStorageKey(projectId, prompt);
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw) {
+      const stored = JSON.parse(raw) as { dedupeKey?: string; createdAt?: number };
+      if (stored.dedupeKey && typeof stored.createdAt === 'number' && Date.now() - stored.createdAt < PENDING_DEDUPE_TTL_MS) {
+        return { storageKey, dedupeKey: stored.dedupeKey };
+      }
+      localStorage.removeItem(storageKey);
+    }
+  } catch { /* Storage may be unavailable in private/sandboxed contexts. In-call dedupe still applies. */ }
+
+  const dedupeKey = createClientCommandDedupeKey(projectId);
+  try {
+    localStorage.setItem(storageKey, JSON.stringify({ dedupeKey, createdAt: Date.now() }));
+  } catch { /* Best-effort persistence; the current call still reuses this dedupe key. */ }
+  return { storageKey, dedupeKey };
+}
+
+function clearPendingCommandDedupe(pending: PendingCommandDedupe) {
+  try {
+    const raw = localStorage.getItem(pending.storageKey);
+    if (!raw) return;
+    const stored = JSON.parse(raw) as { dedupeKey?: string };
+    if (stored.dedupeKey === pending.dedupeKey) localStorage.removeItem(pending.storageKey);
+  } catch { /* Best-effort cleanup. */ }
+}
+
+function pendingCommandStorageKey(projectId: string, prompt: string) {
+  return `${PENDING_DEDUPE_PREFIX}${encodeURIComponent(projectId.slice(0, 100))}:${hashText(prompt)}`;
+}
+
 function createClientCommandDedupeKey(projectId: string) {
   const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
   return `pwa:${projectId.slice(0, 80)}:${suffix}`.slice(0, 200);
+}
+
+function hashText(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function isRetryableStatus(status: number) {
