@@ -115,8 +115,8 @@ export async function enqueueProjectChatCommand(
     clearPendingCommandDedupe(pending);
     return result;
   } catch (error) {
+    if (!(error instanceof WorkerRequestError) || !error.retryable) clearPendingCommandDedupe(pending);
     if (isDedupePayloadMismatch(error)) {
-      clearPendingCommandDedupe(pending);
       const replacement = replacePendingCommandDedupe(project.id, prompt);
       try {
         const recovered = await sendProjectChatCommand(project, prompt, replacement.dedupeKey, connection);
@@ -127,7 +127,6 @@ export async function enqueueProjectChatCommand(
         throw recoveryError;
       }
     }
-    if (!(error instanceof WorkerRequestError) || !error.retryable) clearPendingCommandDedupe(pending);
     throw error;
   }
 }
