@@ -224,7 +224,7 @@ async function workerFetch<T>(connection: WorkerConnection, path: string, init: 
       });
     } catch (error) {
       if (timedOut) {
-        throw new WorkerRequestError('Supervisor Workerへの通信が12秒でタイムアウトしました。通信状態を確認して再試行します。', 0, true);
+        throw new WorkerRequestError('Supervisor Workerへの通信が12秒でタイムアウトしました。', 0, true);
       }
       if (upstreamSignal?.aborted) throw error instanceof Error ? error : new Error('Supervisor Workerへの通信を中止しました。');
       throw new WorkerRequestError(
