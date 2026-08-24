@@ -169,9 +169,20 @@ const chatControlClient = containsAll('src/chatControl.ts', [
   'flatMap',
   'cancelProjectChatCommand',
   '/cancel',
+  'WORKER_REQUEST_TIMEOUT_MS = 12_000',
+  'IDEMPOTENT_TRANSPORT_ATTEMPTS = 2',
+  'WorkerRequestError',
+  'AbortController',
+  'retryIdempotentTransport',
+  'createClientCommandDedupeKey',
+  'dedupeKey',
 ]);
 assert(!chatControlClient.includes('unique.slice(0, 30)'), 'chat control: projects beyond the first batch are not silently dropped');
 assert(chatControlClient.includes("result.status === 'fulfilled'"), 'chat control: one failed overview batch does not discard successful batches');
+assert(/enqueueProjectChatCommand[\s\S]{0,900}const dedupeKey = createClientCommandDedupeKey[\s\S]{0,900}retryIdempotentTransport/.test(chatControlClient), 'chat control: PWA enqueue retries reuse one per-action dedupe key');
+assert(/cancelProjectChatCommand[\s\S]{0,700}retryIdempotentTransport/.test(chatControlClient), 'chat control: idempotent cancel can recover from lost transport responses');
+assert(/retryProjectChatCommand[\s\S]{0,700}return workerFetch/.test(chatControlClient), 'chat control: non-idempotent failed-command retry is not blindly transport-retried');
+assert(/setTimeout\([\s\S]{0,220}controller\.abort\(\)[\s\S]{0,120}WORKER_REQUEST_TIMEOUT_MS/.test(chatControlClient), 'chat control: stalled mobile Worker requests have a bounded timeout');
 
 const operatingPlan = containsAll('src/OperatingPlanCenter.tsx', [
   'enqueueProjectChatCommand',
@@ -210,8 +221,11 @@ const workerIndex = containsAll('worker/src/index.ts', [
   'MAX_OVERVIEW_PROJECTS = 30',
   '/cancel',
   'cancelPendingChatCommand',
+  'dedupeKey?: string',
+  'dedupeKey: body?.dedupeKey',
 ]);
 assert(/\/webhooks\/openai[\s\S]{0,500}deprecated_background_executor/.test(workerIndex), 'worker: deprecated external background executor stays disabled');
+assert(/createChatCommand[\s\S]{0,1000}dedupeKey: body\?\.dedupeKey/.test(workerIndex), 'worker: PWA retry dedupe key reaches the authoritative command queue');
 
 const commandQueue = containsAll('worker/src/chatCommandQueue.ts', [
   'dedupeKey',
