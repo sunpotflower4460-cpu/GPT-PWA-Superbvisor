@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { claimNextChatCommand, type ChatCommand, type ChatCommandEnv } from './chatCommandQueue';
+import {
+  claimNextChatCommand,
+  getProjectChatCommandOverview,
+  listProjectChatCommands,
+  type ChatCommand,
+  type ChatCommandEnv,
+} from './chatCommandQueue';
 import { ProjectCoordinator } from './projectCoordinator';
 
 function createAtomicMigrationHarness() {
@@ -124,6 +130,15 @@ describe('KV to ProjectCoordinator migration', () => {
     expect(claimed?.id).toBe('legacy-000');
     expect(claimed?.status).toBe('claimed');
     expect(coordinatorValues.get('meta:commands-migrated-v2')).toBe(true);
+
+    const overview = await getProjectChatCommandOverview(env, projectId);
+    expect(overview.totalCount).toBe(125);
+    expect(overview.pendingCount).toBe(1);
+    expect(overview.approximate).toBe(false);
+
+    const recent = await listProjectChatCommands(env, projectId, 1);
+    expect(recent).toHaveLength(1);
+    expect(recent[0]?.id).toBe('legacy-124');
 
     const dataBatches = importBodies.filter((body) => (body.commands?.length ?? 0) > 0);
     const finalizes = importBodies.filter((body) => body.finalize === true);
