@@ -453,6 +453,8 @@ async function listQueuedCommandsKv(env: ChatCommandEnv, limit: number) {
 async function ensureCoordinatorCommandsMigrated(env: ChatCommandEnv, projectId: string) {
   if (!hasAtomicCoordinator(env) || migratedProjects.has(projectId)) return;
 
+  const nowMs = Date.now();
+  const migrationGaps: string[] = [];
   let cursor: string | undefined;
   while (true) {
     const listed = await env.SUPERVISOR_STATE.list({
@@ -463,10 +465,28 @@ async function ensureCoordinatorCommandsMigrated(env: ChatCommandEnv, projectId:
 
     for (let offset = 0; offset < listed.keys.length; offset += COORDINATOR_IMPORT_BATCH_SIZE) {
       const batchKeys = listed.keys.slice(offset, offset + COORDINATOR_IMPORT_BATCH_SIZE);
-      const commands = (await Promise.all(batchKeys.map(async ({ name }) => {
-        const commandId = name.split(':').pop();
-        return commandId ? getChatCommand(env, commandId) : null;
-      }))).filter((command): command is ChatCommand => Boolean(command));
+      const resolved = await Promise.all(batchKeys.map(async ({ name }) => {
+        const commandId = name.split(':').pop() || '';
+        const command = commandId ? await getChatCommand(env, commandId) : null;
+        return { name, commandId, command };
+      }));
+      const commands: ChatCommand[] = [];
+
+      for (const item of resolved) {
+        if (!item.command) {
+          if (isProjectIndexWithinRetention(item.name, nowMs)) {
+            migrationGaps.push(item.commandId || item.name);
+          }
+          continue;
+        }
+        if (item.command.projectId !== projectId) {
+          if (isProjectIndexWithinRetention(item.name, nowMs)) {
+            migrationGaps.push(`project_mismatch:${item.commandId || item.name}`);
+          }
+          continue;
+        }
+        commands.push(item.command);
+      }
       if (!commands.length) continue;
 
       const result = await coordinatorFetch<{ ok?: boolean; migrated?: boolean; error?: string }>(
@@ -484,6 +504,10 @@ async function ensureCoordinatorCommandsMigrated(env: ChatCommandEnv, projectId:
 
     if (listed.list_complete) break;
     cursor = listed.cursor;
+  }
+
+  if (migrationGaps.length) {
+    throw new Error(`atomic_command_migration_incomplete:${migrationGaps.slice(0, 5).join(',')}`);
   }
 
   const finalize = await coordinatorFetch<{ ok?: boolean; migrated?: boolean; error?: string }>(
@@ -526,6 +550,40 @@ function commandExpirationTtl(command: ChatCommand) {
   if (!Number.isFinite(createdAt)) return COMMAND_TTL;
   const remainingSeconds = Math.ceil((createdAt + (COMMAND_TTL * 1000) - Date.now()) / 1000);
   return Math.max(MIN_KV_EXPIRATION_TTL, Math.min(COMMAND_TTL, remainingSeconds));
+}
+
+function isProjectIndexWithinRetention(indexName: string, nowMs: number) {
+  const createdAt = projectIndexCreatedAtMs(indexName);
+  return createdAt === null || nowMs - createdAt <= COMMAND_TTL * 1000;
+}
+
+function projectIndexCreatedAtMs(indexName: string) {
+  const commandSeparator = indexName.lastIndexOf(':');
+  if (commandSeparator <= 0) return null;
+  const timestampSeparator = indexName.lastIndexOf(':', commandSeparator - 1);
+  if (timestampSeparator <= 0) return null;
+  const value = indexName.slice(timestampSeparator + 1, commandSeparator);
+  if (!/^\d{17}$/.test(value)) return null;
+
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(4, 6));
+  const day = Number(value.slice(6, 8));
+  const hour = Number(value.slice(8, 10));
+  const minute = Number(value.slice(10, 12));
+  const second = Number(value.slice(12, 14));
+  const millisecond = Number(value.slice(14, 17));
+  const timestamp = Date.UTC(year, month - 1, day, hour, minute, second, millisecond);
+  const date = new Date(timestamp);
+  if (date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+    || date.getUTCHours() !== hour
+    || date.getUTCMinutes() !== minute
+    || date.getUTCSeconds() !== second
+    || date.getUTCMilliseconds() !== millisecond) {
+    return null;
+  }
+  return timestamp;
 }
 
 function sameCommandPayload(
