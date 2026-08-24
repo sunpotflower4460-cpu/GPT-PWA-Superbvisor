@@ -30,6 +30,7 @@ export class ChatCommandConflictError extends Error {
 export const INVALID_CHAT_COMMAND_ERROR = 'projectId, valid ChatGPT chatUrl and prompt are required';
 
 const COMMAND_TTL = 60 * 60 * 24 * 14;
+const MIN_KV_EXPIRATION_TTL = 60;
 const COMMAND_PREFIX = 'chat-command:';
 const PROJECT_PREFIX = 'chat-project:';
 const DEDUPE_PREFIX = 'chat-dedupe:';
@@ -462,17 +463,30 @@ async function mirrorCommand(env: ChatCommandEnv, command: ChatCommand) {
   await saveCommand(env, command);
   await rememberProjectCommand(env, command);
   if (command.dedupeKey) {
-    await env.SUPERVISOR_STATE.put(dedupeStorageKey(command.projectId, command.dedupeKey), command.id, { expirationTtl: COMMAND_TTL });
+    await env.SUPERVISOR_STATE.put(dedupeStorageKey(command.projectId, command.dedupeKey), command.id, {
+      expirationTtl: commandExpirationTtl(command),
+    });
   }
 }
 
 async function saveCommand(env: ChatCommandEnv, command: ChatCommand) {
-  await env.SUPERVISOR_STATE.put(`${COMMAND_PREFIX}${command.id}`, JSON.stringify(command), { expirationTtl: COMMAND_TTL });
+  await env.SUPERVISOR_STATE.put(`${COMMAND_PREFIX}${command.id}`, JSON.stringify(command), {
+    expirationTtl: commandExpirationTtl(command),
+  });
 }
 
 async function rememberProjectCommand(env: ChatCommandEnv, command: ChatCommand) {
   const sortable = command.createdAt.replace(/[^0-9]/g, '').slice(0, 17);
-  await env.SUPERVISOR_STATE.put(`${PROJECT_PREFIX}${command.projectId}:${sortable}:${command.id}`, command.id, { expirationTtl: COMMAND_TTL });
+  await env.SUPERVISOR_STATE.put(`${PROJECT_PREFIX}${command.projectId}:${sortable}:${command.id}`, command.id, {
+    expirationTtl: commandExpirationTtl(command),
+  });
+}
+
+function commandExpirationTtl(command: ChatCommand) {
+  const createdAt = new Date(command.createdAt).getTime();
+  if (!Number.isFinite(createdAt)) return COMMAND_TTL;
+  const remainingSeconds = Math.ceil((createdAt + (COMMAND_TTL * 1000) - Date.now()) / 1000);
+  return Math.max(MIN_KV_EXPIRATION_TTL, Math.min(COMMAND_TTL, remainingSeconds));
 }
 
 function sameCommandPayload(
