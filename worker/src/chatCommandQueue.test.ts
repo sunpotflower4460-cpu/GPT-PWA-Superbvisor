@@ -6,6 +6,7 @@ import {
   claimNextChatCommand,
   enqueueChatCommand,
   isClaimableCommand,
+  listProjectChatCommands,
   normalizeChatUrl,
   sanitizePrompt,
   updateChatCommandResult,
@@ -31,11 +32,27 @@ function fakeEnv() {
       get: async (key: string) => store.get(key) ?? null,
       put: async (key: string, value: string) => { store.set(key, value); },
       delete: async (key: string) => { store.delete(key); },
-      list: async ({ prefix = '', limit = 100 }: { prefix?: string; limit?: number }) => ({
-        keys: [...store.keys()].filter((key) => key.startsWith(prefix)).slice(0, limit).map((name) => ({ name })),
-        list_complete: true,
-        cacheStatus: null,
-      }),
+      list: async ({
+        prefix = '',
+        limit = 100,
+        cursor,
+      }: {
+        prefix?: string;
+        limit?: number;
+        cursor?: string;
+      }) => {
+        const matching = [...store.keys()].filter((key) => key.startsWith(prefix)).sort();
+        const offset = cursor ? Number.parseInt(cursor, 10) || 0 : 0;
+        const page = matching.slice(offset, offset + limit);
+        const nextOffset = offset + page.length;
+        const listComplete = nextOffset >= matching.length;
+        return {
+          keys: page.map((name) => ({ name })),
+          list_complete: listComplete,
+          ...(listComplete ? {} : { cursor: String(nextOffset) }),
+          cacheStatus: null,
+        };
+      },
     },
   } as unknown as ChatCommandEnv;
   return { env, store };
@@ -171,6 +188,40 @@ describe('chat command claim recovery', () => {
     expect(firstClaim?.id).toBe(first.id);
     expect(repeatedClaim?.id).toBe(first.id);
     expect(first.id).not.toBe(second.id);
+  });
+
+  it('paginates KV project history so work after the first 1000 index entries remains visible and claimable', async () => {
+    const { env, store } = fakeEnv();
+    for (let index = 0; index < 1001; index += 1) {
+      const id = `history-${String(index).padStart(4, '0')}`;
+      const command: ChatCommand = {
+        ...baseCommand,
+        id,
+        status: 'delivered',
+        prompt: `history ${index}`,
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      };
+      store.set(`chat-command:${id}`, JSON.stringify(command));
+      store.set(`chat-project:project-1:${String(index).padStart(17, '0')}:${id}`, id);
+    }
+
+    const queued: ChatCommand = {
+      ...baseCommand,
+      id: 'queued-after-pagination',
+      prompt: 'continue after long history',
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    };
+    store.set(`chat-command:${queued.id}`, JSON.stringify(queued));
+    store.set(`chat-project:project-1:${'9'.repeat(17)}:${queued.id}`, queued.id);
+
+    const latest = await listProjectChatCommands(env, 'project-1', 3);
+    expect(latest[0]?.id).toBe(queued.id);
+
+    const claimed = await claimNextChatCommand(env, 'bridge-a', 'project-1');
+    expect(claimed?.id).toBe(queued.id);
+    expect(claimed?.status).toBe('claimed');
   });
 });
 
