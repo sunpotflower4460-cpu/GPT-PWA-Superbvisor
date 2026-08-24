@@ -57,6 +57,15 @@ export interface ChatProjectOverview {
 }
 
 const OVERVIEW_BATCH_SIZE = 30;
+const WORKER_REQUEST_TIMEOUT_MS = 12_000;
+const IDEMPOTENT_TRANSPORT_ATTEMPTS = 2;
+
+class WorkerRequestError extends Error {
+  constructor(message: string, readonly status: number, readonly retryable: boolean) {
+    super(message);
+    this.name = 'WorkerRequestError';
+  }
+}
 
 export function chatCommandStatusLabel(status: ChatCommandStatus) {
   if (status === 'queued') return '送信待ち';
@@ -84,15 +93,17 @@ export async function enqueueProjectChatCommand(
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
   if (!project.chatUrl?.trim()) throw new Error('この案件にはChatGPTチャットURLが登録されていません。');
-  return workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
+  const dedupeKey = createClientCommandDedupeKey(project.id);
+  return retryIdempotentTransport(() => workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
     method: 'POST',
     body: JSON.stringify({
       projectId: project.id,
       projectName: project.name,
       chatUrl: project.chatUrl,
       prompt,
+      dedupeKey,
     }),
-  });
+  }));
 }
 
 export async function retryProjectChatCommand(
@@ -111,13 +122,13 @@ export async function cancelProjectChatCommand(
   commandId: string,
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
-  return workerFetch<{ command: ChatCommand }>(connection, `/api/chat-commands/${encodeURIComponent(commandId)}/cancel`, {
+  return retryIdempotentTransport(() => workerFetch<{ command: ChatCommand }>(connection, `/api/chat-commands/${encodeURIComponent(commandId)}/cancel`, {
     method: 'POST',
     body: JSON.stringify({
       projectId,
       detail: 'Cancelled by PWA before switching this command to manual ChatGPT fallback.',
     }),
-  });
+  }));
 }
 
 export async function listProjectChatCommands(
@@ -169,20 +180,86 @@ export async function getChatControlOverview(
   return { projects };
 }
 
+async function retryIdempotentTransport<T>(operation: () => Promise<T>) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= IDEMPOTENT_TRANSPORT_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof WorkerRequestError) || !error.retryable || attempt >= IDEMPOTENT_TRANSPORT_ATTEMPTS) throw error;
+      await delay(250 * attempt);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Supervisor Workerへの再試行に失敗しました。');
+}
+
 async function workerFetch<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
   const baseUrl = connection.baseUrl.trim().replace(/\/$/, '');
   if (!baseUrl) throw new Error('Supervisor Worker URLが未設定です。');
   if (!connection.token.trim()) throw new Error('Supervisor Worker接続トークンが未設定です。');
 
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${connection.token.trim()}`,
-      'Content-Type': 'application/json',
-      ...(init.headers ?? {}),
-    },
-  });
-  const payload = await response.json().catch(() => ({})) as T & { error?: string; detail?: string };
-  if (!response.ok) throw new Error(payload.detail || payload.error || `Chat command request failed (${response.status})`);
-  return payload;
+  const controller = new AbortController();
+  const upstreamSignal = init.signal;
+  let timedOut = false;
+  const forwardAbort = () => controller.abort();
+  if (upstreamSignal?.aborted) controller.abort();
+  else upstreamSignal?.addEventListener('abort', forwardAbort, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, WORKER_REQUEST_TIMEOUT_MS);
+
+  try {
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${connection.token.trim()}`,
+          'Content-Type': 'application/json',
+          ...(init.headers ?? {}),
+        },
+      });
+    } catch (error) {
+      if (timedOut) {
+        throw new WorkerRequestError('Supervisor Workerへの通信が12秒でタイムアウトしました。通信状態を確認して再試行します。', 0, true);
+      }
+      if (upstreamSignal?.aborted) throw error instanceof Error ? error : new Error('Supervisor Workerへの通信を中止しました。');
+      throw new WorkerRequestError(
+        error instanceof Error ? `Supervisor Workerへ接続できませんでした: ${error.message}` : 'Supervisor Workerへ接続できませんでした。',
+        0,
+        true,
+      );
+    }
+
+    const payload = await response.json().catch(() => ({})) as T & { error?: string; detail?: string };
+    if (!response.ok) {
+      throw new WorkerRequestError(
+        payload.detail || payload.error || `Chat command request failed (${response.status})`,
+        response.status,
+        isRetryableStatus(response.status),
+      );
+    }
+    return payload;
+  } finally {
+    clearTimeout(timeout);
+    upstreamSignal?.removeEventListener('abort', forwardAbort);
+  }
+}
+
+function createClientCommandDedupeKey(projectId: string) {
+  const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  return `pwa:${projectId.slice(0, 80)}:${suffix}`.slice(0, 200);
+}
+
+function isRetryableStatus(status: number) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
