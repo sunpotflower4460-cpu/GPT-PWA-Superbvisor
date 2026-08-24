@@ -234,7 +234,21 @@ async function workerFetch<T>(connection: WorkerConnection, path: string, init: 
       );
     }
 
-    const payload = await response.json().catch(() => ({})) as T & { error?: string; detail?: string };
+    let payload: T & { error?: string; detail?: string };
+    try {
+      payload = await response.json() as T & { error?: string; detail?: string };
+    } catch (error) {
+      if (timedOut) {
+        throw new WorkerRequestError('Supervisor Workerの応答本文が12秒以内に完了しませんでした。', response.status, true);
+      }
+      if (upstreamSignal?.aborted) throw error instanceof Error ? error : new Error('Supervisor Worker応答の読み取りを中止しました。');
+      throw new WorkerRequestError(
+        'Supervisor Workerから有効なJSON応答を受信できませんでした。',
+        response.status,
+        response.ok || isRetryableStatus(response.status),
+      );
+    }
+
     if (!response.ok) {
       throw new WorkerRequestError(
         payload.detail || payload.error || `Chat command request failed (${response.status})`,
