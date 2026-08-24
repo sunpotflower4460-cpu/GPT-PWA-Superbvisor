@@ -162,12 +162,18 @@ export class ProjectCoordinator {
       if (!bridgeId) return json({ error: 'bridgeId is required' }, 400);
       await this.cleanupCommands();
       const commands = await this.listCommands();
+      const nowMs = Date.now();
+      const existingOwnedClaim = commands
+        .filter((command) => isFreshClaimOwnedByBridge(command, bridgeId, nowMs))
+        .sort((a, b) => (a.claimedAt || '').localeCompare(b.claimedAt || ''))[0];
+      if (existingOwnedClaim) return json({ command: existingOwnedClaim });
+
       const next = commands
-        .filter((command) => isCoordinatorCommandClaimable(command))
+        .filter((command) => isCoordinatorCommandClaimable(command, nowMs))
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
       if (!next) return json({ command: null });
 
-      const now = new Date().toISOString();
+      const now = new Date(nowMs).toISOString();
       const recoveredStaleClaim = next.status === 'claimed';
       const claimed: CoordinatorChatCommand = {
         ...next,
@@ -197,6 +203,7 @@ export class ProjectCoordinator {
       if (current.projectId !== body.projectId) return json({ error: 'project_mismatch' }, 409);
 
       if (current.status === body.status && (current.status === 'delivered' || current.status === 'failed' || current.status === 'cancelled')) {
+        if (current.bridgeId && current.bridgeId !== body.bridgeId) return json({ error: 'claim_owner_mismatch', command: current }, 409);
         return json({ command: current });
       }
       if (current.status !== 'claimed') return json({ error: 'command_not_claimed', command: current }, 409);
@@ -391,6 +398,12 @@ export function isCoordinatorCommandClaimable(command: CoordinatorChatCommand, n
   if (command.status !== 'claimed' || !command.claimedAt) return false;
   const claimedAt = new Date(command.claimedAt).getTime();
   return Number.isFinite(claimedAt) && now - claimedAt >= CLAIM_STALE_MS;
+}
+
+function isFreshClaimOwnedByBridge(command: CoordinatorChatCommand, bridgeId: string, now = Date.now()) {
+  if (command.status !== 'claimed' || command.bridgeId !== bridgeId || !command.claimedAt) return false;
+  const claimedAt = new Date(command.claimedAt).getTime();
+  return Number.isFinite(claimedAt) && now - claimedAt < CLAIM_STALE_MS;
 }
 
 export function applyCommandResult(
