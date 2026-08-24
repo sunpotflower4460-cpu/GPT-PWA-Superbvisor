@@ -33,6 +33,7 @@ const COMMAND_TTL = 60 * 60 * 24 * 14;
 const COMMAND_PREFIX = 'chat-command:';
 const PROJECT_PREFIX = 'chat-project:';
 const DEDUPE_PREFIX = 'chat-dedupe:';
+const KV_LIST_PAGE_SIZE = 1000;
 const migratedProjects = new Set<string>();
 
 export function normalizeChatUrl(value: string) {
@@ -180,34 +181,29 @@ export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string
     return result.data.command ?? null;
   }
 
-  const commands = normalizedProjectId
-    ? await listProjectChatCommandsKv(env, normalizedProjectId, 100)
-    : await listQueuedCommandsKv(env, 100);
   const nowMs = Date.now();
-  const existingOwnedClaim = commands
-    .filter((command) => command.status === 'claimed'
-      && command.bridgeId === normalizedBridgeId
-      && Boolean(command.claimedAt)
-      && !isClaimableCommand(command, nowMs))
-    .sort((a, b) => (a.claimedAt || '').localeCompare(b.claimedAt || ''))[0];
-  if (existingOwnedClaim) return existingOwnedClaim;
-
-  const next = commands
-    .filter((command) => isClaimableCommand(command, nowMs))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
-  if (!next) return null;
+  const candidate = normalizedProjectId
+    ? await findProjectClaimCandidateKv(env, normalizedProjectId, normalizedBridgeId, nowMs)
+    : findClaimCandidate(await listQueuedCommandsKv(env, 100), normalizedBridgeId, nowMs);
+  if (!candidate) return null;
+  if (candidate.status === 'claimed'
+    && candidate.bridgeId === normalizedBridgeId
+    && Boolean(candidate.claimedAt)
+    && !isClaimableCommand(candidate, nowMs)) {
+    return candidate;
+  }
 
   const now = new Date(nowMs).toISOString();
-  const recoveredStaleClaim = next.status === 'claimed';
+  const recoveredStaleClaim = candidate.status === 'claimed';
   const claimed: ChatCommand = {
-    ...next,
+    ...candidate,
     status: 'claimed',
     bridgeId: normalizedBridgeId,
     claimedAt: now,
     updatedAt: now,
     nextAttemptAt: undefined,
-    claimAttempts: (next.claimAttempts ?? 0) + 1,
-    detail: recoveredStaleClaim ? 'Recovered a stale bridge claim and reassigned the command.' : next.detail,
+    claimAttempts: (candidate.claimAttempts ?? 0) + 1,
+    detail: recoveredStaleClaim ? 'Recovered a stale bridge claim and reassigned the command.' : candidate.detail,
   };
   await saveCommand(env, claimed);
   return claimed;
@@ -363,12 +359,86 @@ async function enqueueChatCommandKv(env: ChatCommandEnv, input: {
 }
 
 async function listProjectChatCommandsKv(env: ChatCommandEnv, projectId: string, limit = 30) {
-  const listed = await env.SUPERVISOR_STATE.list({ prefix: `${PROJECT_PREFIX}${projectId}:`, limit: Math.max(1, Math.min(limit, 100)) });
-  const commands = await Promise.all(listed.keys.map(async ({ name }) => {
+  const cappedLimit = Math.max(1, Math.min(limit, 100));
+  const indexNames = await listProjectIndexNamesKv(env, projectId);
+  const selectedNames = indexNames.slice(-cappedLimit);
+  const commands = await Promise.all(selectedNames.map(async (name) => {
     const commandId = name.split(':').pop();
     return commandId ? getChatCommand(env, commandId) : null;
   }));
   return commands.filter((item): item is ChatCommand => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+async function listProjectIndexNamesKv(env: ChatCommandEnv, projectId: string) {
+  const names: string[] = [];
+  let cursor: string | undefined;
+  while (true) {
+    const listed = await env.SUPERVISOR_STATE.list({
+      prefix: `${PROJECT_PREFIX}${projectId}:`,
+      limit: KV_LIST_PAGE_SIZE,
+      ...(cursor ? { cursor } : {}),
+    });
+    names.push(...listed.keys.map(({ name }) => name));
+    if (listed.list_complete) break;
+    cursor = listed.cursor;
+  }
+  return names;
+}
+
+async function findProjectClaimCandidateKv(
+  env: ChatCommandEnv,
+  projectId: string,
+  bridgeId: string,
+  nowMs: number,
+) {
+  let cursor: string | undefined;
+  let existingOwnedClaim: ChatCommand | undefined;
+  let nextClaimable: ChatCommand | undefined;
+
+  while (true) {
+    const listed = await env.SUPERVISOR_STATE.list({
+      prefix: `${PROJECT_PREFIX}${projectId}:`,
+      limit: KV_LIST_PAGE_SIZE,
+      ...(cursor ? { cursor } : {}),
+    });
+    const commands = await Promise.all(listed.keys.map(async ({ name }) => {
+      const commandId = name.split(':').pop();
+      return commandId ? getChatCommand(env, commandId) : null;
+    }));
+
+    for (const command of commands) {
+      if (!command) continue;
+      const isOwnedFreshClaim = command.status === 'claimed'
+        && command.bridgeId === bridgeId
+        && Boolean(command.claimedAt)
+        && !isClaimableCommand(command, nowMs);
+      if (isOwnedFreshClaim && (!existingOwnedClaim || (command.claimedAt || '') < (existingOwnedClaim.claimedAt || ''))) {
+        existingOwnedClaim = command;
+      }
+      if (isClaimableCommand(command, nowMs) && (!nextClaimable || command.createdAt < nextClaimable.createdAt)) {
+        nextClaimable = command;
+      }
+    }
+
+    if (listed.list_complete) break;
+    cursor = listed.cursor;
+  }
+
+  return existingOwnedClaim ?? nextClaimable ?? null;
+}
+
+function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: number) {
+  const existingOwnedClaim = commands
+    .filter((command) => command.status === 'claimed'
+      && command.bridgeId === bridgeId
+      && Boolean(command.claimedAt)
+      && !isClaimableCommand(command, nowMs))
+    .sort((a, b) => (a.claimedAt || '').localeCompare(b.claimedAt || ''))[0];
+  if (existingOwnedClaim) return existingOwnedClaim;
+
+  return commands
+    .filter((command) => isClaimableCommand(command, nowMs))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0] ?? null;
 }
 
 async function listQueuedCommandsKv(env: ChatCommandEnv, limit: number) {
