@@ -35,6 +35,8 @@ const COMMAND_PREFIX = 'chat-command:';
 const PROJECT_PREFIX = 'chat-project:';
 const DEDUPE_PREFIX = 'chat-dedupe:';
 const KV_LIST_PAGE_SIZE = 1000;
+const KV_MIGRATION_PAGE_SIZE = 200;
+const COORDINATOR_IMPORT_BATCH_SIZE = 20;
 const migratedProjects = new Set<string>();
 
 export function normalizeChatUrl(value: string) {
@@ -450,12 +452,49 @@ async function listQueuedCommandsKv(env: ChatCommandEnv, limit: number) {
 
 async function ensureCoordinatorCommandsMigrated(env: ChatCommandEnv, projectId: string) {
   if (!hasAtomicCoordinator(env) || migratedProjects.has(projectId)) return;
-  const legacy = await listProjectChatCommandsKv(env, projectId, 100);
-  const result = await coordinatorFetch<{ ok?: boolean; error?: string }>(env, chatScope(projectId), '/commands/import', {
-    method: 'POST',
-    body: JSON.stringify({ commands: legacy }),
-  });
-  if (!result.ok) throw new Error(result.data.error || `atomic_command_migration_failed_${result.status}`);
+
+  let cursor: string | undefined;
+  while (true) {
+    const listed = await env.SUPERVISOR_STATE.list({
+      prefix: `${PROJECT_PREFIX}${projectId}:`,
+      limit: KV_MIGRATION_PAGE_SIZE,
+      ...(cursor ? { cursor } : {}),
+    });
+
+    for (let offset = 0; offset < listed.keys.length; offset += COORDINATOR_IMPORT_BATCH_SIZE) {
+      const batchKeys = listed.keys.slice(offset, offset + COORDINATOR_IMPORT_BATCH_SIZE);
+      const commands = (await Promise.all(batchKeys.map(async ({ name }) => {
+        const commandId = name.split(':').pop();
+        return commandId ? getChatCommand(env, commandId) : null;
+      }))).filter((command): command is ChatCommand => Boolean(command));
+      if (!commands.length) continue;
+
+      const result = await coordinatorFetch<{ ok?: boolean; migrated?: boolean; error?: string }>(
+        env,
+        chatScope(projectId),
+        '/commands/import',
+        { method: 'POST', body: JSON.stringify({ commands }) },
+      );
+      if (!result.ok) throw new Error(result.data.error || `atomic_command_migration_failed_${result.status}`);
+      if (result.data.migrated) {
+        migratedProjects.add(projectId);
+        return;
+      }
+    }
+
+    if (listed.list_complete) break;
+    cursor = listed.cursor;
+  }
+
+  const finalize = await coordinatorFetch<{ ok?: boolean; migrated?: boolean; error?: string }>(
+    env,
+    chatScope(projectId),
+    '/commands/import',
+    { method: 'POST', body: JSON.stringify({ commands: [], finalize: true }) },
+  );
+  if (!finalize.ok || finalize.data.migrated !== true) {
+    throw new Error(finalize.data.error || `atomic_command_migration_finalize_failed_${finalize.status}`);
+  }
   migratedProjects.add(projectId);
 }
 
