@@ -100,24 +100,25 @@ export async function enqueueProjectChatCommand(
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
   if (!project.chatUrl?.trim()) throw new Error('この案件にはChatGPTチャットURLが登録されていません。');
-  const pending = getOrCreatePendingCommandDedupe(project.id, prompt);
-  try {
-    const result = await retryIdempotentTransport(() => workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
-      method: 'POST',
-      body: JSON.stringify({
-        projectId: project.id,
-        projectName: project.name,
-        chatUrl: project.chatUrl,
-        prompt,
-        dedupeKey: pending.dedupeKey,
-      }),
-    }));
-    clearPendingCommandDedupe(pending);
-    return result;
-  } catch (error) {
-    if (!(error instanceof WorkerRequestError) || !error.retryable) clearPendingCommandDedupe(pending);
-    throw error;
+  let pending = getOrCreatePendingCommandDedupe(project.id, prompt);
+
+  for (let identityAttempt = 0; identityAttempt < 2; identityAttempt += 1) {
+    try {
+      const result = await sendProjectChatCommand(project, prompt, pending.dedupeKey, connection);
+      clearPendingCommandDedupe(pending);
+      return result;
+    } catch (error) {
+      if (identityAttempt === 0 && isDedupePayloadMismatch(error)) {
+        clearPendingCommandDedupe(pending);
+        pending = replacePendingCommandDedupe(project.id, prompt);
+        continue;
+      }
+      if (!(error instanceof WorkerRequestError) || !error.retryable) clearPendingCommandDedupe(pending);
+      throw error;
+    }
   }
+
+  throw new Error('Chat command dedupe recovery exhausted.');
 }
 
 export async function retryProjectChatCommand(
@@ -192,6 +193,24 @@ export async function getChatControlOverview(
   });
 
   return { projects };
+}
+
+function sendProjectChatCommand(
+  project: DevProject,
+  prompt: string,
+  dedupeKey: string,
+  connection: WorkerConnection,
+) {
+  return retryIdempotentTransport(() => workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId: project.id,
+      projectName: project.name,
+      chatUrl: project.chatUrl,
+      prompt,
+      dedupeKey,
+    }),
+  }));
 }
 
 async function retryIdempotentTransport<T>(operation: () => Promise<T>) {
@@ -290,6 +309,11 @@ function getOrCreatePendingCommandDedupe(projectId: string, prompt: string): Pen
     }
   } catch { /* Storage may be unavailable in private/sandboxed contexts. In-call dedupe still applies. */ }
 
+  return replacePendingCommandDedupe(projectId, prompt);
+}
+
+function replacePendingCommandDedupe(projectId: string, prompt: string): PendingCommandDedupe {
+  const storageKey = pendingCommandStorageKey(projectId, prompt);
   const dedupeKey = createClientCommandDedupeKey(projectId);
   try {
     localStorage.setItem(storageKey, JSON.stringify({ dedupeKey, createdAt: Date.now() }));
@@ -324,6 +348,12 @@ function hashText(value: string) {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+function isDedupePayloadMismatch(error: unknown) {
+  return error instanceof WorkerRequestError
+    && error.status === 409
+    && error.message === 'dedupe_payload_mismatch';
 }
 
 function isRetryableStatus(status: number) {
