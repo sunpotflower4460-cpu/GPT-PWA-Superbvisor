@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ChatCommandConflictError,
+  INVALID_CHAT_COMMAND_ERROR,
   cancelChatCommand,
   claimNextChatCommand,
   enqueueChatCommand,
@@ -56,6 +57,15 @@ describe('chat command validation', () => {
     expect(sanitizePrompt('  continue  ')).toBe('continue');
     expect(sanitizePrompt('x'.repeat(30_000))).toHaveLength(24_000);
   });
+
+  it('uses one exported invalid-command error contract for HTTP classification', async () => {
+    const { env } = fakeEnv();
+    await expect(enqueueChatCommand(env, {
+      projectId: '',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue',
+    })).rejects.toThrow(INVALID_CHAT_COMMAND_ERROR);
+  });
 });
 
 describe('chat command idempotency', () => {
@@ -78,6 +88,36 @@ describe('chat command idempotency', () => {
 
     expect(second.id).toBe(first.id);
     expect(second.dedupeKey).toBe('developer:job-1:phase-a');
+  });
+
+  it('rejects reuse of a KV dedupe key for a different prompt or ChatGPT URL', async () => {
+    const { env } = fakeEnv();
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue route',
+      dedupeKey: 'developer:job-1:phase-a',
+    });
+
+    await expect(enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'different route',
+      dedupeKey: 'developer:job-1:phase-a',
+    })).rejects.toMatchObject({
+      name: 'ChatCommandConflictError',
+      code: 'dedupe_payload_mismatch',
+    });
+
+    await expect(enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/other',
+      prompt: 'continue route',
+      dedupeKey: 'developer:job-1:phase-a',
+    })).rejects.toMatchObject({
+      name: 'ChatCommandConflictError',
+      code: 'dedupe_payload_mismatch',
+    });
   });
 });
 
