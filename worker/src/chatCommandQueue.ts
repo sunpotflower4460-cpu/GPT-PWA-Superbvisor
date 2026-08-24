@@ -183,10 +183,21 @@ export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string
   const commands = normalizedProjectId
     ? await listProjectChatCommandsKv(env, normalizedProjectId, 100)
     : await listQueuedCommandsKv(env, 100);
-  const next = commands.filter((command) => isClaimableCommand(command)).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+  const nowMs = Date.now();
+  const existingOwnedClaim = commands
+    .filter((command) => command.status === 'claimed'
+      && command.bridgeId === normalizedBridgeId
+      && Boolean(command.claimedAt)
+      && !isClaimableCommand(command, nowMs))
+    .sort((a, b) => (a.claimedAt || '').localeCompare(b.claimedAt || ''))[0];
+  if (existingOwnedClaim) return existingOwnedClaim;
+
+  const next = commands
+    .filter((command) => isClaimableCommand(command, nowMs))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
   if (!next) return null;
 
-  const now = new Date().toISOString();
+  const now = new Date(nowMs).toISOString();
   const recoveredStaleClaim = next.status === 'claimed';
   const claimed: ChatCommand = {
     ...next,
@@ -227,7 +238,12 @@ export async function updateChatCommandResult(env: ChatCommandEnv, id: string, i
   const current = await getChatCommand(env, id);
   if (!current) return null;
   if (projectId && current.projectId !== projectId) throw new ChatCommandConflictError('project_mismatch', 'project_mismatch');
-  if (current.status === input.status && ['delivered', 'failed', 'cancelled'].includes(current.status)) return current;
+  if (current.status === input.status && ['delivered', 'failed', 'cancelled'].includes(current.status)) {
+    if (bridgeId && current.bridgeId && current.bridgeId !== bridgeId) {
+      throw new ChatCommandConflictError('claim_owner_mismatch', 'claim_owner_mismatch');
+    }
+    return current;
+  }
   if (current.status !== 'claimed') throw new ChatCommandConflictError('command_not_claimed', 'command_not_claimed');
   if (bridgeId && current.bridgeId !== bridgeId) throw new ChatCommandConflictError('claim_owner_mismatch', 'claim_owner_mismatch');
   const updated = applyCommandResult(current, input);
