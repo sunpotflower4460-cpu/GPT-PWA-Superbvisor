@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ProjectCoordinator } from './projectCoordinator';
 
-function createCoordinator() {
+function createCoordinatorHarness() {
   const values = new Map<string, unknown>();
   let tail: Promise<unknown> = Promise.resolve();
   const storage = {
@@ -20,7 +20,11 @@ function createCoordinator() {
       return run;
     },
   } as unknown as DurableObjectState;
-  return new ProjectCoordinator(state);
+  return { coordinator: new ProjectCoordinator(state), values };
+}
+
+function createCoordinator() {
+  return createCoordinatorHarness().coordinator;
 }
 
 async function post(coordinator: ProjectCoordinator, path: string, body: unknown) {
@@ -76,6 +80,57 @@ describe('ProjectCoordinator command atomicity', () => {
     });
     expect(changedChat.status).toBe(409);
     expect((await changedChat.json() as { error: string }).error).toBe('dedupe_payload_mismatch');
+  });
+
+  it('removes an expired command dedupe index when it still points to that command', async () => {
+    const { coordinator, values } = createCoordinatorHarness();
+    values.set('command:expired-command', {
+      id: 'expired-command',
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'old work',
+      status: 'delivered',
+      createdAt: '2020-01-01T00:00:00.000Z',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+      dedupeKey: 'route:expired',
+    });
+    values.set('dedupe:route%3Aexpired', 'expired-command');
+
+    const listed = await coordinator.fetch(new Request('https://coordinator.test/commands/list', { method: 'GET' }));
+    expect(listed.status).toBe(200);
+    expect(values.has('command:expired-command')).toBe(false);
+    expect(values.has('dedupe:route%3Aexpired')).toBe(false);
+  });
+
+  it('does not delete a dedupe index that was already redirected to a newer command', async () => {
+    const { coordinator, values } = createCoordinatorHarness();
+    values.set('command:expired-command', {
+      id: 'expired-command',
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'old work',
+      status: 'delivered',
+      createdAt: '2020-01-01T00:00:00.000Z',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+      dedupeKey: 'route:shared',
+    });
+    values.set('command:new-command', {
+      id: 'new-command',
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'new work',
+      status: 'queued',
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+      dedupeKey: 'route:shared',
+    });
+    values.set('dedupe:route%3Ashared', 'new-command');
+
+    const listed = await coordinator.fetch(new Request('https://coordinator.test/commands/list', { method: 'GET' }));
+    expect(listed.status).toBe(200);
+    expect(values.has('command:expired-command')).toBe(false);
+    expect(values.has('command:new-command')).toBe(true);
+    expect(values.get('dedupe:route%3Ashared')).toBe('new-command');
   });
 
   it('lets only one bridge own a simultaneous claim', async () => {
