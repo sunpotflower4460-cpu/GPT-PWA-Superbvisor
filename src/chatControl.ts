@@ -100,25 +100,36 @@ export async function enqueueProjectChatCommand(
   connection: WorkerConnection = loadWorkerConnection(),
 ) {
   if (!project.chatUrl?.trim()) throw new Error('この案件にはChatGPTチャットURLが登録されていません。');
-  let pending = getOrCreatePendingCommandDedupe(project.id, prompt);
-
-  for (let identityAttempt = 0; identityAttempt < 2; identityAttempt += 1) {
-    try {
-      const result = await sendProjectChatCommand(project, prompt, pending.dedupeKey, connection);
+  const pending = getOrCreatePendingCommandDedupe(project.id, prompt);
+  try {
+    const result = await retryIdempotentTransport(() => workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: project.id,
+        projectName: project.name,
+        chatUrl: project.chatUrl,
+        prompt,
+        dedupeKey: pending.dedupeKey,
+      }),
+    }));
+    clearPendingCommandDedupe(pending);
+    return result;
+  } catch (error) {
+    if (isDedupePayloadMismatch(error)) {
       clearPendingCommandDedupe(pending);
-      return result;
-    } catch (error) {
-      if (identityAttempt === 0 && isDedupePayloadMismatch(error)) {
-        clearPendingCommandDedupe(pending);
-        pending = replacePendingCommandDedupe(project.id, prompt);
-        continue;
+      const replacement = replacePendingCommandDedupe(project.id, prompt);
+      try {
+        const recovered = await sendProjectChatCommand(project, prompt, replacement.dedupeKey, connection);
+        clearPendingCommandDedupe(replacement);
+        return recovered;
+      } catch (recoveryError) {
+        if (!(recoveryError instanceof WorkerRequestError) || !recoveryError.retryable) clearPendingCommandDedupe(replacement);
+        throw recoveryError;
       }
-      if (!(error instanceof WorkerRequestError) || !error.retryable) clearPendingCommandDedupe(pending);
-      throw error;
     }
+    if (!(error instanceof WorkerRequestError) || !error.retryable) clearPendingCommandDedupe(pending);
+    throw error;
   }
-
-  throw new Error('Chat command dedupe recovery exhausted.');
 }
 
 export async function retryProjectChatCommand(
