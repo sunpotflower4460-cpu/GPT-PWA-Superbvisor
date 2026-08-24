@@ -321,6 +321,8 @@ function bridgeWidgetHtml() {
   let cooldownUntil = 0;
   let timer = null;
   let lastFailedCommandId = '';
+  let cachedBridgeProjectId = '';
+  let cachedBridgeId = '';
 
   function input() {
     return window.openai?.toolInput || {};
@@ -336,18 +338,32 @@ function bridgeWidgetHtml() {
     return typeof value === 'string' && value ? value : projectId();
   }
 
+  function createBridgeId(pid) {
+    const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+    return 'chatgpt:' + pid + ':' + suffix;
+  }
+
   function bridgeId() {
     const pid = projectId() || 'unknown';
+    if (cachedBridgeId && cachedBridgeProjectId === pid) return cachedBridgeId;
+
+    cachedBridgeProjectId = pid;
+    cachedBridgeId = '';
     const key = 'ai-dev-deck-bridge:' + pid;
     try {
       const existing = sessionStorage.getItem(key);
-      if (existing) return existing;
-      const id = 'chatgpt:' + pid + ':' + crypto.randomUUID().slice(0, 8);
-      sessionStorage.setItem(key, id);
-      return id;
+      if (existing) {
+        cachedBridgeId = existing;
+      } else {
+        cachedBridgeId = createBridgeId(pid);
+        sessionStorage.setItem(key, cachedBridgeId);
+      }
     } catch {
-      return 'chatgpt:' + pid + ':' + Math.random().toString(36).slice(2, 10);
+      cachedBridgeId = createBridgeId(pid);
     }
+    return cachedBridgeId;
   }
 
   function receiptKey() {
