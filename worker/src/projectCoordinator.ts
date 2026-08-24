@@ -371,7 +371,12 @@ export class ProjectCoordinator {
   private async cleanupCommands() {
     const stored = await this.state.storage.list<CoordinatorChatCommand>({ prefix: COMMAND_PREFIX });
     for (const [key, command] of stored) {
-      if (isStoredCommand(command) && isExpiredCommand(command)) await this.state.storage.delete(key);
+      if (!isStoredCommand(command) || !isExpiredCommand(command)) continue;
+      await this.state.storage.delete(key);
+      if (!command.dedupeKey) continue;
+      const indexKey = dedupeKey(command.dedupeKey);
+      const indexedCommandId = await this.state.storage.get<string>(indexKey);
+      if (indexedCommandId === command.id) await this.state.storage.delete(indexKey);
     }
   }
 }
