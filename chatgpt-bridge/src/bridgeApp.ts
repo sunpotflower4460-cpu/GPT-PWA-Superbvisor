@@ -564,6 +564,11 @@ function bridgeWidgetHtml() {
     timer = setInterval(() => void tick(false), ${DEFAULT_POLL_MS});
   }
 
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void tick(false);
+  });
+  window.addEventListener('online', () => void tick(false));
+  window.addEventListener('pageshow', () => void tick(false));
   window.addEventListener('beforeunload', () => { if (timer) clearInterval(timer); });
   start();
 })();
