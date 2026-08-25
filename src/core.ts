@@ -10,7 +10,7 @@ export type ProjectStatus =
   | 'CONTEXT_LIMIT'
   | 'COMPLETED';
 
-export type ExecutionMode = 'CHAT' | 'WORK' | 'API_WORKER';
+export type ExecutionMode = 'CHAT' | 'WORK';
 export type AutomationLevel = 'OFF' | 'ASSIST' | 'AUTO' | 'GUARDIAN';
 export type MilestoneState = 'TODO' | 'ACTIVE' | 'DONE' | 'BLOCKED';
 
@@ -100,7 +100,7 @@ export function createProject(input: Pick<DevProject, 'name' | 'goal'> & Partial
     chatUrl: input.chatUrl,
     workUrl: input.workUrl,
     status: input.status ?? 'WAITING_AI',
-    executionMode: input.executionMode ?? 'CHAT',
+    executionMode: input.executionMode === 'WORK' ? 'WORK' : 'CHAT',
     automationLevel: input.automationLevel ?? 'ASSIST',
     progress: input.progress ?? 0,
     currentPhase: input.currentPhase ?? '開始待ち',
@@ -124,7 +124,8 @@ export function loadProjects(): DevProject[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((value) => normalizeStoredProject(value)).filter((value): value is DevProject => Boolean(value));
   } catch {
     return [];
   }
@@ -147,7 +148,7 @@ export function buildActionPrompt(project: DevProject, action: QuickAction) {
     : '- 現時点で登録なし';
   const operatingPlan = buildOperatingPlanPrompt(project.id);
 
-  return `以下の開発プロジェクトを継続してください。\n\n【最終目標】\n${project.goal}\n\n【現在地点】\n${project.currentPhase}\n\n${operatingPlan}\n\n【今回の意図】\n${action.intent}\n\n【完成条件】\n${done}\n\n【既知の本人待ち】\n${blockers}\n\n共通ガードレール:\n1. AIだけで安全に実行できる作業は、Operating Planの到達地点まで可能な範囲で連続して進める。\n2. 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様判断など本人が必要な地点では止める。\n3. Workへの切替、API Background、GitHub Guardianなどコストや権限が増える実行モードへは、アプリ上の明示操作なしに勝手に昇格しない。\n4. 完成・成功は、実際に確認できたテスト、CI、差分などの根拠に基づいて判定する。\n\nOperating Planと今回の意図が衝突する場合は、安全制約を優先しつつ今回の明示指示を優先してください。`;
+  return `以下の開発プロジェクトを継続してください。\n\n【実行主体】\nこのChatGPTチャット。外部LLM APIはオーケストレーション専用で、実装・デバッグ・GitHub編集の実行者ではありません。\n\n【最終目標】\n${project.goal}\n\n【現在地点】\n${project.currentPhase}\n\n${operatingPlan}\n\n【今回の意図】\n${action.intent}\n\n【完成条件】\n${done}\n\n【既知の本人待ち】\n${blockers}\n\n共通ガードレール:\n1. このChatGPTで安全に実行できる作業は、Operating Planの到達地点まで可能な範囲で連続して進める。\n2. 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様判断など本人が必要な地点では止める。\n3. Supervisor / Guardianなど外部APIは状態整理・CI監視・失敗分類・復旧指示に限定し、コード実装を委譲しない。\n4. 完成・成功は、外部APIの自己申告ではなく、実際に確認できたテスト、CI、差分、取得結果などの根拠に基づいて判定する。\n5. CIやツールが失敗した時は、その失敗を終端にせず、原因確認→修正/別手段→再検証まで安全に継続する。\n\nOperating Planと今回の意図が衝突する場合は、安全制約を優先しつつ今回の明示指示を優先してください。`;
 }
 
 export function statusLabel(status: ProjectStatus) {
@@ -162,4 +163,21 @@ export function statusLabel(status: ProjectStatus) {
     COMPLETED: '完了',
   };
   return labels[status];
+}
+
+function normalizeStoredProject(value: unknown): DevProject | null {
+  if (!value || typeof value !== 'object') return null;
+  const stored = value as Partial<DevProject> & { executionMode?: string };
+  if (!stored.id || !stored.name || !stored.goal) return null;
+  return {
+    ...createProject({ name: stored.name, goal: stored.goal }),
+    ...stored,
+    executionMode: stored.executionMode === 'WORK' ? 'WORK' : 'CHAT',
+    automationLevel: ['OFF', 'ASSIST', 'AUTO', 'GUARDIAN'].includes(stored.automationLevel || '')
+      ? stored.automationLevel as AutomationLevel
+      : 'ASSIST',
+    humanBlockers: Array.isArray(stored.humanBlockers) ? stored.humanBlockers : [],
+    milestones: Array.isArray(stored.milestones) ? stored.milestones : [],
+    timeline: Array.isArray(stored.timeline) ? stored.timeline : [],
+  };
 }

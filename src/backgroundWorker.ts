@@ -19,6 +19,8 @@ export interface CompletionReport {
 
 export interface BackgroundJob {
   id: string;
+  kind?: 'orchestration_handoff';
+  phase?: 'handoff_ready';
   projectId: string;
   projectName?: string;
   goal: string;
@@ -26,6 +28,9 @@ export interface BackgroundJob {
   definitionOfDone: string[];
   prompt?: string;
   model: string;
+  orchestratorProvider?: string;
+  degradedOrchestration?: boolean;
+  handoffPrompt?: string;
   status: BackgroundJobStatus;
   createdAt: string;
   updatedAt: string;
@@ -34,6 +39,7 @@ export interface BackgroundJob {
   error?: string;
   checkpoint?: BackgroundCheckpoint;
   report?: CompletionReport;
+  // Legacy fields are retained so older saved jobs remain readable.
   autoRecover?: boolean;
   maxAutoRetries?: number;
   retryCount?: number;
@@ -58,6 +64,16 @@ export interface WorkerSmartReply {
 export interface WorkerConnection {
   baseUrl: string;
   token: string;
+}
+
+export interface WorkerHealth {
+  ok: boolean;
+  service: string;
+  executor?: 'chatgpt';
+  orchestrationOnly?: boolean;
+  chatCommandBus?: boolean;
+  chatBridgeHeartbeat?: boolean;
+  atomicCoordinator?: boolean;
 }
 
 const SETTINGS_KEY = 'gpt-pwa-supervisor.worker-connection.v1';
@@ -104,7 +120,7 @@ export function rememberBackgroundJob(projectId: string, jobId: string) {
 export async function checkWorkerHealth(connection: WorkerConnection) {
   const response = await fetch(`${normalizeBaseUrl(connection.baseUrl)}/health`);
   if (!response.ok) throw new Error(`Worker health check failed (${response.status})`);
-  return response.json() as Promise<{ ok: boolean; service: string }>;
+  return response.json() as Promise<WorkerHealth>;
 }
 
 export async function startBackgroundJob(
@@ -124,8 +140,9 @@ export async function startBackgroundJob(
       definitionOfDone: project.definitionOfDone,
       prompt,
       model: options.model,
-      autoRecover: options.autoRecover === true,
-      maxAutoRetries: options.autoRecover ? Math.max(0, Math.min(2, options.maxAutoRetries ?? 2)) : 0,
+      // Sent only for backward compatibility. New Workers handle provider retry internally and never execute project work.
+      autoRecover: false,
+      maxAutoRetries: 0,
     }),
   });
   rememberBackgroundJob(project.id, response.job.id);
@@ -201,8 +218,8 @@ async function workerFetch<T>(connection: WorkerConnection, path: string, init: 
 }
 
 function validateConnection(connection: WorkerConnection) {
-  if (!connection.baseUrl.trim()) throw new Error('Background Worker URLが未設定です。');
-  if (!connection.token.trim()) throw new Error('Background Worker接続トークンが未設定です。');
+  if (!connection.baseUrl.trim()) throw new Error('Supervisor Worker URLが未設定です。');
+  if (!connection.token.trim()) throw new Error('Supervisor Worker接続トークンが未設定です。');
 }
 
 function normalizeBaseUrl(value: string) {

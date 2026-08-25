@@ -70,7 +70,16 @@ export async function getRepositorySummary(env: GitHubEnv, repository: string, r
   const info = await githubJson<{ default_branch: string; private: boolean; html_url: string }>(env, repo, 'GET', '');
   const branch = ref || info.default_branch;
   const head = await githubJson<{ object: { sha: string } }>(env, repo, 'GET', `/git/ref/heads/${encodeURIComponent(branch)}`);
-  return { repository: `${repo.owner}/${repo.repo}`, defaultBranch: info.default_branch, branch, headSha: head.object.sha, private: info.private, url: info.html_url };
+  const commit = await githubJson<{ message: string }>(env, repo, 'GET', `/git/commits/${head.object.sha}`);
+  return {
+    repository: `${repo.owner}/${repo.repo}`,
+    defaultBranch: info.default_branch,
+    branch,
+    headSha: head.object.sha,
+    headCommitMessage: commit.message,
+    private: info.private,
+    url: info.html_url,
+  };
 }
 
 export async function listTree(env: GitHubEnv, repository: string, ref: string, maxItems = 500) {
@@ -242,11 +251,13 @@ function encodePath(path: string) {
 function encodeBase64(value: string) {
   const bytes = new TextEncoder().encode(value);
   let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
   return btoa(binary);
 }
 
 function decodeBase64(value: string) {
   const binary = atob(value);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }

@@ -1,20 +1,23 @@
 {
   "name": "gpt-pwa-supervisor-worker",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "dry-run": "wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist-ci",
+    "check": "npm run typecheck && npm run test && npm run dry-run",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@pushforge/builder": "^2.0.5",
-    "standardwebhooks": "^1.0.0"
+    "@pushforge/builder": "^2.0.5"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260818.1",
     "typescript": "^5.8.0",
+    "vitest": "^3.2.4",
     "wrangler": "^4.124.0"
   }
 }

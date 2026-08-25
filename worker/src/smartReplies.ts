@@ -1,5 +1,6 @@
-export interface SmartReplyEnv {
-  OPENAI_API_KEY: string;
+import { OrchestrationEnv, requestOrchestrationText } from './orchestrationModel';
+
+export interface SmartReplyEnv extends OrchestrationEnv {
   SMART_REPLY_MODEL?: string;
 }
 
@@ -24,11 +25,6 @@ export interface SmartReplyItem {
   confidence: number;
 }
 
-interface OpenAIResponse {
-  output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-  error?: { message?: string } | null;
-}
-
 export async function generateSmartReplies(
   body: SmartReplyRequest,
   env: SmartReplyEnv,
@@ -37,58 +33,27 @@ export async function generateSmartReplies(
     return { ok: false, status: 400, error: 'project.id and project.goal are required' };
   }
 
-  const model = env.SMART_REPLY_MODEL?.trim() || 'gpt-5.4-nano';
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      input: buildPrompt(body),
-      max_output_tokens: 1400,
-    }),
+  const result = await requestOrchestrationText(env, {
+    system: `あなたはAI DEV DECKのオーケストレーション専用「次の返答予測AI」です。実装・コード編集・外部操作は行いません。実作業の実行主体はChatGPTチャットです。ユーザーが次にChatGPTへ送る候補を3〜5個作ってください。JSONだけを返し、形式は {"suggestions":[{"label":"短いボタン名","reason":"理由1文","prompt":"ChatGPTへそのまま送れる完成指示","confidence":0.0}]}。候補は重複させず、エラー時は原因確認→修正/別手段→再テストを含む候補を優先してください。`,
+    user: buildPrompt(body),
+    maxTokens: 1400,
+    requireJson: true,
   });
 
-  const raw = await response.text();
-  let parsedResponse: OpenAIResponse | undefined;
-  try {
-    parsedResponse = raw ? JSON.parse(raw) as OpenAIResponse : undefined;
-  } catch {
-    parsedResponse = undefined;
+  if (result) {
+    const suggestions = parseSuggestionJson(result.text);
+    if (suggestions.length) {
+      return { ok: true, model: `${result.provider}/${result.model}`, suggestions: suggestions.slice(0, 5) };
+    }
   }
 
-  if (!response.ok || !parsedResponse) {
-    return {
-      ok: false,
-      status: response.status || 502,
-      error: parsedResponse?.error?.message || raw || 'Smart Reply model request failed',
-    };
-  }
-
-  const text = extractOutputText(parsedResponse);
-  const parsed = parseSuggestionJson(text);
-  if (!parsed.length) {
-    return { ok: false, status: 502, error: 'Model returned no usable Smart Reply suggestions' };
-  }
-
-  return { ok: true, model, suggestions: parsed.slice(0, 5) };
+  // Smart Reply is a convenience feature. Provider outage must not block the supervisor UI.
+  return { ok: true, model: 'deterministic', suggestions: deterministicSuggestions(body) };
 }
 
 function buildPrompt(body: SmartReplyRequest) {
   const project = body.project;
-  return `あなたはスマホ用AI開発管制塔の「次の返答予測AI」です。\nユーザーは普段ChatGPTの通常Chatで開発を進め、毎回長文を打たず候補をタップしたいです。\n\nPROJECT: ${project.name}\nGOAL: ${project.goal}\nCURRENT: ${project.currentPhase}\nSTATUS: ${project.status}\nAUTOMATION: ${project.automationLevel}\nDEFINITION OF DONE:\n${project.definitionOfDone.map((item) => `- ${item}`).join('\n') || '- 未指定'}\nHUMAN BLOCKERS:\n${project.humanBlockers?.map((item) => `- ${item}`).join('\n') || '- なし'}\n\nCHATGPTの最後の返答:\n${body.lastAssistantMessage?.trim() || '未入力。プロジェクト状態だけから判断する。'}\n\n目的:\n- 次にユーザーがChatGPTへ返すと自然で開発が前進する候補を3〜5個作る。\n- 1位は最も推奨するもの。\n- 「OKお願いします」程度の意図でも、実際に送るpromptは現在地点とGoalを踏まえた強い指示に展開する。\n- AIだけで安全にできるテスト、デバッグ、レビュー、ドキュメント等は単なる継続確認で止まらない指示を好む。\n- 課金、秘密情報、本人確認、不可逆操作、大きな仕様変更などは勝手に承認しない。\n- エラーがあるなら同じ失敗を繰り返さず、原因確認→修正/別手法→再テストを含める。\n- 上限/長文化の兆候があれば引き継ぎを候補に入れる。\n\nJSONだけを返してください。Markdownコードフェンス不要。\n形式:\n{"suggestions":[{"label":"短いボタン名","reason":"なぜ推奨か1文","prompt":"ChatGPTへそのまま送れる完成した指示","confidence":0.0}]}\nconfidenceは0〜1。候補は重複させない。`;
-}
-
-function extractOutputText(response: OpenAIResponse) {
-  const chunks: string[] = [];
-  for (const item of response.output ?? []) {
-    for (const content of item.content ?? []) {
-      if (content.type === 'output_text' && typeof content.text === 'string') chunks.push(content.text);
-    }
-  }
-  return chunks.join('\n').trim();
+  return `PROJECT: ${project.name}\nGOAL: ${project.goal}\nCURRENT: ${project.currentPhase}\nSTATUS: ${project.status}\nAUTOMATION: ${project.automationLevel}\nDEFINITION OF DONE:\n${project.definitionOfDone.map((item) => `- ${item}`).join('\n') || '- 未指定'}\nHUMAN BLOCKERS:\n${project.humanBlockers?.map((item) => `- ${item}`).join('\n') || '- なし'}\n\nCHATGPTの最後の返答:\n${body.lastAssistantMessage?.trim() || '未入力。プロジェクト状態だけから判断する。'}\n\n目的:\n- 次にユーザーがChatGPTへ返すと自然で開発が前進する候補を3〜5個作る。\n- 1位は最も推奨するもの。\n- 「OKお願いします」程度の意図でも、実際に送るpromptは現在地点とGoalを踏まえた強い指示に展開する。\n- ChatGPTだけで安全にできるテスト、デバッグ、レビュー、ドキュメント等は単なる継続確認で止まらない指示を好む。\n- 外部APIへ実装を委譲する指示は作らない。APIは監督・状態整理のみ。\n- 課金、秘密情報、本人確認、不可逆操作、大きな仕様変更などは勝手に承認しない。\n- エラーがあるなら同じ失敗を繰り返さず、原因確認→修正/別手法→再テストを含める。`;
 }
 
 function parseSuggestionJson(text: string): SmartReplyItem[] {
@@ -101,11 +66,41 @@ function parseSuggestionJson(text: string): SmartReplyItem[] {
       .map((item) => ({
         label: typeof item.label === 'string' ? item.label.slice(0, 80) : '',
         reason: typeof item.reason === 'string' ? item.reason.slice(0, 300) : '',
-        prompt: typeof item.prompt === 'string' ? item.prompt.slice(0, 8000) : '',
+        prompt: executorSafePrompt(typeof item.prompt === 'string' ? item.prompt.slice(0, 8000) : ''),
         confidence: typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.7,
       }))
       .filter((item) => item.label && item.prompt);
   } catch {
     return [];
   }
+}
+
+function deterministicSuggestions(body: SmartReplyRequest): SmartReplyItem[] {
+  const p = body.project;
+  const prefix = `この作業の実行主体はこのChatGPTです。外部APIはオーケストレーション専用として扱ってください。\n\n最終目標: ${p.goal}\n現在地点: ${p.currentPhase}\n`;
+  return [
+    {
+      label: '問題点も確認して続行',
+      reason: 'Provider障害時でも安全に前進できる標準候補です。',
+      prompt: `${prefix}\n現在の未完了・不具合・リスクを実際に確認し、安全に実行できる修正・テスト・デバッグを進めてください。失敗したら原因を切り分け、別手段または修正後に再検証してください。`,
+      confidence: 0.72,
+    },
+    {
+      label: '手動作業だけまで',
+      reason: 'AIでできる残作業をまとめて進めます。',
+      prompt: `${prefix}\nコード・テスト・デバッグ・レビュー・ドキュメントなど、このChatGPTだけで安全に可能な作業を連続して進め、本人しかできない手動作業だけの状態まで近づけてください。`,
+      confidence: 0.68,
+    },
+    {
+      label: '現在地を再確認',
+      reason: '状態が不明な時の安全な再同期候補です。',
+      prompt: `${prefix}\n現在の実際の状態、完了済み、残課題、失敗中の処理、次に実行すべき1〜3手を証拠ベースで確認してください。外部APIの自己申告だけで完成扱いしないでください。`,
+      confidence: 0.62,
+    },
+  ];
+}
+
+function executorSafePrompt(prompt: string) {
+  const prefix = '重要: 実作業の実行主体はこのChatGPTです。外部APIはオーケストレーション専用です。\n\n';
+  return `${prefix}${prompt.trim()}`;
 }

@@ -2,15 +2,34 @@ name: CI
 
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main, "feat/**", "fix/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "fix/**"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  concept-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify product constitution and architecture boundaries
+        run: node scripts/concept-guard.mjs
+
   app-build:
+    needs: concept-guard
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -24,8 +43,11 @@ jobs:
         run: npm install
       - name: Build app
         run: npm run build
+      - name: Enforce mobile bundle budget
+        run: npm run bundle:budget
 
-  worker-typecheck:
+  worker-check:
+    needs: concept-guard
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -41,3 +63,27 @@ jobs:
       - name: Typecheck worker
         working-directory: worker
         run: npm run typecheck
+      - name: Run worker regression tests
+        working-directory: worker
+        run: npm test
+      - name: Dry-run Worker + SQLite Durable Object bundle
+        working-directory: worker
+        run: npm run dry-run
+
+  chatgpt-bridge-check:
+    needs: concept-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ChatGPT bridge dependencies
+        working-directory: chatgpt-bridge
+        run: npm install
+      - name: Typecheck and dry-run ChatGPT bridge
+        working-directory: chatgpt-bridge
+        run: npm run check

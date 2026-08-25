@@ -50,6 +50,10 @@ function completionScore(project: DevProject, evidence: SupervisorEvidence) {
   return Math.max(0, Math.min(100, score));
 }
 
+function automationEnabled(project: DevProject) {
+  return project.automationLevel === 'AUTO' || project.automationLevel === 'GUARDIAN';
+}
+
 export function evaluateProject(project: DevProject, evidence: SupervisorEvidence = {}): SupervisorDecision {
   const score = completionScore(project, evidence);
   const retryCount = evidence.retryCount ?? 0;
@@ -70,7 +74,7 @@ export function evaluateProject(project: DevProject, evidence: SupervisorEvidenc
       action: 'CREATE_HANDOFF',
       reason: '会話コンテキストの引き継ぎを行ってから継続するのが安全です。',
       completionScore: score,
-      canAutoContinue: project.executionMode !== 'CHAT',
+      canAutoContinue: automationEnabled(project),
     };
   }
 
@@ -96,17 +100,17 @@ export function evaluateProject(project: DevProject, evidence: SupervisorEvidenc
             ? '同系統の再試行が続いたため、別アプローチへ切り替えます。'
             : '複数方式で復旧できず、人間の判断が必要です。',
       completionScore: score,
-      canAutoContinue: action !== 'ASK_HUMAN',
+      canAutoContinue: action !== 'ASK_HUMAN' && automationEnabled(project),
     };
   }
 
   if (isLikelyStalled(project) || evidence.workerIncomplete) {
     return {
       derivedStatus: 'STALLED',
-      action: project.executionMode === 'CHAT' ? 'NUDGE_CHAT' : 'RETRY',
-      reason: '進捗更新が止まっている可能性があります。完了済みを確認して未完了地点から再開します。',
+      action: 'NUDGE_CHAT',
+      reason: '進捗更新が止まっている可能性があります。完了済みを確認して未完了地点からChatGPTを再開します。',
       completionScore: score,
-      canAutoContinue: project.executionMode !== 'CHAT',
+      canAutoContinue: automationEnabled(project),
     };
   }
 
@@ -132,7 +136,7 @@ export function evaluateProject(project: DevProject, evidence: SupervisorEvidenc
     action: 'NONE',
     reason: '通常進行中です。',
     completionScore: score,
-    canAutoContinue: project.automationLevel === 'AUTO' || project.automationLevel === 'GUARDIAN',
+    canAutoContinue: automationEnabled(project),
   };
 }
 

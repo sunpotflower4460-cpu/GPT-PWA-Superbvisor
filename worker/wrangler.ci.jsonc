@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gpt-pwa-supervisor-worker-ci",
+  "main": "src/app.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROJECT_COORDINATOR",
+        "class_name": "ProjectCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "ProjectCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

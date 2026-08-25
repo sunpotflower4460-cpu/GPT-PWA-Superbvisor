@@ -1,7 +1,9 @@
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 import { DevProject } from './core';
+import { DeveloperJobPhase } from './developerAgent';
 
 export interface GuardianCiCheck {
+  id?: number;
   name: string;
   status: string;
   conclusion: string | null;
@@ -17,7 +19,9 @@ export interface GuardianRun {
   goal: string;
   prompt: string;
   model?: string;
+  orchestratorProvider?: string;
   status: 'starting' | 'running' | 'waiting_ci' | 'review_ready' | 'completed' | 'failed' | 'expired';
+  phase?: DeveloperJobPhase;
   cycle: number;
   maxCycles: number;
   maxToolTurns: number;
@@ -28,9 +32,13 @@ export interface GuardianRun {
   lastAdvanceAt?: string;
   message?: string;
   error?: string;
+  transientErrorCount?: number;
   ciChecks?: GuardianCiCheck[];
   pullRequest?: { number: number; url: string; draft: true };
   finalSummary?: string;
+  handoffPrompt?: string;
+  recoveryCount?: number;
+  degradedOrchestration?: boolean;
   notifiedAt?: string;
 }
 
@@ -41,6 +49,7 @@ export async function startGuardianRun(
   connection: WorkerConnection = loadWorkerConnection(),
 ): Promise<GuardianRun> {
   if (!project.githubUrl) throw new Error('この案件にはGitHub URLが登録されていません。');
+  if (!project.chatUrl) throw new Error('Guardian自動運転には対象ChatGPT URLが必要です。');
   const result = await api<{ run: GuardianRun }>(connection, '/api/guardian-runs', {
     method: 'POST',
     body: JSON.stringify({
@@ -48,10 +57,14 @@ export async function startGuardianRun(
       projectName: project.name,
       repository: project.githubUrl,
       goal: project.goal,
+      definitionOfDone: project.definitionOfDone,
       prompt,
       maxCycles: clamp(options.maxCycles ?? 3, 1, 4),
       maxToolTurns: clamp(options.maxToolTurns ?? 10, 1, 16),
       maxMinutes: clamp(options.maxMinutes ?? 180, 15, 360),
+      maxAutoCiReruns: 2,
+      chatUrl: project.chatUrl,
+      autoDispatch: true,
     }),
   });
   return result.run;
@@ -74,7 +87,7 @@ export async function getLatestGuardianRun(
 }
 
 async function api<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
-  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にBackground Workerの接続設定を保存してください。');
+  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にSupervisor Workerの接続設定を保存してください。');
   const response = await fetch(`${connection.baseUrl.trim().replace(/\/$/, '')}${path}`, {
     ...init,
     headers: {

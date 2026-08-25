@@ -1,6 +1,8 @@
 import { DevProject } from './core';
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 
+export type DeveloperJobPhase = 'handoff_ready' | 'waiting_chatgpt' | 'waiting_ci' | 'recovery_ready' | 'human_required' | 'review_ready';
+
 export interface DeveloperJob {
   id: string;
   projectId?: string;
@@ -8,7 +10,9 @@ export interface DeveloperJob {
   repository: string;
   goal: string;
   prompt: string;
+  definitionOfDone?: string[];
   model: string;
+  orchestratorProvider?: string;
   workspace: {
     repository: string;
     defaultBranch: string;
@@ -17,19 +21,40 @@ export interface DeveloperJob {
     createdAt: string;
   };
   status: 'starting' | 'running' | 'completed' | 'failed';
-  currentResponseId?: string;
+  phase?: DeveloperJobPhase;
   toolTurns: number;
   maxToolTurns: number;
   createdAt: string;
   updatedAt: string;
   outputText?: string;
+  handoffPrompt?: string;
   error?: string;
+  degradedOrchestration?: boolean;
+  recoveryCount?: number;
+  ciAutoReruns?: number;
+  maxAutoCiReruns?: number;
+  ciChecks?: Array<{ id: number; name: string; status: string; conclusion: string | null; url: string; headSha: string }>;
   changedFiles?: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }>;
   pullRequest?: { number: number; url: string; draft: true };
+  chatUrl?: string;
+  autoDispatch?: boolean;
+  lastQueuedCommandId?: string;
+  lastDispatchError?: string;
+}
+
+export interface DeveloperConfig {
+  configured: boolean;
+  repositories: string[];
+  executor?: 'chatgpt';
+  orchestrationOnly?: boolean;
+  atomicCoordinator?: boolean;
+  primaryProvider?: string;
+  availableProviders?: string[];
+  deterministicFallback?: boolean;
 }
 
 export async function getDeveloperConfig(connection: WorkerConnection = loadWorkerConnection()) {
-  return api<{ configured: boolean; repositories: string[] }>(connection, '/api/github-agent/config', { method: 'GET' });
+  return api<DeveloperConfig>(connection, '/api/github-agent/config', { method: 'GET' });
 }
 
 export async function startDeveloperJob(
@@ -46,8 +71,12 @@ export async function startDeveloperJob(
       projectName: project.name,
       repository: project.githubUrl,
       goal: project.goal,
+      definitionOfDone: project.definitionOfDone,
       prompt,
       maxToolTurns: Math.max(1, Math.min(16, Math.trunc(maxToolTurns))),
+      maxAutoCiReruns: 2,
+      chatUrl: project.chatUrl,
+      autoDispatch: project.automationLevel === 'AUTO' || project.automationLevel === 'GUARDIAN',
     }),
   });
   return result.job;
@@ -64,7 +93,7 @@ export async function getLatestDeveloperJob(projectId: string, connection: Worke
 }
 
 async function api<T>(connection: WorkerConnection, path: string, init: RequestInit): Promise<T> {
-  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にBackground Workerの接続設定を保存してください。');
+  if (!connection.baseUrl.trim() || !connection.token.trim()) throw new Error('先にSupervisor Workerの接続設定を保存してください。');
   const response = await fetch(`${connection.baseUrl.trim().replace(/\/$/, '')}${path}`, {
     ...init,
     headers: {
@@ -74,6 +103,6 @@ async function api<T>(connection: WorkerConnection, path: string, init: RequestI
     },
   });
   const payload = await response.json().catch(() => ({})) as T & { error?: string; detail?: string };
-  if (!response.ok) throw new Error(payload.detail || payload.error || `Developer Agent request failed (${response.status})`);
+  if (!response.ok) throw new Error(payload.detail || payload.error || `ChatGPT Orchestrator request failed (${response.status})`);
   return payload;
 }

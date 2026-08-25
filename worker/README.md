@@ -1,83 +1,241 @@
-# Background Worker
+# Supervisor Worker
 
-AI DEV DECKの任意実行層です。通常運転はChatGPT Chatを優先し、端末を閉じても止めたくない工程だけOpenAI Responses APIのbackground modeへ明示的に昇格します。
+AI DEV DECKの**外部オーケストレーション / durable control層**です。
 
-## できること
+## 最重要ルール
 
-- OpenAI APIキーをPWA/ブラウザへ置かない
-- Responses APIのbackground responseを開始
-- PWAを閉じてもOpenAI側で処理を継続
-- OpenAI webhookを署名検証して受信
-- completed / failed / incomplete / cancelled を反映
-- Cloudflare KVへJob / Checkpointを保存
-- failed / incomplete時の上限付きAuto Recovery（明示ON・最大2回）
-- Goal / DoD / 最終Chat返答から任意のLLM Smart Replyを生成
-- 完了時に構造化されたDEVDECK_REPORT_JSONを保存
-- Web Pushを使い、PWAが閉じていてもBackground完了・停止を通知
+**実際に作業するのはChatGPTチャットです。**
 
-現段階ではBackground WorkerへGitHub書き込み権限を自動付与していません。したがって、アクセスできない外部システムを操作したと偽らないようWorker promptにも制約があります。
+Cloudflare Workerと外部LLM APIは、次だけを担当します。
+
+- Chat Control Bus
+- compact all-chat overview
+- multi-device command coordination
+- 状態整理
+- ChatGPTへ渡す次手の生成
+- GitHub作業branchの準備
+- branch head / CI監視
+- CI失敗分類
+- 一時障害の再試行
+- ChatGPT用recovery prompt生成
+- 状態保存
+- Push通知
+- Cloud sync
+
+外部LLMへGitHub write/delete/merge toolは渡しません。旧OpenAI Responses background executor / webhook経路は廃止されています。
+
+## Architecture
+
+```text
+PWA / Supervisor / Guardian
+ ↓
+Cloudflare Worker
+ ├─ Multi Chat Overview
+ │    └─ compact batch summaries only
+ │
+ ├─ ProjectCoordinator (SQLite Durable Object)
+ │    ├─ atomic enqueue / dedupe
+ │    ├─ one active Bridge claim owner
+ │    ├─ read-only command overview summary
+ │    ├─ delivery retry / stale claim recovery
+ │    ├─ Cloud State revision compare-and-update
+ │    └─ Guardian advance execution lease
+ │
+ ├─ KV
+ │    └─ migration / history mirror / compatibility fallback
+ │
+ ├─ Provider Router
+ │    DeepSeek → MiniMax → OpenAI → deterministic fallback
+ │
+ └─ GitHub Guardian
+      protected branch準備
+        ↓
+      ChatGPTが実装
+        ↓
+      exact head SHAのCI監視
+```
+
+## Atomic coordinator
+
+productionで複数端末・複数Bridgeを安全に扱うため、`PROJECT_COORDINATOR` はSQLite-backed Durable Objectとして設定します。
+
+Coordinatorが担当する強整合境界:
+
+- 同じdedupe keyの同時enqueueを1 commandへ集約
+- 1 commandへ同時に複数Bridgeがclaimしない
+- stale/non-owner Bridgeからのresult overwriteを409で拒否
+- transient delivery failureを同じcommand IDでbackoff再試行
+- retry/requeue時に古いBridge ownershipを解放
+- terminal failureを明示retryで同じcommand IDのまま再queue
+- queued/failed commandのmanual fallback切替時にatomic cancelし、後続Bridge配送との二重実行を防ぐ
+- claimed中のcommandはPWA側cancelを409拒否し、配送中にownershipを奪わない
+- Cloud Stateのrevision conflictをatomicに判定
+- 同一Guardian runのCron/manual advance入口を短期execution leaseで1本に絞る
+- high-frequency UI overviewへcommand本文を返さずread-only summaryを提供
+
+Guardian leaseは通常の二重advanceを抑止するための入口ロックです。Guardian / Developerの全KV state writeをtransactional storageへ移したわけではなく、lease期限を超える異常に長い処理まで完全fencingできるとは扱いません。
+
+`PROJECT_COORDINATOR` がない場合は既存KV fallbackで基本動作しますが、**atomic multi-device guaranteeはありません**。`GET /health` の `atomicCoordinator` とPWAのSetup Doctorで確認できます。
+
+## Multi Chat overview
+
+PWAのChat Controlは、選択中だけでなく管理中の全ChatGPTのremote activityを同じ画面で表示します。
+
+PWAは次をbatch取得します。
+
+```http
+POST /api/chat-control/overview
+Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
+Content-Type: application/json
+
+{
+  "projectIds": ["project-a", "project-b"]
+}
+```
+
+1 requestあたり最大30 projectです。PWA側は30件を超える時に複数batchへ分割します。
+
+返却するのはcompact metadataだけです。
+
+- Bridge connected/offline
+- DELIVERING
+- RETRY_SCHEDULED
+- QUEUED
+- WAITING_BRIDGE
+- NEEDS_ATTENTION
+- DELIVERED
+- CONNECTED_IDLE
+- pending / failed count
+- latest status/timestamp
+- active command ID
+- next retry time
+
+Coordinator有効時、overviewは `/commands/overview` のread-only summaryを使います。**full prompt / command本文を取得せず、overview readだけを理由にKV history mirrorを書き直しません。**
+
+KV fallback時は最大100件からsummary化し、上限に達した場合は`approximate`として扱います。
+
+## Failure resilience
+
+- Provider 408 / 409 / 425 / 429 / 5xx → 同providerを最大3 attempt
+- Provider失敗 → 次providerへfallback
+- 全provider失敗 → deterministic ChatGPT handoff
+- Bridge send failure → 同じcommand IDでbackoff再queue、上限後のみterminal failed
+- retry/requeue → 古いBridge ownershipを解除して次claimへ渡す
+- ChatGPT send成功 / Worker ack失敗 → Bridge delivery receiptを再同期し、本文の即再送を避ける
+- stale Bridge claim → 2分後に回収可能
+- PWAで「手動送信」へ切り替える場合 → 新しいタブ確保とClipboard copy成功後にqueued/failed commandをcancelし、cancel成功後だけChatGPTへ遷移
+- popup block / Clipboard failure → commandをcancelせず自動Queueを維持
+- Bridgeがすでにclaim済み → manual cancelを409拒否し、PWAは手動送信を開始しない
+- Guardian Cron/manual refresh競合 → Coordinator有効時は同一runのadvance leaseを1実行だけ取得
+- CI `cancelled` / `timed_out` / `startup_failure` / `stale` → failed jobsを最大2回再実行
+- CI `failure` → 同じ失敗をfingerprintしてChatGPT修正指示へ変換
+- GitHub/API一時エラー → Guardianをfailed終了せず次Cronで再試行
+- Push失敗 → 監督状態を壊さない
+- CI未検出 → successと推測しない
 
 ## 1. Install
 
 ```bash
 cd worker
 npm install
+npm run check
 ```
+
+`npm run check` は次をまとめて検証します。
+
+- TypeScript typecheck
+- regression tests
+- SQLite Durable Objectを含むWrangler dry-run
 
 ## 2. Cloudflare Worker設定
 
-`wrangler.example.jsonc` を `wrangler.jsonc` にコピーします。
-
 ```bash
 cp wrangler.example.jsonc wrangler.jsonc
-```
-
-KV namespaceを作成し、返されたIDを `wrangler.jsonc` の `SUPERVISOR_STATE` に設定します。
-
-```bash
 npx wrangler kv namespace create SUPERVISOR_STATE
 ```
 
-`ALLOWED_ORIGIN` は実際にPWAを公開するOriginへ変更します。
+返されたKV namespace IDを `wrangler.jsonc` の `SUPERVISOR_STATE` に設定します。
 
-例:
+`wrangler.example.jsonc` には以下のDurable Object設定が含まれています。
 
-```text
-https://sunpotflower4460-cpu.github.io
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROJECT_COORDINATOR",
+        "class_name": "ProjectCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "ProjectCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}
 ```
 
-## 3. OpenAI / app secrets
+このbinding/exportを削除した状態でproduction deployしないでください。互換KV fallbackへ落ち、複数端末競合耐性が弱くなります。
 
-以下はGitHubへコミットせず、Worker secretとして登録します。
+`ALLOWED_ORIGIN` はPWAの公開Originへ変更します。
+
+## 3. Required secrets
+
+PWA専用のWorker接続token:
 
 ```bash
-npx wrangler secret put OPENAI_API_KEY
-npx wrangler secret put OPENAI_WEBHOOK_SECRET
 npx wrangler secret put SUPERVISOR_CLIENT_TOKEN
 ```
 
-`SUPERVISOR_CLIENT_TOKEN` はOpenAI APIキーとは別の、このPWA専用アクセストークンです。十分長いランダム値を使います。
-
-macOS例:
+GitHub Guardianを使う場合:
 
 ```bash
-openssl rand -hex 32
+npx wrangler secret put GITHUB_TOKEN
 ```
 
-## 4. Web Push / VAPID
+`GITHUB_ALLOWED_REPOS` は `wrangler.jsonc` のvarsでallowlistを設定します。
 
-PushForgeでVAPID key pairを生成します。
+## 4. Orchestration providers
+
+最低1providerあると高品質な次手生成ができます。全部未設定でもdeterministic fallbackでSupervisor/Guardianは動作します。
+
+推奨の低コスト構成:
+
+```bash
+npx wrangler secret put DEEPSEEK_API_KEY
+npx wrangler secret put MINIMAX_API_KEY
+```
+
+OpenAIをfallbackにも使う場合だけ:
+
+```bash
+npx wrangler secret put OPENAI_API_KEY
+```
+
+標準vars:
+
+```jsonc
+{
+  "ORCHESTRATOR_PROVIDER": "deepseek",
+  "ORCHESTRATOR_FALLBACKS": "minimax,openai",
+  "DEEPSEEK_ORCHESTRATOR_MODEL": "deepseek-v4-flash",
+  "MINIMAX_ORCHESTRATOR_MODEL": "MiniMax-M3",
+  "OPENAI_ORCHESTRATOR_MODEL": "gpt-5.4-nano",
+  "MINIMAX_BASE_URL": "https://api.minimax.io/v1",
+  "ORCHESTRATOR_TIMEOUT_MS": "15000"
+}
+```
+
+## 5. Web Push / VAPID
 
 ```bash
 npx @pushforge/builder vapid
+npx wrangler secret put VAPID_PRIVATE_JWK
 ```
 
-出力されるもの:
-
-- public key: PWAがPush subscriptionを作るために使用
-- private key: JWK形式。Workerだけが保持
-
-`wrangler.jsonc` の `vars` に次を設定します。
+`wrangler.jsonc`:
 
 ```jsonc
 {
@@ -86,141 +244,168 @@ npx @pushforge/builder vapid
 }
 ```
 
-private JWKはファイルへ書かず、1行JSONのままSecretへ登録します。
+Pushはbest-effortです。通知配信失敗によってGuardianを失敗終了させません。
+
+## 6. Deploy
 
 ```bash
-npx wrangler secret put VAPID_PRIVATE_JWK
-```
-
-入力例の形:
-
-```json
-{"kty":"EC","crv":"P-256","x":"...","y":"...","d":"..."}
-```
-
-PWA公開後は、通知Inboxの **Pushを有効化** をタップします。ブラウザーの通知許可後、購読情報がWorkerのKVへ保存されます。その後 **テスト** で端末通知を確認できます。
-
-Pushを使わない場合、VAPID設定は省略可能です。Background Worker本体はそのまま動きます。
-
-## 5. Deploy
-
-```bash
-npm run typecheck
+npm run check
 npm run deploy
 ```
 
-Worker URLが発行されたら、PWAの ⚡ Background Worker → Worker接続設定 にURLと `SUPERVISOR_CLIENT_TOKEN` を入力します。
-
-OpenAI APIキーやVAPID private keyをPWAへ入力する必要はありません。
-
-## 6. OpenAI webhook
-
-OpenAI Platform側でWebhook endpointを作り、次を指定します。
-
-```text
-https://<your-worker>/webhooks/openai
-```
-
-主に利用するイベント:
-
-- `response.completed`
-- `response.failed`
-- `response.incomplete`
-- `response.cancelled`
-
-Webhook signing secretを `OPENAI_WEBHOOK_SECRET` としてWorkerへ登録します。
-
-Workerはraw bodyと `webhook-id` / `webhook-timestamp` / `webhook-signature` を使ってStandard Webhooks形式の署名を検証し、重複WebhookもKVで除外します。
-
-Webhookが一時的に取りこぼされた場合でも、PWAがJob状態を取得した時にfailed / incompleteを確認すれば、Auto Recovery条件を再評価します。
-
-## API
-
-### Health
+deploy後、必ずhealthを確認します。
 
 ```http
 GET /health
 ```
 
-### Start background job
+期待値:
+
+```json
+{
+  "ok": true,
+  "executor": "chatgpt",
+  "orchestrationOnly": true,
+  "chatCommandBus": true,
+  "atomicCoordinator": true
+}
+```
+
+`atomicCoordinator: false` の場合はproduction multi-device安全性が未設定です。
+
+Worker URLと `SUPERVISOR_CLIENT_TOKEN` をPWAのSupervisor Worker設定へ入力し、Setup DoctorでもAtomic Multi-device CoordinatorがPASSになることを確認します。
+
+## API
+
+### Health / executor boundary
+
+```http
+GET /health
+```
+
+PWAはここからChatGPT executor境界とAtomic Coordinator bindingを確認します。
+
+### Multi Chat overview
+
+```http
+POST /api/chat-control/overview
+```
+
+全案件のprimary rail用compact stateをbatch取得します。1 request最大30 projectです。
+
+### Chat Control Bus
+
+```http
+POST /api/chat-commands
+POST /api/chat-commands/claim
+POST /api/chat-commands/<id>/result
+POST /api/chat-commands/<id>/retry
+POST /api/chat-commands/<id>/cancel
+GET  /api/projects/<project-id>/chat-commands
+```
+
+`/cancel` はmanual fallbackへ切り替える前の二重配送防止用です。Coordinator有効時はqueued/failed→cancelledの遷移とBridge claimが同じproject scopeで直列化され、claimed中のcancelは409になります。
+
+Coordinator有効時はproject単位でauthoritative stateを持ちます。KVはmirror/fallbackです。
+
+### Cloud State
+
+```http
+GET    /api/state-sync
+POST   /api/state-sync
+DELETE /api/state-sync
+```
+
+Coordinator有効時はrevision compare-and-updateがstrongly consistentです。
+
+### Generic orchestration handoff
 
 ```http
 POST /api/jobs
 Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
-Content-Type: application/json
 ```
 
-例:
+このAPIはプロジェクト作業を実行しません。状態を整理し、`handoffPrompt` を返します。
 
-```json
-{
-  "projectId": "project-id",
-  "projectName": "SNS-AI",
-  "goal": "本人しかできない手動設定だけの状態まで仕上げる",
-  "currentPhase": "E2E確認",
-  "definitionOfDone": ["テストPASS", "重大エラーなし"],
-  "prompt": "残作業を確認して次工程を進める",
-  "autoRecover": true,
-  "maxAutoRetries": 2
-}
-```
-
-### Get job
+### GitHub / provider config
 
 ```http
-GET /api/jobs/<response-id>
-Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
+GET /api/github-agent/config
 ```
 
-### Latest job for project
+GitHub allowlist、ChatGPT executor boundary、Atomic Coordinator、利用可能provider、deterministic fallback有無を確認できます。
+
+### Guardian
 
 ```http
-GET /api/projects/<project-id>/latest
-Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
+POST /api/guardian-runs
+GET /api/guardian-runs/<id>
+GET /api/guardian-projects/<project-id>/latest
 ```
 
-### LLM Smart Reply
+Coordinator有効時、同じGuardian runのCron sweepと手動refreshは `guardian-advance` leaseで同時advanceを抑制します。
+
+Guardianの詳細は `GUARDIAN_RUNNER.md` を参照してください。
+
+### Smart Reply
 
 ```http
 POST /api/smart-replies
-Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
 ```
 
-通常はPWA内の無料rule-based Smart Replyを使い、必要な時だけこのAPIを呼びます。
+Smart Replyも同じProvider Routerを使います。全provider障害時はrule-based候補へfallbackします。
 
-### Push public key
+### Push
 
 ```http
 GET /api/push/public-key
-Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
-```
-
-### Register / remove Push subscription
-
-```http
 POST /api/push/subscriptions
 DELETE /api/push/subscriptions
-Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
-```
-
-### Test Push
-
-```http
 POST /api/push/test
-Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>
 ```
+
+## OpenAI webhookについて
+
+旧バージョンの `/webhooks/openai` は、OpenAI Responses background executor用でした。
+
+現在は外部APIに実作業を委譲しないため廃止済みで、endpointは `410 deprecated_background_executor` を返します。`OPENAI_WEBHOOK_SECRET` は不要です。
+
+## State and consistency
+
+状態の扱いを3段階に分けます。
+
+**Strongly consistent / authoritative:**
+- Chat command ownership / dedupe / delivery retry / manual fallback cancel
+- compact command overview summary
+- Cloud State revision compare-and-update
+- SQLite Durable Object `ProjectCoordinator`
+
+**Strongly coordinated execution entry:**
+- Guardian runのCron/manual `advance` はCoordinator leaseで同時実行を抑制
+- leaseは期限付きで、Worker crash後は自動takeover可能
+
+**Durable snapshot / mirror:**
+- KV migration source
+- command history mirror
+- Guardian / Developer / handoff / Push等の既存監督snapshot
+
+したがって、通常のGuardian二重advanceは抑制済みですが、Guardian / Developer state全体が完全transactional/fencedになったとは扱いません。実運用上必要性が確認された場合は、authoritative state自体をCoordinator/D1等へ移すのが次の強化段階です。
 
 ## Cost / safety
 
-- Background Workerはユーザーが明示的に開始した時だけAPI処理を開始します。
-- `OPENAI_MODEL` でBackgroundモデルを変更できます。サンプルは `gpt-5.6-luna`。
-- `SMART_REPLY_MODEL` でSmart Replyモデルを変更できます。サンプルは `gpt-5.4-nano`。
-- Auto RecoveryはJobごとに明示ONが必要で、コード側でも最大2回に制限します。
-- Chat → Worker / Workへの勝手な昇格はしません。
-- PushはBackground Jobが最終状態へ到達した時だけ送信し、同じJob/statusの重複送信をKVで抑止します。
-- 無効になったPush subscription（404/410）はKVから削除します。
-- KV上のJob/Checkpointは14日TTLです。
+- all-chat overviewはsummary-only + batch transport
+- overview pollでfull prompt/historyを繰り返し読まない
+- overview pollでKV mirror writeを増幅しない
+- manual fallbackはautomatic Queueとの二重配送を残さない
+- 低コストproviderをprimaryにできる
+- 高価なmodelを毎回使わない
+- provider failureで別providerへfallback
+- APIは実装を行わないため、モデル変更でGitHub書込挙動が変わらない
+- GitHubはallowlist repoのみ
+- Workerはmain/default branchへコードwriteしない
+- Draft PRのみ
+- auto mergeなし
+- production deployなし
+- secretsはWorker側のみ
 
-## Why not put secrets in the PWA?
-
-公開PWAへOpenAI APIキーやVAPID private keyを埋め込むと、ブラウザから取得され第三者に利用される可能性があります。そのため秘密情報はserver-side Workerだけが保持します。
+このWorkerの目的は「別AIに開発を丸投げする」ことではなく、**ChatGPTの実作業を、安いAPIと堅い状態機械で外から支えること**です。

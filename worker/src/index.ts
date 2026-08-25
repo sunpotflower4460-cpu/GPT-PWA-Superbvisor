@@ -1,5 +1,20 @@
-import { Webhook } from 'standardwebhooks';
 import { generateSmartReplies, SmartReplyRequest } from './smartReplies';
+import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
+import { buildGenericChatGptHandoff } from './orchestratorPolicy';
+import {
+  ChatCommandConflictError,
+  INVALID_CHAT_COMMAND_ERROR,
+  cancelChatCommand,
+  claimNextChatCommand,
+  enqueueChatCommand,
+  getChatCommand,
+  getProjectChatCommand,
+  listProjectChatCommands,
+  retryChatCommand,
+  updateChatCommandResult,
+} from './chatCommandQueue';
+import { getChatBridgeStatus, recordChatBridgeHeartbeat } from './chatBridge';
+import { getChatControlOverview } from './chatControlOverview';
 import {
   getVapidPublicKey,
   registerPushSubscription,
@@ -7,17 +22,15 @@ import {
   unregisterPushSubscription,
 } from './push';
 
-interface Env {
-  OPENAI_API_KEY: string;
-  OPENAI_WEBHOOK_SECRET: string;
+interface Env extends OrchestrationEnv {
   SUPERVISOR_CLIENT_TOKEN: string;
-  OPENAI_MODEL?: string;
   SMART_REPLY_MODEL?: string;
   ALLOWED_ORIGIN?: string;
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_JWK?: string;
   VAPID_SUBJECT?: string;
   SUPERVISOR_STATE: KVNamespace;
+  PROJECT_COORDINATOR?: DurableObjectNamespace;
 }
 
 type JobStatus = 'queued' | 'in_progress' | 'completed' | 'failed' | 'incomplete' | 'cancelled';
@@ -43,20 +56,10 @@ interface CompletionReport {
   done: boolean;
 }
 
-interface OpenAIResponseRecord {
-  id: string;
-  status?: JobStatus | string;
-  output?: Array<{
-    type?: string;
-    content?: Array<{ type?: string; text?: string }>;
-  }>;
-  error?: { code?: string; message?: string } | null;
-  incomplete_details?: { reason?: string } | null;
-  metadata?: Record<string, string> | null;
-}
-
 interface StoredJob {
   id: string;
+  kind: 'orchestration_handoff';
+  phase: 'handoff_ready';
   projectId: string;
   projectName?: string;
   goal: string;
@@ -64,35 +67,28 @@ interface StoredJob {
   definitionOfDone: string[];
   prompt: string;
   model: string;
+  orchestratorProvider: string;
+  degradedOrchestration: boolean;
+  handoffPrompt: string;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
-  completedAt?: string;
-  outputText?: string;
-  error?: string;
-  report?: CompletionReport;
-  autoRecover: boolean;
-  maxAutoRetries: number;
-  retryCount: number;
+  completedAt: string;
+  outputText: string;
+  report: CompletionReport;
+  autoRecover: false;
+  maxAutoRetries: 0;
+  retryCount: 0;
   rootJobId: string;
-  previousJobId?: string;
-  nextJobId?: string;
-  checkpoint?: {
+  checkpoint: {
     at: string;
     status: JobStatus;
     summary: string;
   };
 }
 
-interface WebhookEvent {
-  type: string;
-  data?: { id?: string };
-}
-
 const JOB_TTL_SECONDS = 60 * 60 * 24 * 14;
-const EVENT_TTL_SECONDS = 60 * 60 * 24;
-const FINAL_STATUSES = new Set<JobStatus>(['completed', 'failed', 'incomplete', 'cancelled']);
-const MAX_ALLOWED_AUTO_RETRIES = 2;
+const MAX_OVERVIEW_PROJECTS = 30;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -103,11 +99,19 @@ export default {
     }
 
     if (url.pathname === '/health' && request.method === 'GET') {
-      return json({ ok: true, service: 'gpt-pwa-supervisor-worker' }, 200, env, request);
+      return json({
+        ok: true,
+        service: 'gpt-pwa-supervisor-worker',
+        executor: 'chatgpt',
+        orchestrationOnly: true,
+        chatCommandBus: true,
+        chatBridgeHeartbeat: true,
+        atomicCoordinator: Boolean(env.PROJECT_COORDINATOR),
+      }, 200, env, request);
     }
 
     if (url.pathname === '/webhooks/openai' && request.method === 'POST') {
-      return handleOpenAIWebhook(request, env);
+      return json({ error: 'deprecated_background_executor', executor: 'chatgpt', orchestrationOnly: true }, 410, env, request);
     }
 
     if (!authorized(request, env)) {
@@ -115,11 +119,74 @@ export default {
     }
 
     if (url.pathname === '/api/jobs' && request.method === 'POST') {
-      return createJob(request, env);
+      return createOrchestrationJob(request, env);
     }
 
     if (url.pathname === '/api/smart-replies' && request.method === 'POST') {
       return createSmartReplies(request, env);
+    }
+
+    if (url.pathname === '/api/chat-commands' && request.method === 'POST') {
+      return createChatCommand(request, env);
+    }
+
+    if (url.pathname === '/api/chat-commands/claim' && request.method === 'POST') {
+      return claimChatCommand(request, env);
+    }
+
+    if (url.pathname === '/api/chat-control/overview' && request.method === 'POST') {
+      return createChatControlOverview(request, env);
+    }
+
+    if (url.pathname === '/api/chat-bridge/status' && request.method === 'GET') {
+      const projectId = url.searchParams.get('projectId')?.trim() || '';
+      if (!projectId) return json({ error: 'projectId is required' }, 400, env, request);
+      return json(await getChatBridgeStatus(env, projectId), 200, env, request);
+    }
+
+    if (url.pathname === '/api/chat-bridge/heartbeat' && request.method === 'POST') {
+      const body = await readJson<{ projectId?: string; bridgeId?: string; capabilities?: string[] }>(request);
+      try {
+        const status = await recordChatBridgeHeartbeat(env, {
+          projectId: body?.projectId || '',
+          bridgeId: body?.bridgeId || '',
+          capabilities: body?.capabilities,
+        });
+        return json(status, 200, env, request);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : 'invalid_bridge_heartbeat' }, 400, env, request);
+      }
+    }
+
+    const chatCommandMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)$/);
+    if (chatCommandMatch && request.method === 'GET') {
+      const id = decodeURIComponent(chatCommandMatch[1]);
+      const projectId = url.searchParams.get('projectId')?.trim() || '';
+      const command = projectId
+        ? await getProjectChatCommand(env, projectId, id)
+        : await getChatCommand(env, id);
+      return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+    }
+
+    const chatCommandResultMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)\/result$/);
+    if (chatCommandResultMatch && request.method === 'POST') {
+      return reportChatCommandResult(decodeURIComponent(chatCommandResultMatch[1]), request, env);
+    }
+
+    const chatCommandRetryMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)\/retry$/);
+    if (chatCommandRetryMatch && request.method === 'POST') {
+      return retryFailedChatCommand(decodeURIComponent(chatCommandRetryMatch[1]), request, env);
+    }
+
+    const chatCommandCancelMatch = url.pathname.match(/^\/api\/chat-commands\/([^/]+)\/cancel$/);
+    if (chatCommandCancelMatch && request.method === 'POST') {
+      return cancelPendingChatCommand(decodeURIComponent(chatCommandCancelMatch[1]), request, env);
+    }
+
+    const projectCommandsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/chat-commands$/);
+    if (projectCommandsMatch && request.method === 'GET') {
+      const commands = await listProjectChatCommands(env, decodeURIComponent(projectCommandsMatch[1]), 40);
+      return json({ commands }, 200, env, request);
     }
 
     if (url.pathname === '/api/push/public-key' && request.method === 'GET') {
@@ -177,87 +244,177 @@ async function createSmartReplies(request: Request, env: Env): Promise<Response>
   return json(result, 200, env, request);
 }
 
-async function createJob(request: Request, env: Env): Promise<Response> {
+async function createChatControlOverview(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectIds?: unknown }>(request);
+  if (!Array.isArray(body?.projectIds)) return json({ error: 'projectIds must be an array' }, 400, env, request);
+  const projectIds = [...new Set(body.projectIds
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim().slice(0, 200))
+    .filter(Boolean))];
+  if (projectIds.length > MAX_OVERVIEW_PROJECTS) {
+    return json({ error: `projectIds must contain at most ${MAX_OVERVIEW_PROJECTS} unique projects` }, 400, env, request);
+  }
+  if (!projectIds.length) return json({ projects: [] }, 200, env, request);
+  const projects = await getChatControlOverview(env, projectIds);
+  return json({ projects }, 200, env, request);
+}
+
+async function createChatCommand(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectId?: string; projectName?: string; chatUrl?: string; prompt?: string; dedupeKey?: string }>(request);
+  try {
+    const command = await enqueueChatCommand(env, {
+      projectId: body?.projectId || '',
+      projectName: body?.projectName,
+      chatUrl: body?.chatUrl || '',
+      prompt: body?.prompt || '',
+      dedupeKey: body?.dedupeKey,
+    });
+    return json({ command, transport: 'waiting_bridge' }, 202, env, request);
+  } catch (error) {
+    if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
+    const message = error instanceof Error ? error.message : 'chat_command_enqueue_failed';
+    return json({ error: message }, message === INVALID_CHAT_COMMAND_ERROR ? 400 : 503, env, request);
+  }
+}
+
+async function claimChatCommand(request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ bridgeId?: string; projectId?: string }>(request);
+  if (!body?.bridgeId?.trim() || !body.projectId?.trim()) return json({ error: 'bridgeId and projectId are required' }, 400, env, request);
+  try {
+    const command = await claimNextChatCommand(env, body.bridgeId, body.projectId.trim());
+    return json({ command }, 200, env, request);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : 'chat_command_claim_failed' }, 503, env, request);
+  }
+}
+
+async function reportChatCommandResult(id: string, request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{
+    projectId?: string;
+    bridgeId?: string;
+    status?: 'delivered' | 'failed' | 'cancelled';
+    detail?: string;
+  }>(request);
+  if (!body?.projectId?.trim() || !body.bridgeId?.trim()) {
+    return json({ error: 'projectId and bridgeId are required' }, 400, env, request);
+  }
+  if (!body.status || !['delivered', 'failed', 'cancelled'].includes(body.status)) {
+    return json({ error: 'status must be delivered, failed or cancelled' }, 400, env, request);
+  }
+  try {
+    const command = await updateChatCommandResult(env, id, {
+      projectId: body.projectId,
+      bridgeId: body.bridgeId,
+      status: body.status,
+      detail: body.detail,
+    });
+    return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+  } catch (error) {
+    if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
+    return json({ error: error instanceof Error ? error.message : 'chat_command_result_failed' }, 503, env, request);
+  }
+}
+
+async function retryFailedChatCommand(id: string, request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectId?: string }>(request);
+  if (!body?.projectId?.trim()) return json({ error: 'projectId is required' }, 400, env, request);
+  try {
+    const command = await retryChatCommand(env, body.projectId, id);
+    return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+  } catch (error) {
+    if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
+    return json({ error: error instanceof Error ? error.message : 'chat_command_retry_failed' }, 503, env, request);
+  }
+}
+
+async function cancelPendingChatCommand(id: string, request: Request, env: Env): Promise<Response> {
+  const body = await readJson<{ projectId?: string; detail?: string }>(request);
+  if (!body?.projectId?.trim()) return json({ error: 'projectId is required' }, 400, env, request);
+  try {
+    const command = await cancelChatCommand(env, body.projectId, id, body.detail);
+    return command ? json({ command }, 200, env, request) : json({ error: 'chat_command_not_found' }, 404, env, request);
+  } catch (error) {
+    if (error instanceof ChatCommandConflictError) return json({ error: error.code }, 409, env, request);
+    return json({ error: error instanceof Error ? error.message : 'chat_command_cancel_failed' }, 503, env, request);
+  }
+}
+
+async function createOrchestrationJob(request: Request, env: Env): Promise<Response> {
   const body = await readJson<CreateJobBody>(request);
   if (!body || !body.projectId?.trim() || !body.goal?.trim() || !body.prompt?.trim()) {
     return json({ error: 'projectId, goal and prompt are required' }, 400, env, request);
   }
 
-  const launched = await launchJob(env, body, { retryCount: 0 });
-  if (!launched.ok) {
-    return json({ error: 'openai_create_failed', detail: launched.error }, launched.status, env, request);
-  }
-  return json({ job: launched.job }, 202, env, request);
-}
-
-async function launchJob(
-  env: Env,
-  body: CreateJobBody,
-  chain: { retryCount: number; rootJobId?: string; previousJobId?: string },
-): Promise<{ ok: true; job: StoredJob } | { ok: false; status: number; error: string }> {
-  const model = body.model?.trim() || env.OPENAI_MODEL?.trim() || 'gpt-5.6-luna';
-  const autoRecover = body.autoRecover === true;
-  const maxAutoRetries = autoRecover ? clampInteger(body.maxAutoRetries ?? 2, 0, MAX_ALLOWED_AUTO_RETRIES) : 0;
-
-  const response = await openAI<OpenAIResponseRecord>(env, '/responses', {
-    method: 'POST',
-    body: {
-      model,
-      background: true,
-      input: buildWorkerInput(body, chain.retryCount),
-      metadata: {
-        devdeck_project_id: body.projectId.slice(0, 64),
-        devdeck_project_name: (body.projectName || body.projectId).slice(0, 64),
-        devdeck_attempt: String(chain.retryCount),
-      },
-    },
+  const deterministicPrompt = buildGenericChatGptHandoff({
+    projectName: body.projectName,
+    goal: body.goal,
+    currentPhase: body.currentPhase,
+    task: body.prompt,
+    definitionOfDone: body.definitionOfDone,
+  });
+  const decision = await runOrchestrationModel(env, {
+    mode: 'PLAN',
+    repository: 'not-applicable',
+    branch: 'not-applicable',
+    goal: body.goal,
+    task: body.prompt,
+    evidence: `Project: ${body.projectName || body.projectId}\nCurrent phase: ${body.currentPhase || 'unknown'}\nThis is a non-GitHub orchestration handoff. The external API must not claim that implementation work was executed.`,
+    deterministicPrompt,
   });
 
-  if (!response.ok || !response.data?.id) {
-    return { ok: false, status: response.status || 502, error: response.error || 'Unknown OpenAI error' };
-  }
-
   const now = new Date().toISOString();
-  const status = normalizeStatus(response.data.status);
-  const rootJobId = chain.rootJobId || response.data.id;
+  const id = crypto.randomUUID();
+  const report: CompletionReport = {
+    summary: decision.summary,
+    steps: ['Supervisorが現在状態を整理', 'ChatGPTへ渡す実行指示を生成'],
+    reachedStage: 'ChatGPT引き継ぎ準備完了',
+    remaining: ['ChatGPTチャットで実作業を実行し、実際の結果を確認する'],
+    humanRequired: decision.humanRequired,
+    done: false,
+  };
   const job: StoredJob = {
-    id: response.data.id,
+    id,
+    kind: 'orchestration_handoff',
+    phase: 'handoff_ready',
     projectId: body.projectId,
     projectName: body.projectName,
     goal: body.goal,
     currentPhase: body.currentPhase,
-    definitionOfDone: body.definitionOfDone ?? [],
+    definitionOfDone: (body.definitionOfDone ?? []).filter((item) => typeof item === 'string').slice(0, 30),
     prompt: body.prompt,
-    model,
-    status,
+    model: decision.model,
+    orchestratorProvider: decision.provider,
+    degradedOrchestration: decision.degraded,
+    handoffPrompt: decision.chatgptPrompt,
+    status: 'completed',
     createdAt: now,
     updatedAt: now,
-    autoRecover,
-    maxAutoRetries,
-    retryCount: chain.retryCount,
-    rootJobId,
-    previousJobId: chain.previousJobId,
+    completedAt: now,
+    outputText: decision.summary,
+    report,
+    autoRecover: false,
+    maxAutoRetries: 0,
+    retryCount: 0,
+    rootJobId: id,
+    checkpoint: { at: now, status: 'completed', summary: 'オーケストレーション指示の生成が完了しました。実作業はChatGPTへ引き継ぎます。' },
   };
 
   await persistJob(env, job);
   await env.SUPERVISOR_STATE.put(`project:${body.projectId}:latest`, job.id, { expirationTtl: JOB_TTL_SECONDS });
-  return { ok: true, job };
+  await safePush(env, {
+    title: `${body.projectName || 'AI DEV DECK'}: GPT指示を準備`,
+    body: 'Supervisorが次の実行指示を準備しました。実作業はChatGPTで続けます。',
+    tag: `orchestration-${job.id}`,
+    projectId: body.projectId,
+    kind: 'info',
+    url: './',
+  });
+  return json({ job }, 202, env, request);
 }
 
 async function getJob(id: string, request: Request, env: Env): Promise<Response> {
-  let job = await readJob(env, id);
-  if (!job) return json({ error: 'job_not_found' }, 404, env, request);
-
-  if (!FINAL_STATUSES.has(job.status)) job = await refreshJobFromOpenAI(env, job);
-
-  if (job.status === 'failed' || job.status === 'incomplete') {
-    const recovered = await maybeAutoRecover(env, job);
-    if (!recovered) await maybePushJobStatus(env, job);
-  } else if (job.status === 'completed' || job.status === 'cancelled') {
-    await maybePushJobStatus(env, job);
-  }
-
-  return json({ job }, 200, env, request);
+  const job = await readJob(env, id);
+  return job ? json({ job }, 200, env, request) : json({ error: 'job_not_found' }, 404, env, request);
 }
 
 async function getLatestProjectJob(projectId: string, request: Request, env: Env): Promise<Response> {
@@ -266,169 +423,8 @@ async function getLatestProjectJob(projectId: string, request: Request, env: Env
   return getJob(id, request, env);
 }
 
-async function handleOpenAIWebhook(request: Request, env: Env): Promise<Response> {
-  if (!env.OPENAI_WEBHOOK_SECRET) return new Response('Webhook secret is not configured', { status: 503 });
-
-  const rawBody = await request.text();
-  const webhookId = request.headers.get('webhook-id');
-  const webhookTimestamp = request.headers.get('webhook-timestamp');
-  const webhookSignature = request.headers.get('webhook-signature');
-  if (!webhookId || !webhookTimestamp || !webhookSignature) return new Response('Missing webhook signature headers', { status: 400 });
-
-  let event: WebhookEvent;
-  try {
-    const verifier = new Webhook(env.OPENAI_WEBHOOK_SECRET);
-    event = verifier.verify(rawBody, {
-      'webhook-id': webhookId,
-      'webhook-timestamp': webhookTimestamp,
-      'webhook-signature': webhookSignature,
-    }) as WebhookEvent;
-  } catch {
-    return new Response('Invalid webhook signature', { status: 400 });
-  }
-
-  const dedupeKey = `event:${webhookId}`;
-  if (await env.SUPERVISOR_STATE.get(dedupeKey)) return Response.json({ ok: true, duplicate: true });
-
-  const responseId = event.data?.id;
-  if (responseId && event.type.startsWith('response.')) {
-    const existing = await readJob(env, responseId);
-    if (existing) {
-      const refreshed = await refreshJobFromOpenAI(env, existing);
-      if (refreshed.status === 'failed' || refreshed.status === 'incomplete') {
-        const recovered = await maybeAutoRecover(env, refreshed);
-        if (!recovered) await maybePushJobStatus(env, refreshed);
-      } else if (FINAL_STATUSES.has(refreshed.status)) {
-        await maybePushJobStatus(env, refreshed);
-      }
-    }
-  }
-
-  await env.SUPERVISOR_STATE.put(dedupeKey, event.type, { expirationTtl: EVENT_TTL_SECONDS });
-  return Response.json({ ok: true });
-}
-
-async function maybeAutoRecover(env: Env, failedJob: StoredJob): Promise<boolean> {
-  if (!failedJob.autoRecover || failedJob.nextJobId || failedJob.retryCount >= failedJob.maxAutoRetries) return false;
-  if (failedJob.status !== 'failed' && failedJob.status !== 'incomplete') return false;
-
-  const nextRetry = failedJob.retryCount + 1;
-  const recoveryPrompt = `前回のBackground attempt #${failedJob.retryCount + 1} は ${failedJob.status} で終了しました。\n原因: ${failedJob.error || '詳細不明'}\n\n元の依頼:\n${failedJob.prompt}\n\n同じ失敗を漫然と繰り返さず、原因を踏まえて修正した進め方または別アプローチで再試行してください。完了済みの内容がある場合は重複せず、最終目標へ近づけてください。`;
-
-  const launched = await launchJob(env, {
-    projectId: failedJob.projectId,
-    projectName: failedJob.projectName,
-    goal: failedJob.goal,
-    currentPhase: failedJob.currentPhase,
-    definitionOfDone: failedJob.definitionOfDone,
-    prompt: recoveryPrompt,
-    model: failedJob.model,
-    autoRecover: true,
-    maxAutoRetries: failedJob.maxAutoRetries,
-  }, {
-    retryCount: nextRetry,
-    rootJobId: failedJob.rootJobId,
-    previousJobId: failedJob.id,
-  });
-
-  if (!launched.ok) return false;
-  await persistJob(env, { ...failedJob, nextJobId: launched.job.id, updatedAt: new Date().toISOString() });
-  return true;
-}
-
-async function maybePushJobStatus(env: Env, job: StoredJob) {
-  if (!FINAL_STATUSES.has(job.status)) return;
-  const key = `push-job:${job.id}:${job.status}`;
-  if (await env.SUPERVISOR_STATE.get(key)) return;
-
-  const projectName = job.projectName || 'AI DEV DECK';
-  const human = job.report?.humanRequired ?? [];
-  let title = `${projectName}: ${job.status}`;
-  let body = job.report?.summary || job.checkpoint?.summary || job.error || 'Background処理の状態が更新されました。';
-  let kind: 'complete' | 'error' | 'human' | 'info' = 'info';
-
-  if (job.status === 'completed') {
-    kind = human.length ? 'human' : 'complete';
-    title = human.length ? `${projectName}: 完了・あなたの操作あり` : `${projectName}: 完了`;
-    if (human.length) body = `${body} / 必要: ${human.join(' / ')}`;
-  } else if (job.status === 'failed' || job.status === 'incomplete') {
-    kind = 'error';
-    title = `${projectName}: ${job.status === 'failed' ? 'エラー' : '未完了で停止'}`;
-  }
-
-  await sendSupervisorPush(env, { title, body: body.slice(0, 900), tag: `job-${job.id}`, projectId: job.projectId, kind, url: './' });
-  await env.SUPERVISOR_STATE.put(key, new Date().toISOString(), { expirationTtl: JOB_TTL_SECONDS });
-}
-
-async function refreshJobFromOpenAI(env: Env, job: StoredJob): Promise<StoredJob> {
-  const response = await openAI<OpenAIResponseRecord>(env, `/responses/${encodeURIComponent(job.id)}`, { method: 'GET' });
-  if (!response.ok || !response.data) {
-    const failed: StoredJob = { ...job, updatedAt: new Date().toISOString(), error: response.error || `OpenAI retrieve failed (${response.status})` };
-    await persistJob(env, failed);
-    return failed;
-  }
-
-  const now = new Date().toISOString();
-  const status = normalizeStatus(response.data.status);
-  const outputText = extractOutputText(response.data);
-  const error = response.data.error?.message || response.data.incomplete_details?.reason;
-  const final = FINAL_STATUSES.has(status);
-  const report = outputText ? parseCompletionReport(outputText) : undefined;
-  const updated: StoredJob = {
-    ...job,
-    status,
-    updatedAt: now,
-    completedAt: final ? now : job.completedAt,
-    outputText: outputText || job.outputText,
-    error: error || undefined,
-    report: report || job.report,
-    checkpoint: final ? { at: now, status, summary: report?.summary || checkpointSummary(outputText, error, status) } : job.checkpoint,
-  };
-  await persistJob(env, updated);
-  return updated;
-}
-
-function buildWorkerInput(body: CreateJobBody, retryCount: number): string {
-  const done = body.definitionOfDone?.length ? body.definitionOfDone.map((item) => `- ${item}`).join('\n') : '- ユーザーが指定した最終目標を満たす';
-  return `あなたはAI DEV DECKのBackground Workerです。\n\n【プロジェクト】\n${body.projectName || body.projectId}\n\n【最終目標】\n${body.goal}\n\n【現在地点】\n${body.currentPhase || '未指定'}\n\n【完成条件】\n${done}\n\n【今回の指示】\n${body.prompt}\n\n【attempt】\n${retryCount + 1}\n\nルール:\n- 完了済み作業を推測で繰り返さず、与えられた情報から必要な次工程を進める。\n- エラーがある場合は原因を分析し、同じ失敗を漫然と繰り返さない。\n- 課金、秘密情報、本人確認、不可逆な外部操作、大きな仕様変更など本人判断が必要な内容は明示する。\n- 実際にアクセスできない外部システムを操作したと偽らない。\n- 最後に通常の説明に加えて、必ず最終行付近へ次の形式を1つだけ出す。JSONは正しいJSONにする。\n\nDEVDECK_REPORT_JSON: {"summary":"短い完了要約","steps":["実施手順1","実施手順2"],"reachedStage":"現在の到達地点","remaining":["残作業"],"humanRequired":["本人が必要なこと"],"done":false}\n\ndoneは最終目標と完成条件を本当に満たした場合だけtrue。`;
-}
-
-function extractOutputText(response: OpenAIResponseRecord): string {
-  const chunks: string[] = [];
-  for (const item of response.output ?? []) for (const content of item.content ?? []) if (content.type === 'output_text' && typeof content.text === 'string') chunks.push(content.text);
-  return chunks.join('\n').trim();
-}
-
-function parseCompletionReport(output: string): CompletionReport | undefined {
-  const marker = 'DEVDECK_REPORT_JSON:';
-  const index = output.lastIndexOf(marker);
-  if (index < 0) return undefined;
-  const candidate = output.slice(index + marker.length).trim();
-  const firstBrace = candidate.indexOf('{');
-  const lastBrace = candidate.lastIndexOf('}');
-  if (firstBrace < 0 || lastBrace <= firstBrace) return undefined;
-  try {
-    const parsed = JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
-    return {
-      summary: stringValue(parsed.summary).slice(0, 1200),
-      steps: stringArray(parsed.steps, 20),
-      reachedStage: stringValue(parsed.reachedStage).slice(0, 500),
-      remaining: stringArray(parsed.remaining, 20),
-      humanRequired: stringArray(parsed.humanRequired, 20),
-      done: parsed.done === true,
-    };
-  } catch { return undefined; }
-}
-
-function checkpointSummary(output: string, error: string | undefined, status: JobStatus): string {
-  if (error) return `${status}: ${error}`.slice(0, 1200);
-  if (!output) return `${status}: output text was empty`;
-  return output.replace(/\s+/g, ' ').trim().slice(0, 1200);
-}
-
-function normalizeStatus(value?: string): JobStatus {
-  if (value === 'completed' || value === 'failed' || value === 'incomplete' || value === 'cancelled' || value === 'in_progress') return value;
-  return 'queued';
+async function safePush(env: Env, payload: Parameters<typeof sendSupervisorPush>[1]) {
+  try { await sendSupervisorPush(env, payload); } catch { /* Push is best-effort; orchestration result stays durable. */ }
 }
 
 async function persistJob(env: Env, job: StoredJob) {
@@ -441,29 +437,8 @@ async function readJob(env: Env, id: string): Promise<StoredJob | null> {
   try { return JSON.parse(raw) as StoredJob; } catch { return null; }
 }
 
-async function openAI<T>(env: Env, path: string, options: { method: 'GET' | 'POST'; body?: unknown }): Promise<{ ok: boolean; status: number; data?: T; error?: string }> {
-  try {
-    const response = await fetch(`https://api.openai.com/v1${path}`, {
-      method: options.method,
-      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    });
-    const text = await response.text();
-    let parsed: unknown;
-    try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = undefined; }
-    if (!response.ok) {
-      const message = isObject(parsed) && isObject(parsed.error) && typeof parsed.error.message === 'string' ? parsed.error.message : text || `OpenAI request failed (${response.status})`;
-      return { ok: false, status: response.status, error: message };
-    }
-    return { ok: true, status: response.status, data: parsed as T };
-  } catch (error) {
-    return { ok: false, status: 502, error: error instanceof Error ? error.message : 'Network error' };
-  }
-}
-
 function authorized(request: Request, env: Env) {
-  if (!env.SUPERVISOR_CLIENT_TOKEN) return false;
-  return request.headers.get('authorization') === `Bearer ${env.SUPERVISOR_CLIENT_TOKEN}`;
+  return Boolean(env.SUPERVISOR_CLIENT_TOKEN) && request.headers.get('authorization') === `Bearer ${env.SUPERVISOR_CLIENT_TOKEN}`;
 }
 
 function corsHeaders(env: Env, request: Request): HeadersInit {
@@ -485,14 +460,3 @@ function json(payload: unknown, status: number, env: Env, request: Request) {
 async function readJson<T>(request: Request): Promise<T | null> {
   try { return await request.json<T>(); } catch { return null; }
 }
-
-function clampInteger(value: number, min: number, max: number) {
-  const integer = Number.isFinite(value) ? Math.trunc(value) : min;
-  return Math.max(min, Math.min(max, integer));
-}
-function stringValue(value: unknown) { return typeof value === 'string' ? value : ''; }
-function stringArray(value: unknown, max: number): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === 'string').slice(0, max).map((item) => item.slice(0, 1000));
-}
-function isObject(value: unknown): value is Record<string, any> { return typeof value === 'object' && value !== null; }

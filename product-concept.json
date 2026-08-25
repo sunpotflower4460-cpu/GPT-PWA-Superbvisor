@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 4,
+  "conceptId": "multi-chat-remote-v1",
+  "productName": "AI DEV DECK",
+  "primaryPurpose": "普段使っている複数のChatGPT開発チャットを、スマホPWAからまとめて同時並行・軽量・バックグラウンド耐性ありで操作する",
+  "primaryUserFlow": [
+    "PWAで複数の既存ChatGPT開発案件を一覧し、全案件のremote activityを同じ画面で把握する",
+    "対象案件へ自由文またはQuick CommandをChat Control Bus経由で送る",
+    "ChatGPTが実装・デバッグ・GitHub編集を実行する",
+    "Workerがキュー・状態・CI・復旧・Autopilot次手・通知を保持する",
+    "AUTO/GUARDIANでは復旧・次工程をChat Control Busへ自動投入する",
+    "PWAから待機・失敗・本当の人間待ち・完了を把握して複数案件を回す"
+  ],
+  "roles": {
+    "executor": "chatgpt",
+    "pwa": "multi-chat-control-plane",
+    "worker": "durable-orchestration-and-evidence",
+    "externalLlm": "orchestration-only",
+    "bridge": "official-chatgpt-apps-transport",
+    "coordinator": "strongly-consistent-multi-device-control"
+  },
+  "experience": {
+    "primarySendPath": "pwa-to-chat-control-bus-to-chatgpt-bridge",
+    "clipboardIsFallbackOnly": true,
+    "routineChatWaitingIsHumanRequired": false,
+    "chatCanAutoContinue": true,
+    "autopilotNextTurnAutoQueue": true,
+    "recoveryNextTurnAutoQueue": true,
+    "legacyApiWorkerExecutorVisible": false,
+    "responseMirrorRequiresOfficialTransport": true,
+    "atomicCoordinatorRequiredForMultiDevice": true,
+    "singleClaimOwnerRequired": true,
+    "deliveryRetryPreservesCommandIdentity": true,
+    "multiChatOverviewRequired": true,
+    "overviewUsesBatchTransport": true,
+    "overviewPollingAvoidsCommandBodyReads": true,
+    "mobileJsGzipBudgetKiB": 130,
+    "mobileCssGzipBudgetKiB": 20
+  },
+  "invariants": [
+    {
+      "id": "C1",
+      "rule": "Multi Chat Remote is the primary product value; Supervisor, Guardian and Autopilot are supporting layers."
+    },
+    {
+      "id": "C2",
+      "rule": "The existing ChatGPT development conversation remains the implementation and debugging executor; API_WORKER is not a normal executor mode."
+    },
+    {
+      "id": "C3",
+      "rule": "External LLM APIs may classify, summarize, route and generate next/recovery instructions, but must not become the repository coding executor."
+    },
+    {
+      "id": "C4",
+      "rule": "Durable queue, state and evidence survive PWA closure whenever the platform allows it; recoverable failures are states, not terminal completion."
+    },
+    {
+      "id": "C5",
+      "rule": "Completion is evidence-based and never derived only from an AI saying it is done."
+    },
+    {
+      "id": "C6",
+      "rule": "WAITING_USER is reserved for genuine human-only actions; normal ChatGPT handoff, bridge delivery and recoverable code failure remain AI/system states."
+    },
+    {
+      "id": "C7",
+      "rule": "Chat transport must not depend on ChatGPT session-cookie theft, scraping, unofficial authentication bypass or secret exposure in the PWA/widget."
+    },
+    {
+      "id": "C8",
+      "rule": "No automatic merge or production deployment without an explicit future product decision and human approval boundary."
+    },
+    {
+      "id": "C9",
+      "rule": "Mobile-first, low-friction operation is preferred over building a second full IDE or a provider-centric agent platform, and bundle size is budgeted in CI."
+    },
+    {
+      "id": "C10",
+      "rule": "Normal commands, Operating Plans, recovery prompts and Autopilot next turns use Chat Control Bus; clipboard/open-chat is fallback only."
+    },
+    {
+      "id": "C11",
+      "rule": "CHAT can auto-continue in AUTO/GUARDIAN; automation extends the ChatGPT executor rather than replacing it."
+    },
+    {
+      "id": "C12",
+      "rule": "Unsupported host capabilities such as arbitrary closed-thread wakeup or response mirroring are represented honestly and are not emulated with unofficial session automation."
+    },
+    {
+      "id": "C13",
+      "rule": "Multi-device command ownership and cloud-state revision updates require a strongly consistent coordinator; KV-only read-then-write is compatibility fallback, not the production concurrency guarantee."
+    },
+    {
+      "id": "C14",
+      "rule": "A Chat command has one active claim owner at a time; delivery retries preserve command identity and stale or non-owner bridges must not overwrite the authoritative result."
+    },
+    {
+      "id": "C15",
+      "rule": "The primary Chat Control view shows live remote activity for all configured ChatGPT projects, not only the selected chat; overview polling uses compact batch summaries and must not repeatedly fetch full command bodies or create mirror writes."
+    }
+  ],
+  "antiGoals": [
+    "Claude Code clone / second IDE",
+    "external API autonomous coding agent as the main executor",
+    "chat transcript viewer as the primary experience",
+    "generic project manager with ChatGPT links attached",
+    "provider benchmark or LLM router as the product itself",
+    "automatic merge or production deployment by default",
+    "unofficial ChatGPT cookie/session automation",
+    "clipboard-first normal command flow",
+    "routine ChatGPT or recovery states mislabeled as human waiting",
+    "fake response mirroring through unsupported ChatGPT internals",
+    "KV-only concurrency presented as atomic multi-device safety",
+    "multiple bridges concurrently owning the same chat command",
+    "selected-chat-only remote status that forces users to open projects one by one",
+    "high-frequency overview polling that reloads full prompt history or amplifies KV writes"
+  ],
+  "protectedArchitectureFiles": [
+    "product-concept.json",
+    "docs/PRODUCT_CONSTITUTION.md",
+    "docs/ARCHITECTURE.md",
+    "scripts/concept-guard.mjs",
+    "scripts/check-bundle-size.mjs",
+    "src/App.tsx",
+    "src/core.ts",
+    "src/ChatControlCenter.tsx",
+    "src/chatControl.ts",
+    "src/RuntimeProjectSync.tsx",
+    "src/supervisor.ts",
+    "src/SetupDoctorCenter.tsx",
+    "worker/src/index.ts",
+    "worker/src/chatCommandQueue.ts",
+    "worker/src/chatControlOverview.ts",
+    "worker/src/projectCoordinator.ts",
+    "worker/src/stateSync.ts",
+    "worker/src/developerAgent.ts",
+    "worker/src/guardianRunner.ts",
+    "worker/wrangler.example.jsonc",
+    "worker/wrangler.ci.jsonc",
+    "chatgpt-bridge/src/bridgeApp.ts"
+  ],
+  "safety": {
+    "externalLlmGithubWrite": false,
+    "automaticMerge": false,
+    "automaticProductionDeploy": false,
+    "chatSessionCookieAutomation": false,
+    "evidenceRequiredForCompletion": true
+  }
+}

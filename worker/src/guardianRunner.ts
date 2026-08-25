@@ -1,18 +1,23 @@
 import {
   CreateDeveloperJobBody,
   DeveloperJob,
-  continueDeveloperJob,
   createManagedDeveloperJob,
   getDeveloperJob,
   refreshDeveloperJob,
 } from './developerAgent';
-import { GitHubEnv, getBranchWorkflowRuns, getRepositorySummary } from './githubExecutor';
+import { GitHubEnv } from './githubExecutor';
+import { OrchestrationEnv } from './orchestrationModel';
+import {
+  acquireCoordinatorLease,
+  hasAtomicCoordinator,
+  releaseCoordinatorLease,
+  renewCoordinatorLease,
+} from './projectCoordinator';
 import { PushEnv, sendSupervisorPush } from './push';
 
-interface GuardianEnv extends GitHubEnv, PushEnv {
-  OPENAI_API_KEY: string;
-  OPENAI_MODEL?: string;
+interface GuardianEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
+  PROJECT_COORDINATOR?: DurableObjectNamespace;
 }
 
 export interface CreateGuardianRunBody extends CreateDeveloperJobBody {
@@ -23,6 +28,7 @@ export interface CreateGuardianRunBody extends CreateDeveloperJobBody {
 export type GuardianRunStatus = 'starting' | 'running' | 'waiting_ci' | 'review_ready' | 'completed' | 'failed' | 'expired';
 
 export interface GuardianCiCheck {
+  id?: number;
   name: string;
   status: string;
   conclusion: string | null;
@@ -38,7 +44,9 @@ export interface GuardianRun {
   goal: string;
   prompt: string;
   model?: string;
+  orchestratorProvider?: string;
   status: GuardianRunStatus;
+  phase?: DeveloperJob['phase'];
   cycle: number;
   maxCycles: number;
   maxToolTurns: number;
@@ -49,17 +57,22 @@ export interface GuardianRun {
   lastAdvanceAt?: string;
   message?: string;
   error?: string;
+  transientErrorCount?: number;
   ciChecks?: GuardianCiCheck[];
   pullRequest?: { number: number; url: string; draft: true };
   finalSummary?: string;
+  handoffPrompt?: string;
+  recoveryCount?: number;
+  degradedOrchestration?: boolean;
   notifiedAt?: string;
 }
 
 const RUN_TTL = 60 * 60 * 24 * 14;
 const MAX_CYCLES = 4;
 const MAX_MINUTES = 360;
-const CI_GRACE_MS = 7 * 60_000;
-const PROCESSING_GRACE_MS = 90_000;
+const PROCESSING_GRACE_MS = 60_000;
+const GUARDIAN_ADVANCE_LEASE_MS = 5 * 60_000;
+const GUARDIAN_ADVANCE_LEASE_NAME = 'guardian-advance';
 
 export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRunBody): Promise<GuardianRun> {
   if (!body.repository?.trim() || !body.goal?.trim() || !body.prompt?.trim()) throw new Error('repository, goal and prompt are required');
@@ -69,11 +82,7 @@ export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRu
   const maxToolTurns = clamp(body.maxToolTurns ?? 10, 1, 16);
   const now = new Date().toISOString();
 
-  const developer = await createManagedDeveloperJob(env, {
-    ...body,
-    maxToolTurns,
-  }, id);
-
+  const developer = await createManagedDeveloperJob(env, { ...body, maxToolTurns }, id);
   const run: GuardianRun = {
     id,
     projectId: body.projectId,
@@ -82,7 +91,9 @@ export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRu
     goal: body.goal,
     prompt: body.prompt,
     model: developer.model,
+    orchestratorProvider: developer.orchestratorProvider,
     status: 'running',
+    phase: developer.phase,
     cycle: 1,
     maxCycles,
     maxToolTurns,
@@ -90,12 +101,15 @@ export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRu
     currentDeveloperJobId: developer.id,
     createdAt: now,
     updatedAt: now,
-    message: 'Developer Agent cycle 1 started.',
+    message: 'ChatGPT用の作業branchと引き継ぎ指示を準備しました。Workerは実装せず、CIと復旧状態を監視します。',
+    handoffPrompt: developer.handoffPrompt,
+    finalSummary: developer.outputText,
+    recoveryCount: developer.recoveryCount,
+    degradedOrchestration: developer.degradedOrchestration,
   };
-
   await saveRun(env, run);
   await mapDeveloperJob(env, developer.id, run.id);
-  return advanceGuardianRun(env, run.id, { force: true });
+  return run;
 }
 
 export async function getGuardianRun(env: GuardianEnv, id: string): Promise<GuardianRun | null> {
@@ -116,112 +130,162 @@ export async function advanceGuardianRun(
   id: string,
   options: { force?: boolean } = {},
 ): Promise<GuardianRun> {
+  const existing = await readRun(env, id);
+  if (!existing) throw new Error('Guardian run not found');
+  if (isFinal(existing.status)) return existing;
+
+  if (!hasAtomicCoordinator(env)) return advanceGuardianRunUnlocked(env, id, options);
+
+  const scope = `guardian:${id}`;
+  const owner = `${options.force ? 'manual' : 'sweep'}:${crypto.randomUUID()}`;
+  const acquired = await acquireCoordinatorLease(env, scope, {
+    name: GUARDIAN_ADVANCE_LEASE_NAME,
+    owner,
+    ttlMs: GUARDIAN_ADVANCE_LEASE_MS,
+  });
+  if (acquired.status === 409 || acquired.data.acquired === false) {
+    return await readRun(env, id) ?? existing;
+  }
+  const token = acquired.data.lease?.token;
+  if (!acquired.ok || !token) throw new Error(acquired.data.error || `guardian_advance_lease_failed_${acquired.status}`);
+
+  try {
+    return await advanceGuardianRunUnlocked(env, id, options, { scope, token });
+  } finally {
+    try {
+      await releaseCoordinatorLease(env, scope, { name: GUARDIAN_ADVANCE_LEASE_NAME, token });
+    } catch {
+      // Lease expiry provides crash recovery; release is best-effort.
+    }
+  }
+}
+
+async function advanceGuardianRunUnlocked(
+  env: GuardianEnv,
+  id: string,
+  options: { force?: boolean },
+  lease?: { scope: string; token: string },
+): Promise<GuardianRun> {
   let run = await readRun(env, id);
   if (!run) throw new Error('Guardian run not found');
   if (isFinal(run.status)) return run;
 
   const nowMs = Date.now();
   if (nowMs - new Date(run.createdAt).getTime() > run.maxMinutes * 60_000) {
-    return finalize(env, run, 'expired', `Guardian time limit reached (${run.maxMinutes} min).`);
+    return finalize(env, run, 'expired', `Guardianの監視時間上限 (${run.maxMinutes}分) に達しました。状態は保存済みです。ChatGPTで続きを再開できます。`);
   }
-
   if (!options.force && run.lastAdvanceAt && nowMs - new Date(run.lastAdvanceAt).getTime() < PROCESSING_GRACE_MS) return run;
+
   run = { ...run, lastAdvanceAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() };
   await saveRun(env, run);
 
   let job = await getDeveloperJob(env, run.currentDeveloperJobId);
-  if (!job) return finalize(env, run, 'failed', 'Current developer job was not found.');
+  if (!job) return recordRecoverableError(env, run, 'Developer orchestration job was temporarily unavailable. Guardian will retry on the next sweep.');
 
-  if (job.status === 'running') {
-    job = await refreshDeveloperJob(env, job.id) ?? job;
-    if (job.status === 'running') {
-      run = { ...run, status: 'running', message: `Developer Agent cycle ${run.cycle} is running.`, updatedAt: new Date().toISOString() };
-      await saveRun(env, run);
-      return run;
-    }
+  if (lease) {
+    const renewed = await renewCoordinatorLease(env, lease.scope, {
+      name: GUARDIAN_ADVANCE_LEASE_NAME,
+      token: lease.token,
+      ttlMs: GUARDIAN_ADVANCE_LEASE_MS,
+    });
+    if (!renewed.ok || !renewed.data.renewed) throw new Error(renewed.data.error || 'guardian_advance_lease_lost');
   }
 
-  if (job.status === 'failed') return recoverOrFail(env, run, job, `Developer Agent failed: ${job.error || 'unknown error'}`);
+  try {
+    job = await refreshDeveloperJob(env, job.id) ?? job;
+  } catch (error) {
+    return recordRecoverableError(env, run, error instanceof Error ? error.message : 'Developer refresh failed');
+  }
 
+  const recoveryCount = job.recoveryCount ?? 0;
+  const cycle = Math.min(run.maxCycles, Math.max(1, recoveryCount + 1));
+  const overNominalRecoveryBudget = recoveryCount >= run.maxCycles;
   run = {
     ...run,
-    pullRequest: job.pullRequest ?? run.pullRequest,
-    finalSummary: job.outputText || run.finalSummary,
+    model: job.model,
+    orchestratorProvider: job.orchestratorProvider,
+    phase: job.phase,
+    cycle,
+    recoveryCount,
+    ciChecks: job.ciChecks,
+    pullRequest: job.pullRequest,
+    finalSummary: job.outputText,
+    handoffPrompt: job.handoffPrompt,
+    degradedOrchestration: job.degradedOrchestration,
+    transientErrorCount: 0,
+    error: job.error,
     updatedAt: new Date().toISOString(),
   };
+
+  if (job.status === 'completed') {
+    return finalize(env, run, 'completed', '現在headのCI成功を確認しました。実装はChatGPT、Workerは監督のみで完了しています。');
+  }
+
+  if (job.phase === 'human_required') {
+    return finalize(env, run, 'review_ready', '権限・承認など人間操作が必要な状態です。復旧用ChatGPT指示と証拠を保存して監督を安全停止しました。');
+  }
+
+  if (job.phase === 'waiting_ci') {
+    run = { ...run, status: 'waiting_ci', message: '現在headのGitHub Actionsを監視中です。失敗してもジョブ自体は終了せず、復旧経路へ移ります。' };
+  } else if (job.phase === 'recovery_ready') {
+    run = {
+      ...run,
+      status: 'running',
+      message: overNominalRecoveryBudget
+        ? '通常の復旧サイクル目安を超えましたが、Guardianは停止せず監視を継続しています。ChatGPT用の最新復旧指示を使用してください。'
+        : `CI失敗を検出しました。復旧サイクル ${recoveryCount}/${run.maxCycles}。ChatGPT用の修正指示を更新し、監視を継続しています。`,
+    };
+  } else if (job.phase === 'waiting_chatgpt' || job.phase === 'handoff_ready') {
+    run = { ...run, status: 'running', message: 'ChatGPTによるbranch上の作業を待っています。Workerは外部APIで実装せず、定期監視を継続します。' };
+  } else {
+    run = { ...run, status: 'running', message: job.outputText || 'Supervisor is monitoring the ChatGPT execution state.' };
+  }
+
   await saveRun(env, run);
-
-  const repo = await getRepositorySummary(env, job.repository, job.workspace.branch);
-  const allRuns = await getBranchWorkflowRuns(env, job.repository, job.workspace.branch);
-  const relevant = latestChecksForHead(allRuns.filter((item) => item.headSha === repo.headSha));
-
-  if (!relevant.length) {
-    const sinceJob = nowMs - new Date(job.updatedAt).getTime();
-    if (sinceJob < CI_GRACE_MS) {
-      run = { ...run, status: 'waiting_ci', ciChecks: [], message: 'Waiting for GitHub Actions to appear.', updatedAt: new Date().toISOString() };
-      await saveRun(env, run);
-      return run;
-    }
-    return finalize(env, run, 'review_ready', 'Developer work completed, but no GitHub Actions run was detected for the current branch head. Human review is required; CI success is not being assumed.');
-  }
-
-  run = { ...run, ciChecks: relevant, updatedAt: new Date().toISOString() };
-  await saveRun(env, run);
-
-  if (relevant.some((check) => check.status !== 'completed')) {
-    run = { ...run, status: 'waiting_ci', message: 'Waiting for GitHub Actions to finish.', updatedAt: new Date().toISOString() };
-    await saveRun(env, run);
-    return run;
-  }
-
-  const failures = relevant.filter((check) => !isSuccessfulConclusion(check.conclusion));
-  if (failures.length) {
-    const detail = failures.map((check) => `${check.name}: ${check.conclusion || check.status} (${check.url})`).join('\n');
-    return recoverOrFail(env, run, job, `CI failed on cycle ${run.cycle}:\n${detail}`);
-  }
-
-  return finalize(env, run, 'completed', `CI is green after ${run.cycle} cycle${run.cycle === 1 ? '' : 's'}. Draft PR is ready for human review.`);
+  return run;
 }
 
-export async function sweepGuardianRuns(env: GuardianEnv): Promise<{ checked: number; advanced: number }> {
-  const listed = await env.SUPERVISOR_STATE.list({ prefix: 'guardian-run:', limit: 100 });
+export async function sweepGuardianRuns(env: GuardianEnv): Promise<{ checked: number; advanced: number; recoverableErrors: number }> {
   let checked = 0;
   let advanced = 0;
-  for (const key of listed.keys) {
-    const id = key.name.slice('guardian-run:'.length);
-    const run = await readRun(env, id);
-    if (!run || isFinal(run.status)) continue;
-    checked += 1;
-    const before = `${run.status}:${run.cycle}:${run.updatedAt}`;
-    try {
-      const afterRun = await advanceGuardianRun(env, id);
-      const after = `${afterRun.status}:${afterRun.cycle}:${afterRun.updatedAt}`;
-      if (after !== before) advanced += 1;
-    } catch (error) {
-      const failed = await readRun(env, id);
-      if (failed) await finalize(env, failed, 'failed', error instanceof Error ? error.message : 'Guardian sweep failed');
+  let recoverableErrors = 0;
+  let cursor: string | undefined;
+
+  do {
+    const listed = await env.SUPERVISOR_STATE.list({ prefix: 'guardian-run:', limit: 100, cursor });
+    for (const key of listed.keys) {
+      const id = key.name.slice('guardian-run:'.length);
+      const run = await readRun(env, id);
+      if (!run || isFinal(run.status)) continue;
+      checked += 1;
+      const before = `${run.status}:${run.phase || ''}:${run.recoveryCount || 0}:${run.updatedAt}`;
+      try {
+        const afterRun = await advanceGuardianRun(env, id);
+        const after = `${afterRun.status}:${afterRun.phase || ''}:${afterRun.recoveryCount || 0}:${afterRun.updatedAt}`;
+        if (after !== before) advanced += 1;
+      } catch (error) {
+        recoverableErrors += 1;
+        const current = await readRun(env, id);
+        if (current && !isFinal(current.status)) {
+          await recordRecoverableError(env, current, error instanceof Error ? error.message : 'Guardian sweep failed');
+        }
+      }
     }
-  }
-  return { checked, advanced };
+    cursor = listed.list_complete ? undefined : listed.cursor;
+  } while (cursor);
+
+  return { checked, advanced, recoverableErrors };
 }
 
-async function recoverOrFail(env: GuardianEnv, run: GuardianRun, job: DeveloperJob, reason: string): Promise<GuardianRun> {
-  if (run.cycle >= run.maxCycles) return finalize(env, run, 'failed', `${reason}\nMaximum recovery cycles reached (${run.maxCycles}).`);
-
-  const nextCycle = run.cycle + 1;
-  const prompt = `Guardian Supervisor detected that the previous implementation cycle did not reach a clean result.\n\nReason:\n${reason}\n\nOriginal goal:\n${run.goal}\n\nOriginal task:\n${run.prompt}\n\nPrevious agent summary:\n${job.outputText || 'No summary available.'}\n\nContinue on the SAME protected feature branch. Inspect the current branch state first, preserve completed work, fix the actual cause, and re-check the diff. Do not merely repeat the previous attempt. Do not merge or deploy production.`;
-  const next = await continueDeveloperJob(env, job, prompt, run.id);
-  await mapDeveloperJob(env, next.id, run.id);
+async function recordRecoverableError(env: GuardianEnv, run: GuardianRun, detail: string): Promise<GuardianRun> {
+  const count = (run.transientErrorCount || 0) + 1;
   const updated: GuardianRun = {
     ...run,
-    status: 'running',
-    cycle: nextCycle,
-    currentDeveloperJobId: next.id,
-    message: `Recovery cycle ${nextCycle}/${run.maxCycles} started on the same branch.`,
-    error: undefined,
-    ciChecks: undefined,
+    status: run.status === 'waiting_ci' ? 'waiting_ci' : 'running',
+    transientErrorCount: count,
+    error: detail,
+    message: `監督処理で一時エラーを検出しました (${count}回)。状態を失敗終了にはせず、次回Cron/手動更新で再試行します。: ${detail}`,
     updatedAt: new Date().toISOString(),
-    lastAdvanceAt: undefined,
   };
   await saveRun(env, updated);
   return updated;
@@ -230,32 +294,32 @@ async function recoverOrFail(env: GuardianEnv, run: GuardianRun, job: DeveloperJ
 async function finalize(
   env: GuardianEnv,
   run: GuardianRun,
-  status: 'review_ready' | 'completed' | 'failed' | 'expired',
+  status: 'review_ready' | 'completed' | 'expired',
   message: string,
 ): Promise<GuardianRun> {
   let updated: GuardianRun = {
     ...run,
     status,
     message,
-    error: status === 'failed' || status === 'expired' ? message : undefined,
+    error: status === 'expired' ? message : run.error,
     updatedAt: new Date().toISOString(),
   };
   if (!run.notifiedAt) {
     const name = run.projectName || run.repository;
-    const title = status === 'completed'
-      ? `${name}: Guardian完了`
-      : status === 'review_ready'
-        ? `${name}: Guardianレビュー待ち`
-        : `${name}: Guardian停止`;
-    await sendSupervisorPush(env, {
-      title,
-      body: message.slice(0, 240),
-      tag: `guardian-${run.id}`,
-      projectId: run.projectId,
-      kind: status === 'completed' ? 'complete' : status === 'review_ready' ? 'human' : 'error',
-      url: run.pullRequest?.url || './',
-    });
-    updated = { ...updated, notifiedAt: new Date().toISOString() };
+    const title = status === 'completed' ? `${name}: Guardian完了` : status === 'review_ready' ? `${name}: 人間確認が必要` : `${name}: 監視時間上限`;
+    try {
+      await sendSupervisorPush(env, {
+        title,
+        body: message.slice(0, 240),
+        tag: `guardian-${run.id}`,
+        projectId: run.projectId,
+        kind: status === 'completed' ? 'complete' : 'human',
+        url: run.pullRequest?.url || './',
+      });
+      updated = { ...updated, notifiedAt: new Date().toISOString() };
+    } catch {
+      // Push delivery is best-effort and must never corrupt the orchestration state.
+    }
   }
   await saveRun(env, updated);
   return updated;
@@ -272,18 +336,8 @@ async function readRun(env: GuardianEnv, id: string): Promise<GuardianRun | null
   try { return JSON.parse(raw) as GuardianRun; } catch { return null; }
 }
 
-async function mapDeveloperJob(env: GuardianEnv, developerJobId: string, guardianRunId: string) {
-  await env.SUPERVISOR_STATE.put(`guardian-developer:${developerJobId}`, guardianRunId, { expirationTtl: RUN_TTL });
-}
-
-function latestChecksForHead(items: GuardianCiCheck[]) {
-  const byName = new Map<string, GuardianCiCheck>();
-  for (const item of items) if (!byName.has(item.name)) byName.set(item.name, item);
-  return [...byName.values()];
-}
-
-function isSuccessfulConclusion(value: string | null) {
-  return value === 'success' || value === 'neutral' || value === 'skipped';
+async function mapDeveloperJob(env: GuardianEnv, developerJobId: string, runId: string) {
+  await env.SUPERVISOR_STATE.put(`guardian-developer:${developerJobId}`, runId, { expirationTtl: RUN_TTL });
 }
 
 function isFinal(status: GuardianRunStatus) {

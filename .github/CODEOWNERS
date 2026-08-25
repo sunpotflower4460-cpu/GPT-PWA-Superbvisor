@@ -1,0 +1,41 @@
+# Product concept / architecture boundaries
+/product-concept.json @sunpotflower4460-cpu
+/docs/PRODUCT_CONSTITUTION.md @sunpotflower4460-cpu
+/docs/ARCHITECTURE.md @sunpotflower4460-cpu
+/scripts/concept-guard.mjs @sunpotflower4460-cpu
+/scripts/check-bundle-size.mjs @sunpotflower4460-cpu
+/AGENTS.md @sunpotflower4460-cpu
+/.github/copilot-instructions.md @sunpotflower4460-cpu
+
+# Primary Multi Chat UX / state semantics
+/src/App.tsx @sunpotflower4460-cpu
+/src/core.ts @sunpotflower4460-cpu
+/src/ChatControlCenter.tsx @sunpotflower4460-cpu
+/src/chatControl.ts @sunpotflower4460-cpu
+/src/chat-control.css @sunpotflower4460-cpu
+/src/OperatingPlanCenter.tsx @sunpotflower4460-cpu
+/src/RuntimeProjectSync.tsx @sunpotflower4460-cpu
+/src/supervisor.ts @sunpotflower4460-cpu
+/src/SetupDoctorCenter.tsx @sunpotflower4460-cpu
+
+# Strong consistency / state / overview boundary
+/worker/src/projectCoordinator.ts @sunpotflower4460-cpu
+/worker/src/chatCommandQueue.ts @sunpotflower4460-cpu
+/worker/src/chatControlOverview.ts @sunpotflower4460-cpu
+/worker/src/stateSync.ts @sunpotflower4460-cpu
+/worker/wrangler.example.jsonc @sunpotflower4460-cpu
+/worker/wrangler.ci.jsonc @sunpotflower4460-cpu
+
+# Executor / orchestration boundary
+/worker/src/index.ts @sunpotflower4460-cpu
+/worker/src/developerAgent.ts @sunpotflower4460-cpu
+/worker/src/guardianRunner.ts @sunpotflower4460-cpu
+/worker/src/orchestratorPolicy.ts @sunpotflower4460-cpu
+/worker/src/orchestrationModel.ts @sunpotflower4460-cpu
+
+# Chat transport boundary
+/chatgpt-bridge/src/bridgeApp.ts @sunpotflower4460-cpu
+/chatgpt-bridge/src/cloudflare.ts @sunpotflower4460-cpu
+
+# CI governance
+/.github/workflows/ci.yml @sunpotflower4460-cpu
