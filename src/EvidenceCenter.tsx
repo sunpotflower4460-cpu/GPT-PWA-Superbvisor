@@ -109,9 +109,10 @@ function EvidenceCard({
 }) {
   const snapshot = state?.snapshot;
   const repository = project.githubUrl ? parseGitHubRepositoryUrl(project.githubUrl) : null;
-  const decision = snapshot
+  const ciObserved = snapshot?.ciState === 'SUCCESS' || snapshot?.ciState === 'FAILURE';
+  const decision = snapshot && ciObserved
     ? evaluateProject(project, {
-        ciPassing: snapshot.ciState === 'SUCCESS' ? true : snapshot.ciState === 'FAILURE' ? false : undefined,
+        ciPassing: snapshot.ciState === 'SUCCESS',
         latestCommitAt: snapshot.latestCommitAt,
       })
     : null;
@@ -145,13 +146,21 @@ function EvidenceCard({
             <small>{snapshot.latestCommitAt ? new Date(snapshot.latestCommitAt).toLocaleString('ja-JP') : '日時不明'}</small>
           </div>
 
-          {decision && (
+          {decision ? (
             <div className="judge-row">
               <div>
                 <span>Completion Judge</span>
                 <strong>{decision.completionScore}%</strong>
               </div>
               <p>{decision.reason}</p>
+            </div>
+          ) : (
+            <div className="judge-row">
+              <div>
+                <span>Completion Judge</span>
+                <strong>保留</strong>
+              </div>
+              <p>最新commitに対応するCI結果を確認できないため、GitHub証拠からの完成判定は行いません。</p>
             </div>
           )}
 

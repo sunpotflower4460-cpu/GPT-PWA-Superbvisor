@@ -5,6 +5,7 @@ import {
   deleteCloudState as deleteRemoteCloudState,
   getCloudState,
   pushCloudState,
+  rememberCloudRevision,
 } from './cloudStateSync';
 import { DevProject, loadProjects, saveProjects } from './core';
 import { HandoffCheckpoint, loadHandoffCheckpoints } from './handoff';
@@ -232,8 +233,9 @@ export default function DataBackupCenter() {
         return;
       }
       const incoming = parseBackup(JSON.stringify(remote.data));
-      const merged = mergeBackup(createBackup(), incoming);
+      const merged = mergeNewestBackup(createBackup(), incoming);
       writeBackup(merged);
+      rememberCloudRevision(remote.revision);
       setCloudState({ ...remote, data: incoming });
       setCloudMessage(`Cloudから安全にマージしました。案件は現在 ${merged.data.projects.length}件です。`);
     } catch (reason) {

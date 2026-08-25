@@ -46,6 +46,30 @@ function executionRouteLabel(project: DevProject) {
   return project.automationLevel === 'GUARDIAN' ? '🛡 Guardian' : '⚡ Background';
 }
 
+function safeChatUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:') return null;
+    if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function safeGitHubUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
   const [projects, setProjects] = useState<DevProject[]>(() => loadProjects());
   const [tab, setTab] = useState<Tab>('projects');
@@ -66,6 +90,8 @@ export default function App() {
 
   const selected = projects.find((project) => project.id === selectedId) ?? null;
   const selectedPlan = selected ? getOperatingPlan(selected.id) : null;
+  const selectedChatUrl = safeChatUrl(selected?.chatUrl);
+  const selectedGitHubUrl = safeGitHubUrl(selected?.githubUrl);
   const runningCount = projects.filter((project) => ['RUNNING', 'WAITING_AI'].includes(project.status)).length;
   const humanCount = projects.filter((project) => project.status === 'WAITING_USER' || project.humanBlockers.length > 0).length;
   const completedCount = projects.filter((project) => project.status === 'COMPLETED').length;
@@ -199,12 +225,12 @@ export default function App() {
               ))}
             </div>
             <div className="launch-row">
-              {selected.chatUrl ? (
-                <button className="launch-button" onClick={() => window.open(selected.chatUrl, '_blank', 'noopener,noreferrer')}>ChatGPTを開く ↗</button>
-              ) : <span className="muted">Chat URL未登録</span>}
-              {selected.githubUrl && (
-                <button className="ghost-button" onClick={() => window.open(selected.githubUrl, '_blank', 'noopener,noreferrer')}>GitHub ↗</button>
-              )}
+              {selectedChatUrl ? (
+                <button className="launch-button" onClick={() => window.open(selectedChatUrl, '_blank', 'noopener,noreferrer')}>ChatGPTを開く ↗</button>
+              ) : <span className="muted">{selected.chatUrl ? 'Chat URLを確認してください' : 'Chat URL未登録'}</span>}
+              {selectedGitHubUrl ? (
+                <button className="ghost-button" onClick={() => window.open(selectedGitHubUrl, '_blank', 'noopener,noreferrer')}>GitHub ↗</button>
+              ) : selected.githubUrl ? <span className="muted">GitHub URLを確認してください</span> : null}
             </div>
           </article>
 
@@ -346,10 +372,15 @@ function CreateProjectModal({ onClose, onCreate }: { onClose: () => void; onCrea
 }
 
 function Settings() {
-  const [notificationState, setNotificationState] = useState(Notification.permission);
+  const [notificationState, setNotificationState] = useState<NotificationPermission | 'unsupported'>(() =>
+    'Notification' in window ? Notification.permission : 'unsupported',
+  );
 
   async function requestNotifications() {
-    if (!('Notification' in window)) return;
+    if (!('Notification' in window)) {
+      setNotificationState('unsupported');
+      return;
+    }
     const result = await Notification.requestPermission();
     setNotificationState(result);
   }
@@ -369,7 +400,7 @@ function Settings() {
       <article className="panel">
         <div className="section-heading"><span>通知</span><span>{notificationState}</span></div>
         <p className="muted">通知InboxからWeb Pushを有効化すると、Background/Guardianの完了や停止をPWAを閉じていても受け取れます。</p>
-        <button className="secondary-action" onClick={requestNotifications}>通知権限を確認</button>
+        <button className="secondary-action" onClick={requestNotifications} disabled={notificationState === 'unsupported'}>通知権限を確認</button>
       </article>
     </section>
   );

@@ -41,6 +41,10 @@ function completionScore(project: DevProject, evidence: SupervisorEvidence) {
   if (evidence.ciPassing) score += 4;
   if (evidence.openBlockingIssues === 0) score += 3;
   if (evidence.unresolvedTodos === 0) score += 2;
+  if (evidence.testsPassing === false) score = Math.min(score, 90);
+  if (evidence.ciPassing === false) score = Math.min(score, 90);
+  if ((evidence.openBlockingIssues ?? 0) > 0) score = Math.min(score, 95);
+  if ((evidence.unresolvedTodos ?? 0) > 0) score = Math.min(score, 95);
   if (project.humanBlockers.length > 0) score = Math.min(score, 95);
 
   return Math.max(0, Math.min(100, score));
