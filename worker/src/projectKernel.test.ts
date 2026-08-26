@@ -146,6 +146,16 @@ const INVALID_KERNEL_MANIFEST_FIXTURES: Array<[string, unknown]> = [
   ['paths-unsafe', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: '../escape.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
   ['context-routing-unknown-key', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['missing'] } }],
   ['context-routing-tier-not-array', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: 'readme' } }],
+  ['runtime-not-object', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, runtime: 'npm run x' }],
+  ['runtime-empty-string-value', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, runtime: { setup: '   ' } }],
+  ['validation-strategies-not-array', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, validation: { strategies: 'nope' } }],
+  ['validation-strategy-invalid-type', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, validation: { strategies: [{ type: 'magic', checks: [] }] } }],
+  ['validation-strategy-required-not-boolean', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, validation: { strategies: [{ type: 'push', required: 'yes', checks: [] }] } }],
+  ['validation-strategy-branches-not-string-array', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, validation: { strategies: [{ type: 'push', branches: [123], checks: [] }] } }],
+  ['validation-strategy-checks-not-array', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, validation: { strategies: [{ type: 'push', checks: 'nope' }] } }],
+  ['validation-strategy-check-missing-name', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, validation: { strategies: [{ type: 'push', checks: [{ category: 'GUARD_FAILURE' }] }] } }],
+  ['paths-unsafe-whitespace-traversal', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: ' ../escape.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['paths-unsafe-whitespace-absolute', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: ' /absolute.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
 ];
 
 describe('parseProjectKernel: cross-repo shared invalid-manifest contract', () => {
