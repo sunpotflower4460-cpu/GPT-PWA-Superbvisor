@@ -6,6 +6,17 @@ const VALIDATION_TYPES = new Set(['push', 'pull_request', 'workflow_dispatch']);
 
 export type ProjectKernelMode = 'KERNEL_AWARE' | 'GENERIC_REPO';
 
+// Whether a repository's require-human-approval-style PR gate expects a
+// second human reviewer (MULTI_MAINTAINER, the default) or accepts an
+// explicit, GitHub-identity-verified self-approval from the sole
+// maintainer (SOLO_MAINTAINER). See getMaintainerMode() below — this
+// Worker never enforces the gate itself (that stays on the GitHub Actions
+// side, in the companion repo's require-human-approval.yml /
+// maintainer-approve-command.yml), it only needs to know which mode is in
+// effect for messaging/interpretation purposes.
+export type MaintainerMode = 'SOLO_MAINTAINER' | 'MULTI_MAINTAINER';
+const MAINTAINER_MODES = new Set<string>(['SOLO_MAINTAINER', 'MULTI_MAINTAINER']);
+
 export interface ProjectKernelValidationCheck {
   name: string;
   category?: string;
@@ -40,7 +51,11 @@ export interface ProjectKernelManifest {
     scoped?: string[];
     onDemand?: string[];
   };
-  governance?: Record<string, unknown>;
+  // maintainerMode is the only key of governance this parser gives any
+  // meaning to; every other governance key (phases, runtimeActivitiesWithinP3,
+  // and anything future) stays untyped/free-form on purpose — see
+  // parseProjectKernel's governance handling below.
+  governance?: { maintainerMode?: MaintainerMode; [key: string]: unknown };
   runtime?: Record<string, string>;
   validation?: {
     strategies: ProjectKernelValidationStrategy[];
@@ -135,7 +150,19 @@ export function parseProjectKernel(content: string): ProjectKernelManifest {
     manifest.contextRouting = contextRouting;
   }
 
-  if (isRecord(value.governance)) manifest.governance = value.governance;
+  if (value.governance !== undefined) {
+    // Same reasoning as contextRouting above: reject outright rather than
+    // silently ignore, matching GPT-template's producer-side
+    // isValidKernelGovernance(). Only maintainerMode is schema-validated
+    // when present (a real enum, not a boolean) — every other governance
+    // key stays free-form/untyped, since nothing here or on the producer
+    // side has ever validated phases/runtimeActivitiesWithinP3.
+    if (!isRecord(value.governance)) throw new Error('governance must be an object');
+    if (value.governance.maintainerMode !== undefined && !MAINTAINER_MODES.has(value.governance.maintainerMode as string)) {
+      throw new Error('governance.maintainerMode must be SOLO_MAINTAINER or MULTI_MAINTAINER');
+    }
+    manifest.governance = value.governance as ProjectKernelManifest['governance'];
+  }
   if (value.runtime !== undefined) manifest.runtime = parseStringRecord(value.runtime, 'runtime', false);
   if (isRecord(value.dependencyPolicy)) manifest.dependencyPolicy = value.dependencyPolicy;
 
@@ -174,6 +201,16 @@ export function getCheckNamesByCategory(manifest: ProjectKernelManifest | undefi
     }
   }
   return names;
+}
+
+// Mirrors GPT-template's scripts/guard/status.mjs getMaintainerMode(): absent
+// or unrecognized governance.maintainerMode falls back to MULTI_MAINTAINER —
+// today's original "approval from someone other than the author" behavior —
+// so a manifest that predates this field, or a GENERIC_REPO with no manifest
+// at all, is never treated as looser than it actually is.
+export function getMaintainerMode(manifest: ProjectKernelManifest | undefined): MaintainerMode {
+  const mode = manifest?.governance?.maintainerMode;
+  return mode === 'SOLO_MAINTAINER' || mode === 'MULTI_MAINTAINER' ? mode : 'MULTI_MAINTAINER';
 }
 
 // True when this repository's Validation Contract requires a pull_request
@@ -261,7 +298,11 @@ function assertSafeManifestPath(path: string, label: string) {
     path.startsWith('/') ||
     path.includes('\\') ||
     path.split('/').includes('..') ||
-    WINDOWS_DRIVE_PATH.test(path)
+    WINDOWS_DRIVE_PATH.test(path) ||
+    // Valid JSON, but a Node fs API call on this path throws
+    // ERR_INVALID_ARG_VALUE — a manifest that "parses" but is actually
+    // unusable the moment anything reads the declared path.
+    path.includes('\0')
   ) {
     throw new Error(`${label} contains an unsafe repository path`);
   }

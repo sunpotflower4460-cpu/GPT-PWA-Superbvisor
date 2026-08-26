@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   getCheckNamesByCategory,
+  getMaintainerMode,
   parseProjectKernel,
   requiresDraftPrFirst,
   resolveContextRoutingPaths,
@@ -110,6 +111,38 @@ describe('parseProjectKernel', () => {
     }));
     expect(parsed.kind).toBe('ai-project-kernel');
   });
+
+  it('accepts a declared governance.maintainerMode and preserves unrelated governance keys', () => {
+    const parsed = parseProjectKernel(JSON.stringify({
+      ...validManifest,
+      governance: { phases: ['P0', 'P1'], maintainerMode: 'SOLO_MAINTAINER' },
+    }));
+    expect(parsed.governance?.maintainerMode).toBe('SOLO_MAINTAINER');
+    expect(parsed.governance?.phases).toEqual(['P0', 'P1']);
+  });
+
+  it('rejects an unrecognized governance.maintainerMode value', () => {
+    expect(() => parseProjectKernel(JSON.stringify({
+      ...validManifest,
+      governance: { maintainerMode: 'SOLO' },
+    }))).toThrow('governance.maintainerMode must be SOLO_MAINTAINER or MULTI_MAINTAINER');
+  });
+});
+
+describe('getMaintainerMode', () => {
+  it('falls back to MULTI_MAINTAINER (today\'s original behavior) when governance is absent', () => {
+    const parsed = parseProjectKernel(JSON.stringify(validManifest));
+    expect(getMaintainerMode(parsed)).toBe('MULTI_MAINTAINER');
+  });
+
+  it('falls back to MULTI_MAINTAINER for a GENERIC_REPO (no manifest at all)', () => {
+    expect(getMaintainerMode(undefined)).toBe('MULTI_MAINTAINER');
+  });
+
+  it('returns the declared mode when present and valid', () => {
+    const parsed = parseProjectKernel(JSON.stringify({ ...validManifest, governance: { maintainerMode: 'SOLO_MAINTAINER' } }));
+    expect(getMaintainerMode(parsed)).toBe('SOLO_MAINTAINER');
+  });
 });
 
 // This fixture and INVALID_KERNEL_MANIFEST_FIXTURES below are the mirror of
@@ -161,6 +194,9 @@ const INVALID_KERNEL_MANIFEST_FIXTURES: Array<[string, unknown]> = [
   ['context-routing-not-object', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: 'not-an-object' }],
   ['context-routing-inherited-key', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['toString'] } }],
   ['paths-windows-drive-absolute', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'C:/Windows/System32/drivers/etc/hosts' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['paths-null-byte', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md\u0000' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['governance-not-object', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, governance: 'not-an-object' }],
+  ['governance-maintainer-mode-invalid', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, governance: { maintainerMode: 'SOLO' } }],
 ];
 
 describe('parseProjectKernel: cross-repo shared invalid-manifest contract', () => {
@@ -229,7 +265,7 @@ describe('requiresDraftPrFirst', () => {
 // A cross-repo golden SNAPSHOT regression test, not an automatic drift
 // detector: this is GPT-template's actual project-kernel.json
 // (sunpotflower4460-cpu/GPT-template, branch claude/project-kernel-v2, as
-// of commit deee28c) embedded verbatim as a point-in-time fixture. It
+// of commit 9d96c26) embedded verbatim as a point-in-time fixture. It
 // catches this parser regressing against that known-good contract, and it
 // is exactly how the bug it guards against — this file's own fixture using
 // literal paths in contextRouting while GPT-template's real manifest used
@@ -269,9 +305,10 @@ const GPT_TEMPLATE_REAL_MANIFEST = `{
     "onDemand": ["answers", "inventory", "questions", "backlog", "craftHowTo", "handoff", "claudeReview", "designBrief"]
   },
   "governance": {
-    "_comment": "P0-P4 in PHASE.md are product-governance gates a human must move through (README.md 「新規プロジェクト開始時の流れ」). Once inside P3, the AI does not need to stop between the runtime activities below — see AGENTS.md 「5. ガバナンスとランタイムの分離」.",
+    "_comment": "P0-P4 in PHASE.md are product-governance gates a human must move through (README.md 「新規プロジェクト開始時の流れ」). Once inside P3, the AI does not need to stop between the runtime activities below — see AGENTS.md 「5. ガバナンスとランタイムの分離」. maintainerMode is unrelated to P0-P4: it tells require-human-approval.yml's check-approval job whether this repo has a second human who can review PRs (MULTI_MAINTAINER, the default when this key is absent — preserves the original 'approval from someone other than the author' behavior) or exactly one maintainer who is also the PR author (SOLO_MAINTAINER — requires an explicit, GitHub-identity-verified /approve-maintainer PR comment from that maintainer instead, never merely opening the PR or a green CI run). AI/bot reviews (Codex, Cursor Bugbot, CodeRabbit, Claude) are evidence for that human decision, never a substitute for it, in either mode.",
     "phases": ["P0", "P1", "P2", "P3", "P4"],
-    "runtimeActivitiesWithinP3": ["INSPECT", "IMPLEMENT", "TEST", "DEBUG", "REVIEW", "REPAIR", "VERIFY"]
+    "runtimeActivitiesWithinP3": ["INSPECT", "IMPLEMENT", "TEST", "DEBUG", "REVIEW", "REPAIR", "VERIFY"],
+    "maintainerMode": "SOLO_MAINTAINER"
   },
   "capabilities": {
     "structuredStatus": true,
@@ -333,5 +370,10 @@ describe('cross-repo contract: GPT-template real project-kernel.json', () => {
     const core = resolveContextRoutingPaths(parsed, 'core');
     expect(core).toContainEqual({ key: 'agents', path: 'AGENTS.md' });
     expect(core).toContainEqual({ key: 'soul', path: 'docs/00-soul/SOUL.md' });
+  });
+
+  it('reads governance.maintainerMode as SOLO_MAINTAINER (this repo is solo-maintained)', () => {
+    const parsed = parseProjectKernel(GPT_TEMPLATE_REAL_MANIFEST);
+    expect(getMaintainerMode(parsed)).toBe('SOLO_MAINTAINER');
   });
 });
