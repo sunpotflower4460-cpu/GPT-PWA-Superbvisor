@@ -109,7 +109,15 @@ export function parseProjectKernel(content: string): ProjectKernelManifest {
   if (typeof value.defaultMode === 'string' && value.defaultMode.trim()) manifest.defaultMode = value.defaultMode.trim();
   if (Array.isArray(value.modes)) manifest.modes = parseStringArray(value.modes, 'modes');
 
-  if (isRecord(value.contextRouting)) {
+  if (value.contextRouting !== undefined) {
+    // Unlike defaultMode/modes above (which silently ignore a wrong-typed
+    // value instead of throwing), contextRouting is rejected outright when
+    // it isn't an object. Silently ignoring it here would leave the
+    // manifest looking valid on this side while GPT-template's producer-side
+    // isValidKernelManifest() already rejects the same input — the parity
+    // gap runs the opposite direction from most others in this file (here
+    // the consumer was the loose one), but it's still a real one.
+    if (!isRecord(value.contextRouting)) throw new Error('contextRouting must be an object');
     const contextRouting: ProjectKernelManifest['contextRouting'] = {};
     for (const key of ['core', 'scoped', 'onDemand'] as const) {
       const raw = value.contextRouting[key];

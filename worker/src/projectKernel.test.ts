@@ -156,6 +156,9 @@ const INVALID_KERNEL_MANIFEST_FIXTURES: Array<[string, unknown]> = [
   ['validation-strategy-check-missing-name', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, validation: { strategies: [{ type: 'push', checks: [{ category: 'GUARD_FAILURE' }] }] } }],
   ['paths-unsafe-whitespace-traversal', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: ' ../escape.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
   ['paths-unsafe-whitespace-absolute', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: ' /absolute.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['modes-non-string-item', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, modes: [123] }],
+  ['modes-empty-string-item', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, modes: [''] }],
+  ['context-routing-not-object', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: 'not-an-object' }],
 ];
 
 describe('parseProjectKernel: cross-repo shared invalid-manifest contract', () => {
