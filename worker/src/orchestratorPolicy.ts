@@ -59,15 +59,15 @@ export function assessCi(checks: CiCheckLike[], humanRequiredCheckNames?: Readon
 
 // assessCi() only sees workflow-run-level data (GitHub's /actions/runs),
 // whose `name` is the WORKFLOW's name — but a Project Kernel declares
-// checks[].name at job/check-run granularity (GitHub's
-// /commits/{sha}/check-runs), which is what actually shows up as a named
-// check on a PR. The two coincide only when a workflow has a single job
-// sharing its name (e.g. GPT-template's "guard" workflow/job); they
+// checks[].name at job granularity (GitHub's
+// /actions/runs/{run_id}/jobs), which is what actually shows up as a
+// named check on a PR. The two coincide only when a workflow has a single
+// job sharing its name (e.g. GPT-template's "guard" workflow/job); they
 // diverge whenever they don't (e.g. the "require-human-approval" workflow
 // contains a job named "check-approval" — Kernel-declared checks[].name
 // is "check-approval", but assessCi() alone can only ever see
 // "require-human-approval"). This reconciles the two: given the actual
-// job/check-run-level data for the same head SHA, upgrade a workflow-run-
+// job-level data for the same failing run(s), upgrade a workflow-run-
 // level CODE_FAILURE/TRANSIENT_FAILURE to HUMAN_REQUIRED when a
 // Kernel-declared human-approval check is the one that's actually failing.
 // A no-op for PENDING/SUCCESS/NO_RUN, and merges into (never replaces) any

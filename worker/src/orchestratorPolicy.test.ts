@@ -79,11 +79,12 @@ describe('applyHumanApprovalOverride', () => {
   // require-human-approval.yml's check-approval job fails: the WORKFLOW-
   // run-level view (what assessCi/getBranchWorkflowRuns sees) reports the
   // workflow's own name, "require-human-approval", with conclusion
-  // "failure" — never "action_required" — while the JOB/check-run-level
-  // view (getCommitCheckRuns) reports the actual job name,
-  // "check-approval", which is what the Kernel's checks[].name declares.
-  // Passing only the workflow-run-level data to assessCi() alone
-  // classifies this as CODE_FAILURE — a real bug, not a hypothetical one.
+  // "failure" — never "action_required" — while the JOB-level view
+  // (getWorkflowRunJobs, GitHub's /actions/runs/{run_id}/jobs) reports the
+  // actual job name, "check-approval", which is what the Kernel's
+  // checks[].name declares. Passing only the workflow-run-level data to
+  // assessCi() alone classifies this as CODE_FAILURE — a real bug, not a
+  // hypothetical one.
   const workflowRunLevelCheck = { ...base, name: 'require-human-approval', conclusion: 'failure' };
   const jobLevelCheckApproval = { ...base, id: 2, name: 'check-approval', conclusion: 'failure' };
   const humanRequiredCheckNames = new Set(['check-approval']);
@@ -92,7 +93,7 @@ describe('applyHumanApprovalOverride', () => {
     expect(assessCi([workflowRunLevelCheck], humanRequiredCheckNames).state).toBe('CODE_FAILURE');
   });
 
-  it('reclassifies to HUMAN_REQUIRED once given the real job/check-run-level data', () => {
+  it('reclassifies to HUMAN_REQUIRED once given the real job-level data', () => {
     const workflowLevelAssessment = assessCi([workflowRunLevelCheck], humanRequiredCheckNames);
     const reconciled = applyHumanApprovalOverride(workflowLevelAssessment, [jobLevelCheckApproval], humanRequiredCheckNames);
     expect(reconciled.state).toBe('HUMAN_REQUIRED');

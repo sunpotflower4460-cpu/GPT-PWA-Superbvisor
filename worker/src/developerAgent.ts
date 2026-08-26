@@ -6,8 +6,8 @@ import {
   createPullRequest,
   createWorkspace,
   getBranchWorkflowRuns,
-  getCommitCheckRuns,
   getRepositorySummary,
+  getWorkflowRunJobs,
 } from './githubExecutor';
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
@@ -236,19 +236,20 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   const checks = latestChecksForHead(allRuns.filter((item) => item.headSha === repo.headSha));
   const humanRequiredCheckNames = getCheckNamesByCategory(job.kernelManifest, 'HUMAN_APPROVAL_REQUIRED');
   let assessment = assessCi(checks, humanRequiredCheckNames);
-  if (humanRequiredCheckNames.size && assessment.state !== 'PENDING' && assessment.state !== 'SUCCESS' && assessment.state !== 'NO_RUN') {
+  if (humanRequiredCheckNames.size && assessment.failed.length) {
     // assessCi() only sees workflow-run names, which don't match Kernel-
     // declared job/check names in the common case (see
-    // applyHumanApprovalOverride's own comment). Fetch the actual
-    // job/check-run-level data for this head SHA to reconcile. Best-effort:
-    // if this call fails, keep the workflow-run-level assessment as-is
-    // rather than blocking the refresh cycle over a secondary API call.
-    try {
-      const jobLevelChecks = await getCommitCheckRuns(env, job.repository, repo.headSha);
-      assessment = applyHumanApprovalOverride(assessment, jobLevelChecks, humanRequiredCheckNames);
-    } catch {
-      // keep assessment as computed from workflow-run-level data
-    }
+    // applyHumanApprovalOverride's own comment). Fetch the actual job-level
+    // data for each currently-failing workflow run to reconcile, scoped to
+    // those runs' own IDs (getWorkflowRunJobs) rather than every check on
+    // the commit — cheaper, and it can't pick up unrelated third-party App
+    // checks. Best-effort per run: a run whose jobs fail to fetch is simply
+    // absent from the reconciliation rather than blocking the others or the
+    // refresh cycle.
+    const repository = job.repository;
+    const results = await Promise.allSettled(assessment.failed.map((run) => getWorkflowRunJobs(env, repository, run.id)));
+    const jobLevelChecks = results.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
+    assessment = applyHumanApprovalOverride(assessment, jobLevelChecks, humanRequiredCheckNames);
   }
   job = {
     ...job,

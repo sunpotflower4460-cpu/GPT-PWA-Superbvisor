@@ -195,19 +195,32 @@ export async function getBranchWorkflowRuns(env: GitHubEnv, repository: string, 
   return result.workflow_runs.map((run) => ({ id: run.id, name: run.name, status: run.status, conclusion: run.conclusion, url: run.html_url, headSha: run.head_sha }));
 }
 
-// Job/check-run-level, unlike getBranchWorkflowRuns(): a workflow run's own
-// `name` is the WORKFLOW's name (e.g. "require-human-approval"), but a
-// Project Kernel's validation.strategies[].checks[].name declares the
-// individual check/job name as it actually appears on a PR (e.g.
-// "check-approval" — a job inside the require-human-approval workflow).
-// The two are only the same when a workflow happens to have a single job
-// sharing its name (as with GPT-template's "guard" workflow/job). Anything
-// that needs to match against Kernel-declared check names — the human-
-// approval classification override — needs this endpoint, not workflow runs.
-export async function getCommitCheckRuns(env: GitHubEnv, repository: string, sha: string) {
+// Job-level, unlike getBranchWorkflowRuns(): a workflow run's own `name`
+// is the WORKFLOW's name (e.g. "require-human-approval"), but a Project
+// Kernel's validation.strategies[].checks[].name declares the individual
+// check/job name as it actually appears on a PR (e.g. "check-approval" —
+// a job inside the require-human-approval workflow). The two are only the
+// same when a workflow happens to have a single job sharing its name (as
+// with GPT-template's "guard" workflow/job). Anything that needs to match
+// against Kernel-declared check names — the human-approval classification
+// override — needs job-level data, not workflow-run-level.
+//
+// Deliberately the Actions API (/actions/runs/{run_id}/jobs), not the
+// Checks API (/commits/{sha}/check-runs), even though the latter also
+// returns job/check-level names: the Checks API requires a separate
+// "Checks: Read" fine-grained PAT permission on a private repository,
+// which this Worker's documented minimum permission set
+// (worker/DEVELOPER_AGENT.md: Contents/Pull requests/Actions/Metadata)
+// does not grant. The Actions API needs only the "Actions: Read"
+// permission this Worker already requires, and — since a job always
+// belongs to exactly one workflow run — it can be scoped to the specific
+// run(s) already known to be failing instead of every check on the
+// commit (which would also include unrelated third-party App checks like
+// CodeRabbit or Cursor Bugbot).
+export async function getWorkflowRunJobs(env: GitHubEnv, repository: string, runId: number) {
   const repo = assertAllowedRepo(env, repository);
-  const result = await githubJson<{ check_runs: Array<{ id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string }> }>(env, repo, 'GET', `/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`);
-  return result.check_runs.map((run) => ({ id: run.id, name: run.name, status: run.status, conclusion: run.conclusion, url: run.html_url, headSha: run.head_sha }));
+  const result = await githubJson<{ jobs: Array<{ id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string }> }>(env, repo, 'GET', `/actions/runs/${runId}/jobs?per_page=100`);
+  return result.jobs.map((job) => ({ id: job.id, name: job.name, status: job.status, conclusion: job.conclusion, url: job.html_url, headSha: job.head_sha }));
 }
 
 export function assertSafeBranch(branch: string) {
