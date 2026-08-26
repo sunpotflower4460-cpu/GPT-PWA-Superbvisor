@@ -112,6 +112,54 @@ describe('parseProjectKernel', () => {
   });
 });
 
+// This fixture and INVALID_KERNEL_MANIFEST_FIXTURES below are the mirror of
+// sunpotflower4460-cpu/GPT-template's scripts/guard/selftest.mjs
+// (VALID_KERNEL_MANIFEST / INVALID_KERNEL_MANIFEST_FIXTURES). Producer-side
+// isValidKernelManifest() and this consumer-side parseProjectKernel() are
+// each tested against the same inputs from their own repo's test suite, so
+// a change that loosens one side without the other shows up as a failing
+// test on whichever side didn't move, instead of as a silent GENERIC_REPO
+// fallback in production. If you change a case here, apply the same change
+// on the GPT-template side (and vice versa).
+const MINIMAL_VALID_KERNEL_MANIFEST = {
+  schemaVersion: 1,
+  kind: 'ai-project-kernel',
+  paths: { readme: 'README.md' },
+  capabilities: {},
+  contextRouting: { core: ['readme'] },
+};
+
+// Each fixture deviates from MINIMAL_VALID_KERNEL_MANIFEST by exactly one
+// field, so it isolates one rule. Fixtures that aren't testing paths/
+// contextRouting themselves still carry a valid paths+contextRouting pair
+// (rather than omitting contextRouting) so the case can't accidentally pass
+// for the wrong reason.
+const INVALID_KERNEL_MANIFEST_FIXTURES: Array<[string, unknown]> = [
+  ['missing-kind', { schemaVersion: 1, paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['wrong-kind', { schemaVersion: 1, kind: 'something-else', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['schema-version-string', { schemaVersion: '1', kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['schema-version-unsupported', { schemaVersion: 2, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['capabilities-missing', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, contextRouting: { core: ['readme'] } }],
+  ['capabilities-non-boolean', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: { foo: 'yes' }, contextRouting: { core: ['readme'] } }],
+  ['paths-empty', { schemaVersion: 1, kind: 'ai-project-kernel', paths: {}, capabilities: {}, contextRouting: {} }],
+  ['paths-non-string-value', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 123 }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['paths-unsafe', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: '../escape.md' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
+  ['context-routing-unknown-key', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['missing'] } }],
+  ['context-routing-tier-not-array', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: 'readme' } }],
+];
+
+describe('parseProjectKernel: cross-repo shared invalid-manifest contract', () => {
+  it('accepts the shared minimal valid fixture', () => {
+    expect(() => parseProjectKernel(JSON.stringify(MINIMAL_VALID_KERNEL_MANIFEST))).not.toThrow();
+  });
+
+  for (const [label, manifest] of INVALID_KERNEL_MANIFEST_FIXTURES) {
+    it(`rejects ${label}`, () => {
+      expect(() => parseProjectKernel(JSON.stringify(manifest))).toThrow();
+    });
+  }
+});
+
 describe('resolveContextRoutingPaths', () => {
   it('resolves core tier keys to their paths, preserving declared order', () => {
     const parsed = parseProjectKernel(JSON.stringify(validManifest));
@@ -220,8 +268,8 @@ const GPT_TEMPLATE_REAL_MANIFEST = `{
     "mode": "DEV_ONLY"
   },
   "runtime": {
-    "_comment": "statusJson/guardJson use --silent so npm's own banner lines ('> pkg@version script') don't precede the JSON on stdout — without it, output is not valid JSON as-is. setup picks between \`npm ci\` and \`npm install --no-package-lock\` depending on whether package-lock.json exists: this repo ships none today (only refs/ has one, for the reference app, so \`npm ci\` alone would fail with EUSAGE), but a project created from this template can add real dependencies and commit a real lockfile later — \`npm install --no-package-lock\` ignores package-lock.json even when present (not just skips writing one), so a blanket \`--no-package-lock\` would silently stop honoring that project's locked versions. \`--no-package-lock\` also keeps the still-lockfile-less case from leaving a fresh checkout dirty: npm's package-lock setting defaults to true, so a bare \`npm install\` would create an untracked root package-lock.json as a side effect.",
-    "setup": "test -f package-lock.json && npm ci || npm install --no-package-lock",
+    "_comment": "statusJson/guardJson use --silent so npm's own banner lines ('> pkg@version script') don't precede the JSON on stdout — without it, output is not valid JSON as-is. setup picks between \`npm ci\` and \`npm install --no-package-lock\` depending on whether package-lock.json exists: this repo ships none today (only refs/ has one, for the reference app, so \`npm ci\` alone would fail with EUSAGE), but a project created from this template can add real dependencies and commit a real lockfile later — \`npm install --no-package-lock\` ignores package-lock.json even when present (not just skips writing one), so a blanket \`--no-package-lock\` would silently stop honoring that project's locked versions. \`--no-package-lock\` also keeps the still-lockfile-less case from leaving a fresh checkout dirty: npm's package-lock setting defaults to true, so a bare \`npm install\` would create an untracked root package-lock.json as a side effect. setup uses an if/else, not \`test ... && npm ci || npm install\`: the \`||\` form also runs the install fallback when \`npm ci\` exists but fails for a real reason (a stale/corrupt lockfile, a registry error), silently masking that failure as if the lockfile were simply absent.",
+    "setup": "if [ -f package-lock.json ]; then npm ci; else npm install --no-package-lock; fi",
     "status": "npm run status",
     "statusJson": "npm run --silent status -- --json",
     "guard": "npm run guard",
