@@ -124,7 +124,11 @@ export function parseProjectKernel(content: string): ProjectKernelManifest {
       if (raw === undefined) continue;
       const items = parseStringArray(raw, `contextRouting.${key}`);
       for (const pathKey of items) {
-        if (!(pathKey in paths)) throw new Error(`contextRouting.${key} references unknown paths key "${pathKey}"`);
+        // `in` also matches inherited Object.prototype names (toString,
+        // constructor, __proto__, ...) even when `paths` has no own key by
+        // that name, silently accepting a routing entry with no real path
+        // behind it. Object.hasOwn is the own-property-only check.
+        if (!Object.hasOwn(paths, pathKey)) throw new Error(`contextRouting.${key} references unknown paths key "${pathKey}"`);
       }
       contextRouting[key] = items;
     }
@@ -246,8 +250,19 @@ function parseStringArray(value: unknown, label: string): string[] {
   });
 }
 
+// A Windows drive-qualified path (e.g. "C:/Windows/..." or "C:foo") is
+// absolute/rooted outside the repository despite starting with neither
+// "/" nor "\\" and containing no "..". An orchestrator resolving this path
+// on Windows would read outside the checkout.
+const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:/;
+
 function assertSafeManifestPath(path: string, label: string) {
-  if (path.startsWith('/') || path.includes('\\') || path.split('/').includes('..')) {
+  if (
+    path.startsWith('/') ||
+    path.includes('\\') ||
+    path.split('/').includes('..') ||
+    WINDOWS_DRIVE_PATH.test(path)
+  ) {
     throw new Error(`${label} contains an unsafe repository path`);
   }
 }

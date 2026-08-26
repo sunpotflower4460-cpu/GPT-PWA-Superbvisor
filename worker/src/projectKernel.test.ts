@@ -159,6 +159,8 @@ const INVALID_KERNEL_MANIFEST_FIXTURES: Array<[string, unknown]> = [
   ['modes-non-string-item', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, modes: [123] }],
   ['modes-empty-string-item', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['readme'] }, modes: [''] }],
   ['context-routing-not-object', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: 'not-an-object' }],
+  ['context-routing-inherited-key', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'README.md' }, capabilities: {}, contextRouting: { core: ['toString'] } }],
+  ['paths-windows-drive-absolute', { schemaVersion: 1, kind: 'ai-project-kernel', paths: { readme: 'C:/Windows/System32/drivers/etc/hosts' }, capabilities: {}, contextRouting: { core: ['readme'] } }],
 ];
 
 describe('parseProjectKernel: cross-repo shared invalid-manifest contract', () => {
