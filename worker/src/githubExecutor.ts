@@ -83,7 +83,6 @@ export async function getRepositorySummary(env: GitHubEnv, repository: string, r
 }
 
 export async function listTree(env: GitHubEnv, repository: string, ref: string, maxItems = 500) {
-  assertSafeBranch(ref);
   const repo = assertAllowedRepo(env, repository);
   const branchRef = await githubJson<{ object: { sha: string } }>(env, repo, 'GET', `/git/ref/heads/${encodeURIComponent(ref)}`);
   const commit = await githubJson<{ tree: { sha: string } }>(env, repo, 'GET', `/git/commits/${branchRef.object.sha}`);
@@ -98,7 +97,14 @@ export async function listTree(env: GitHubEnv, repository: string, ref: string, 
 }
 
 export async function readFile(env: GitHubEnv, repository: string, ref: string, path: string): Promise<GitHubFileResult> {
-  assertSafeBranch(ref);
+  // Unlike writeFile/deleteFile below, this is read-only — assertSafeBranch
+  // exists to keep the Worker from ever writing outside its own
+  // ai-dev-deck/* branches, but that restriction has no reason to apply to
+  // reads. Applying it here anyway meant detectProjectKernel's own
+  // project-kernel.json lookup (always against a repo's *real* default
+  // branch, e.g. "main") threw on every call, silently forced to
+  // GENERIC_REPO by the best-effort catch around it — Project Kernel
+  // detection has never actually worked in production because of this.
   assertSafePath(path);
   const repo = assertAllowedRepo(env, repository);
   const result = await githubJson<{ type: string; sha: string; size: number; content?: string; encoding?: string }>(env, repo, 'GET', `/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`);
@@ -186,6 +192,25 @@ export async function createPullRequest(env: GitHubEnv, workspace: GitHubWorkspa
     }
     throw error;
   }
+}
+
+// For GENERIC_REPO inference (no project-kernel.json to declare a
+// Validation Contract): which GitHub Actions trigger events have actually
+// fired runs recently, repo-wide (not scoped to one branch — the goal is
+// "does this repo have push-triggered CI at all", not this branch's own
+// history). Deliberately the Actions run-history API, not the Contents
+// API against .github/workflows/*: those paths are in BLOCKED_PATHS below
+// and this Worker will not read them, so trigger types have to be
+// inferred from what actually ran instead of parsed from YAML.
+export async function listRecentWorkflowEvents(env: GitHubEnv, repository: string, perPage = 50): Promise<Set<string>> {
+  const repo = assertAllowedRepo(env, repository);
+  const result = await githubJson<{ workflow_runs: Array<{ event: string }> }>(
+    env,
+    repo,
+    'GET',
+    `/actions/runs?per_page=${Math.max(1, Math.min(perPage, 100))}`,
+  );
+  return new Set(result.workflow_runs.map((run) => run.event));
 }
 
 export async function getBranchWorkflowRuns(env: GitHubEnv, repository: string, branch: string) {

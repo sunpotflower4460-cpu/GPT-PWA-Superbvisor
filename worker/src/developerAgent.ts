@@ -30,6 +30,7 @@ import {
   getCheckNamesByCategory,
   requiresDraftPrFirst,
 } from './projectKernel';
+import { InferredGenericRepoContract } from './genericRepoInference';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -83,6 +84,11 @@ export interface DeveloperJob {
   // the pre-Kernel heuristics unchanged. See projectKernel.ts.
   kernelMode?: ProjectKernelMode;
   kernelManifest?: ProjectKernelManifest;
+  // GENERIC_REPO best-effort fallback (see genericRepoInference.ts) —
+  // only ever set when kernelManifest is absent, and only ever consulted
+  // for validation-contract heuristics like requiresDraftPrFirst below,
+  // never for human-approval check-name classification.
+  inferredContract?: InferredGenericRepoContract;
   recoveryCount: number;
   lastFailureFingerprint?: string;
   ciAutoReruns: number;
@@ -195,6 +201,7 @@ async function createDeveloperJobInternal(
     autoDispatch: Boolean(body.autoDispatch),
     kernelMode: kernel.mode,
     kernelManifest: kernel.manifest,
+    inferredContract: kernel.inferredContract,
   };
   await saveJob(env, job);
   job = await queueHandoffIfEnabled(env, job);
@@ -274,7 +281,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     // push strategy, open the Draft PR now instead of waiting out the grace
     // period first; the same polling loop then picks up the resulting
     // pull_request-triggered run on the next refresh.
-    if (!job.pullRequest && requiresDraftPrFirst(job.kernelManifest, job.workspace.branch)) {
+    if (!job.pullRequest && requiresDraftPrFirst(job.kernelManifest ?? job.inferredContract, job.workspace.branch)) {
       const created = await tryCreateDraftPr(env, job, comparison);
       if (created.pullRequest) {
         job = {

@@ -1,4 +1,5 @@
 import { GitHubEnv, GitHubFileResult, readOptionalFile } from './githubExecutor';
+import { InferredGenericRepoContract, inferGenericRepoContract } from './genericRepoInference';
 
 const MANIFEST_PATH = 'project-kernel.json';
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -69,15 +70,31 @@ export interface ProjectKernelDetection {
   source?: Pick<GitHubFileResult, 'path' | 'sha' | 'size'>;
   reason?: 'not_found' | 'unsupported_schema' | 'invalid_manifest';
   error?: string;
+  // GENERIC_REPO/not_found only: a heuristic best-effort guess at runtime
+  // commands and a Validation Contract, never a substitute for a declared
+  // manifest. A repo whose project-kernel.json exists but failed to parse
+  // (unsupported_schema/invalid_manifest) does NOT get this fallback —
+  // that's a real authoring error a human should fix, not something to
+  // silently paper over with a guess. See genericRepoInference.ts.
+  inferredContract?: InferredGenericRepoContract;
 }
 
+// ref is always the repository's own default branch at the current call
+// site (developerAgent.ts calls this once per job, against
+// workspace.defaultBranch) — inferGenericRepoContract() below reuses it as
+// the default-branch assumption for its push-strategy heuristic on that
+// basis. A future caller detecting against a non-default ref would need to
+// pass a real defaultBranch through separately instead.
 export async function detectProjectKernel(
   env: GitHubEnv,
   repository: string,
   ref: string,
 ): Promise<ProjectKernelDetection> {
   const file = await readOptionalFile(env, repository, ref, MANIFEST_PATH);
-  if (!file) return { mode: 'GENERIC_REPO', reason: 'not_found' };
+  if (!file) {
+    const inferredContract = await inferGenericRepoContract(env, repository, ref, ref).catch(() => undefined);
+    return { mode: 'GENERIC_REPO', reason: 'not_found', inferredContract };
+  }
 
   try {
     const manifest = parseProjectKernel(file.content);
@@ -219,8 +236,11 @@ export function getMaintainerMode(manifest: ProjectKernelManifest | undefined): 
 // strategy's declared branches, typically just the default branch) need a
 // PR opened before any CI run will ever appear — waiting for one is a
 // deadlock, not a transient delay.
-export function requiresDraftPrFirst(manifest: ProjectKernelManifest | undefined, branch: string): boolean {
-  const strategies = manifest?.validation?.strategies;
+export function requiresDraftPrFirst(
+  source: Pick<ProjectKernelManifest, 'validation'> | undefined,
+  branch: string,
+): boolean {
+  const strategies = source?.validation?.strategies;
   if (!strategies?.length) return false;
   const pushCoversBranch = strategies.some(
     (strategy) => strategy.type === 'push' && strategy.required !== false && (!strategy.branches?.length || strategy.branches.includes(branch)),
@@ -308,6 +328,6 @@ function assertSafeManifestPath(path: string, label: string) {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+export function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
