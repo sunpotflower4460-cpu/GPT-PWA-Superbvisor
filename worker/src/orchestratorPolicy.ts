@@ -29,7 +29,15 @@ const SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 const TRANSIENT_CONCLUSIONS = new Set(['cancelled', 'timed_out', 'startup_failure', 'stale']);
 const HUMAN_CONCLUSIONS = new Set(['action_required']);
 
-export function assessCi(checks: CiCheckLike[]): CiAssessment {
+// humanRequiredCheckNames comes from a repository's Project Kernel Validation
+// Contract (checks[].category === 'HUMAN_APPROVAL_REQUIRED'). It exists
+// because GitHub's own `action_required` conclusion is not a reliable
+// signal on its own: a check job can call core.setFailed() to report a
+// missing human approval, which GitHub reports as a plain `failure`
+// conclusion, indistinguishable from a real code failure without this
+// declared override. Absent/empty for GENERIC_REPO — falls back to the
+// action_required-only heuristic unchanged.
+export function assessCi(checks: CiCheckLike[], humanRequiredCheckNames?: ReadonlySet<string>): CiAssessment {
   if (!checks.length) return { state: 'NO_RUN', failed: [], transient: [], humanRequired: [] };
   if (checks.some((check) => check.status !== 'completed')) {
     return { state: 'PENDING', failed: [], transient: [], humanRequired: [] };
@@ -38,7 +46,9 @@ export function assessCi(checks: CiCheckLike[]): CiAssessment {
   const failed = checks.filter((check) => !SUCCESS_CONCLUSIONS.has((check.conclusion || '').toLowerCase()));
   if (!failed.length) return { state: 'SUCCESS', failed: [], transient: [], humanRequired: [] };
 
-  const humanRequired = failed.filter((check) => HUMAN_CONCLUSIONS.has((check.conclusion || '').toLowerCase()));
+  const humanRequired = failed.filter(
+    (check) => HUMAN_CONCLUSIONS.has((check.conclusion || '').toLowerCase()) || humanRequiredCheckNames?.has(check.name),
+  );
   if (humanRequired.length) return { state: 'HUMAN_REQUIRED', failed, transient: [], humanRequired };
 
   const transient = failed.filter((check) => TRANSIENT_CONCLUSIONS.has((check.conclusion || '').toLowerCase()));

@@ -1,21 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { parseProjectKernel } from './projectKernel';
+import {
+  getCheckNamesByCategory,
+  parseProjectKernel,
+  requiresDraftPrFirst,
+  resolveContextRoutingPaths,
+} from './projectKernel';
 
+// contextRouting entries are KEYS into `paths` (e.g. "soul" -> paths.soul),
+// not literal repository paths. This mirrors the contract GPT-template's
+// own project-kernel.json actually ships (see the cross-repo fixture test
+// below) — a fixture using literal paths here would silently test the
+// wrong contract.
 const validManifest = {
   schemaVersion: 1,
   kind: 'ai-project-kernel',
   paths: {
     soul: 'docs/00-soul/SOUL.md',
     features: 'docs/03-scope/FEATURES.md',
+    craftIndex: 'craft/INDEX.md',
+    handoff: 'docs/05-handoff/HANDOFF.md',
   },
   capabilities: {
     structuredStatus: true,
     structuredGuard: true,
   },
   contextRouting: {
-    core: ['docs/00-soul/SOUL.md'],
-    scoped: ['craft/INDEX.md'],
-    onDemand: ['docs/05-handoff/HANDOFF.md'],
+    core: ['soul'],
+    scoped: ['craftIndex'],
+    onDemand: ['handoff'],
   },
   runtime: {
     status: 'npm run status -- --json',
@@ -23,7 +35,14 @@ const validManifest = {
   validation: {
     strategies: [
       {
+        type: 'push',
+        required: true,
+        branches: ['main'],
+        checks: [{ name: 'guard', category: 'GUARD_FAILURE' }],
+      },
+      {
         type: 'pull_request',
+        required: true,
         checks: [
           { name: 'guard', category: 'GUARD_FAILURE' },
           { name: 'check-approval', category: 'HUMAN_APPROVAL_REQUIRED' },
@@ -38,8 +57,15 @@ describe('parseProjectKernel', () => {
     const parsed = parseProjectKernel(JSON.stringify(validManifest));
     expect(parsed.schemaVersion).toBe(1);
     expect(parsed.kind).toBe('ai-project-kernel');
-    expect(parsed.validation?.strategies[0].type).toBe('pull_request');
-    expect(parsed.validation?.strategies[0].checks[1].category).toBe('HUMAN_APPROVAL_REQUIRED');
+    expect(parsed.validation?.strategies[1].type).toBe('pull_request');
+    expect(parsed.validation?.strategies[1].checks[1].category).toBe('HUMAN_APPROVAL_REQUIRED');
+  });
+
+  it('preserves required and branches on validation strategies', () => {
+    const parsed = parseProjectKernel(JSON.stringify(validManifest));
+    expect(parsed.validation?.strategies[0].required).toBe(true);
+    expect(parsed.validation?.strategies[0].branches).toEqual(['main']);
+    expect(parsed.validation?.strategies[1].branches).toBeUndefined();
   });
 
   it('rejects unsupported schemas without guessing', () => {
@@ -61,11 +87,184 @@ describe('parseProjectKernel', () => {
     }))).toThrow('type is invalid');
   });
 
+  it('rejects a non-boolean required flag', () => {
+    expect(() => parseProjectKernel(JSON.stringify({
+      ...validManifest,
+      validation: { strategies: [{ type: 'push', required: 'yes', checks: [] }] },
+    }))).toThrow('required must be boolean');
+  });
+
+  it('rejects contextRouting entries that are literal paths instead of paths keys', () => {
+    // The exact mistake PR #30's original parser made: treating a routing
+    // entry as a safe repository path rather than a key into `paths`.
+    expect(() => parseProjectKernel(JSON.stringify({
+      ...validManifest,
+      contextRouting: { core: ['docs/00-soul/SOUL.md'] },
+    }))).toThrow('contextRouting.core references unknown paths key');
+  });
+
   it('ignores unknown top-level fields for forward compatibility', () => {
     const parsed = parseProjectKernel(JSON.stringify({
       ...validManifest,
       futureCapability: { enabled: true },
     }));
     expect(parsed.kind).toBe('ai-project-kernel');
+  });
+});
+
+describe('resolveContextRoutingPaths', () => {
+  it('resolves core tier keys to their paths, preserving declared order', () => {
+    const parsed = parseProjectKernel(JSON.stringify(validManifest));
+    expect(resolveContextRoutingPaths(parsed, 'core')).toEqual([{ key: 'soul', path: 'docs/00-soul/SOUL.md' }]);
+  });
+
+  it('returns an empty array for an undeclared tier', () => {
+    const parsed = parseProjectKernel(JSON.stringify({ ...validManifest, contextRouting: { core: ['soul'] } }));
+    expect(resolveContextRoutingPaths(parsed, 'onDemand')).toEqual([]);
+  });
+});
+
+describe('getCheckNamesByCategory', () => {
+  it('collects check names across every strategy sharing a category', () => {
+    const parsed = parseProjectKernel(JSON.stringify(validManifest));
+    expect(getCheckNamesByCategory(parsed, 'HUMAN_APPROVAL_REQUIRED')).toEqual(new Set(['check-approval']));
+    expect(getCheckNamesByCategory(parsed, 'GUARD_FAILURE')).toEqual(new Set(['guard']));
+  });
+
+  it('returns an empty set for an undeclared manifest', () => {
+    expect(getCheckNamesByCategory(undefined, 'HUMAN_APPROVAL_REQUIRED')).toEqual(new Set());
+  });
+});
+
+describe('requiresDraftPrFirst', () => {
+  it('is true on a feature branch when only pull_request is required (the CI deadlock case)', () => {
+    const parsed = parseProjectKernel(JSON.stringify(validManifest));
+    expect(requiresDraftPrFirst(parsed, 'claude/some-feature-branch')).toBe(true);
+  });
+
+  it('is false on the branch a required push strategy already covers', () => {
+    const parsed = parseProjectKernel(JSON.stringify(validManifest));
+    expect(requiresDraftPrFirst(parsed, 'main')).toBe(false);
+  });
+
+  it('is false when no validation contract is declared at all (GENERIC_REPO-equivalent)', () => {
+    const { validation, ...withoutValidation } = validManifest;
+    const parsed = parseProjectKernel(JSON.stringify(withoutValidation));
+    expect(requiresDraftPrFirst(parsed, 'claude/some-feature-branch')).toBe(false);
+    expect(requiresDraftPrFirst(undefined, 'claude/some-feature-branch')).toBe(false);
+  });
+
+  it('is false when the push strategy has no branches restriction (covers every branch)', () => {
+    const parsed = parseProjectKernel(JSON.stringify({
+      ...validManifest,
+      validation: { strategies: [{ type: 'push', required: true, checks: [] }] },
+    }));
+    expect(requiresDraftPrFirst(parsed, 'claude/some-feature-branch')).toBe(false);
+  });
+});
+
+// GPT-template's actual project-kernel.json (sunpotflower4460-cpu/GPT-template,
+// branch claude/project-kernel-v2, as of commit deee28c), embedded verbatim.
+// This is the other half of the same cross-repo contract this module
+// implements: if either side's schema assumptions drift — a key GPT-template
+// stops declaring, a contextRouting shape change, a validation field this
+// parser stops understanding — this test fails instead of both repos
+// silently disagreeing about what the manifest means (exactly what
+// happened before this fix: this file's own fixture used literal paths in
+// contextRouting while GPT-template's real manifest used paths keys).
+const GPT_TEMPLATE_REAL_MANIFEST = `{
+  "schemaVersion": 1,
+  "kind": "ai-project-kernel",
+  "paths": {
+    "agents": "AGENTS.md",
+    "phase": "PHASE.md",
+    "soul": "docs/00-soul/SOUL.md",
+    "designBrief": "docs/00-soul/DESIGN_BRIEF.md",
+    "answers": "docs/01-intake/ANSWERS.md",
+    "inventory": "docs/01-intake/INVENTORY.md",
+    "questions": "docs/01-intake/QUESTIONS.md",
+    "decisions": "docs/02-decisions/DECISIONS.md",
+    "constraints": "docs/02-decisions/CONSTRAINTS.md",
+    "features": "docs/03-scope/FEATURES.md",
+    "backlog": "docs/03-scope/BACKLOG.md",
+    "uiJudgments": "docs/04-design/UI_JUDGMENTS.md",
+    "tokens": "docs/04-design/tokens.css",
+    "handoff": "docs/05-handoff/HANDOFF.md",
+    "claudeReview": "docs/05-handoff/CLAUDE_REVIEW.md",
+    "craftIndex": "craft/INDEX.md",
+    "craftHowTo": "craft/HOW_TO_USE.md",
+    "guardConfig": "guard.config.json"
+  },
+  "contextRouting": {
+    "_comment": "For an orchestrator assembling a prompt: read core every time, scoped only when the task touches that area, onDemand only when explicitly needed. Values are keys into paths above.",
+    "core": ["agents", "phase", "soul", "constraints", "features", "guardConfig", "craftIndex"],
+    "scoped": ["decisions", "uiJudgments", "tokens"],
+    "onDemand": ["answers", "inventory", "questions", "backlog", "craftHowTo", "handoff", "claudeReview", "designBrief"]
+  },
+  "governance": {
+    "_comment": "P0-P4 in PHASE.md are product-governance gates a human must move through (README.md 「新規プロジェクト開始時の流れ」). Once inside P3, the AI does not need to stop between the runtime activities below — see AGENTS.md 「5. ガバナンスとランタイムの分離」.",
+    "phases": ["P0", "P1", "P2", "P3", "P4"],
+    "runtimeActivitiesWithinP3": ["INSPECT", "IMPLEMENT", "TEST", "DEBUG", "REVIEW", "REPAIR", "VERIFY"]
+  },
+  "capabilities": {
+    "structuredStatus": true,
+    "structuredGuard": true,
+    "dependencyPolicy": true
+  },
+  "dependencyPolicyDefault": {
+    "_comment": "The mode guard/no-new-deps.mjs uses when guard.config.json (paths.guardConfig) does not exist or does not set dependencyPolicy. If that file exists and sets its own dependencyPolicy, that value wins — this is a fallback description, not the live value.",
+    "mode": "DEV_ONLY"
+  },
+  "runtime": {
+    "_comment": "statusJson/guardJson use --silent so npm's own banner lines ('> pkg@version script') don't precede the JSON on stdout — without it, output is not valid JSON as-is. setup picks between \`npm ci\` and \`npm install --no-package-lock\` depending on whether package-lock.json exists: this repo ships none today (only refs/ has one, for the reference app, so \`npm ci\` alone would fail with EUSAGE), but a project created from this template can add real dependencies and commit a real lockfile later — \`npm install --no-package-lock\` ignores package-lock.json even when present (not just skips writing one), so a blanket \`--no-package-lock\` would silently stop honoring that project's locked versions. \`--no-package-lock\` also keeps the still-lockfile-less case from leaving a fresh checkout dirty: npm's package-lock setting defaults to true, so a bare \`npm install\` would create an untracked root package-lock.json as a side effect.",
+    "setup": "test -f package-lock.json && npm ci || npm install --no-package-lock",
+    "status": "npm run status",
+    "statusJson": "npm run --silent status -- --json",
+    "guard": "npm run guard",
+    "guardJson": "npm run --silent guard -- --json",
+    "selftest": "npm run guard:selftest"
+  },
+  "validation": {
+    "_comment": "Mirrors .github/workflows/guard.yml and require-human-approval.yml as shipped. The push strategy only runs for the branches listed — guard.yml's push trigger is 'branches: [main]', so a push to any other branch (e.g. a feature branch) does NOT get push validation; only the pull_request strategy applies there. An orchestrator must check \`branches\` before waiting on a push-triggered check on a non-listed branch, or it will wait forever — on a feature branch it must open a PR before CI can run at all, instead of waiting on a bare branch push that will never get checked. Each check's \`category\` distinguishes what kind of failure it represents: \`check-approval\` (require-human-approval.yml) always reports a plain GitHub Actions \`failure\` conclusion when it fails — never \`action_required\` — so an orchestrator that only trusts \`action_required\` to mean 'a human must act' will misclassify a missing-approval failure as a code failure and hand it back to an AI for a pointless 'fix'. \`guard\` failing is a real POLICY_FAILURE/CODE_FAILURE the AI can act on.",
+    "strategies": [
+      {
+        "type": "push",
+        "required": true,
+        "branches": ["main"],
+        "checks": [{ "name": "guard", "category": "GUARD_FAILURE" }]
+      },
+      {
+        "type": "pull_request",
+        "required": true,
+        "checks": [
+          { "name": "guard", "category": "GUARD_FAILURE" },
+          { "name": "check-approval", "category": "HUMAN_APPROVAL_REQUIRED" }
+        ]
+      }
+    ]
+  }
+}`;
+
+describe('cross-repo contract: GPT-template real project-kernel.json', () => {
+  it('parses without throwing', () => {
+    expect(() => parseProjectKernel(GPT_TEMPLATE_REAL_MANIFEST)).not.toThrow();
+  });
+
+  it('requires a Draft PR first on a feature branch (the actual deadlock this repo hits against GPT-template)', () => {
+    const parsed = parseProjectKernel(GPT_TEMPLATE_REAL_MANIFEST);
+    expect(requiresDraftPrFirst(parsed, 'ai-dev-deck/some-feature')).toBe(true);
+    expect(requiresDraftPrFirst(parsed, 'main')).toBe(false);
+  });
+
+  it('classifies check-approval as HUMAN_APPROVAL_REQUIRED', () => {
+    const parsed = parseProjectKernel(GPT_TEMPLATE_REAL_MANIFEST);
+    expect(getCheckNamesByCategory(parsed, 'HUMAN_APPROVAL_REQUIRED')).toEqual(new Set(['check-approval']));
+  });
+
+  it('resolves core context routing to real paths', () => {
+    const parsed = parseProjectKernel(GPT_TEMPLATE_REAL_MANIFEST);
+    const core = resolveContextRoutingPaths(parsed, 'core');
+    expect(core).toContainEqual({ key: 'agents', path: 'AGENTS.md' });
+    expect(core).toContainEqual({ key: 'soul', path: 'docs/00-soul/SOUL.md' });
   });
 });

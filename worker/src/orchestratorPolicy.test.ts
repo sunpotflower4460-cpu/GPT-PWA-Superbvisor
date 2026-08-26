@@ -51,6 +51,22 @@ describe('assessCi', () => {
       { ...base, id: 3, name: 'Optional', conclusion: 'skipped' },
     ]).state).toBe('SUCCESS');
   });
+
+  it('treats a plain failure as human-required when the Kernel declares that check name HUMAN_APPROVAL_REQUIRED', () => {
+    // GitHub-native: require-human-approval.yml's check-approval job calls
+    // core.setFailed(), which reports a plain `failure` conclusion — never
+    // `action_required`. Without the Kernel override this would otherwise
+    // be indistinguishable from a real code failure.
+    const humanRequiredCheckNames = new Set(['check-approval']);
+    expect(assessCi([{ ...base, name: 'check-approval', conclusion: 'failure' }], humanRequiredCheckNames).state)
+      .toBe('HUMAN_REQUIRED');
+  });
+
+  it('does not widen the override to other checks by name', () => {
+    const humanRequiredCheckNames = new Set(['check-approval']);
+    expect(assessCi([{ ...base, name: 'guard', conclusion: 'failure' }], humanRequiredCheckNames).state)
+      .toBe('CODE_FAILURE');
+  });
 });
 
 describe('recovery safety', () => {

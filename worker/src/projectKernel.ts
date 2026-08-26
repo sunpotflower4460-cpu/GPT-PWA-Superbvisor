@@ -13,6 +13,13 @@ export interface ProjectKernelValidationCheck {
 
 export interface ProjectKernelValidationStrategy {
   type: 'push' | 'pull_request' | 'workflow_dispatch';
+  // Absent is treated as required: a strategy declared in the manifest is
+  // assumed load-bearing unless explicitly opted out.
+  required?: boolean;
+  // push-only: which branches this strategy actually fires on. Absent/empty
+  // means "any branch". A pull_request strategy has no branches field —
+  // it fires on the PR's head branch by definition.
+  branches?: string[];
   checks: ProjectKernelValidationCheck[];
 }
 
@@ -23,6 +30,11 @@ export interface ProjectKernelManifest {
   modes?: string[];
   paths: Record<string, string>;
   capabilities: Record<string, boolean>;
+  // Each entry is a KEY into `paths` (e.g. "soul"), not a literal repository
+  // path. This mirrors the contract GPT-template's own project-kernel.json
+  // actually ships (paths dictionary + contextRouting arrays of path keys),
+  // so a producer and consumer manifest can't silently disagree on what a
+  // routing entry even means.
   contextRouting?: {
     core?: string[];
     scoped?: string[];
@@ -103,7 +115,9 @@ export function parseProjectKernel(content: string): ProjectKernelManifest {
       const raw = value.contextRouting[key];
       if (raw === undefined) continue;
       const items = parseStringArray(raw, `contextRouting.${key}`);
-      for (const path of items) assertSafeManifestPath(path, `contextRouting.${key}`);
+      for (const pathKey of items) {
+        if (!(pathKey in paths)) throw new Error(`contextRouting.${key} references unknown paths key "${pathKey}"`);
+      }
       contextRouting[key] = items;
     }
     manifest.contextRouting = contextRouting;
@@ -125,20 +139,73 @@ export function parseProjectKernel(content: string): ProjectKernelManifest {
   return manifest;
 }
 
+// Resolve one contextRouting tier's path keys against `paths`, in declared
+// order. Callers read the returned path strings; the key is kept alongside
+// for labeling (e.g. a context-assembly section header).
+export function resolveContextRoutingPaths(
+  manifest: ProjectKernelManifest,
+  tier: 'core' | 'scoped' | 'onDemand',
+): Array<{ key: string; path: string }> {
+  const keys = manifest.contextRouting?.[tier] ?? [];
+  return keys.map((key) => ({ key, path: manifest.paths[key] }));
+}
+
+// Every check name across every validation strategy whose declared category
+// matches. A repo's CI check names are effectively global (the same
+// "check-approval" run reports the same way regardless of which trigger
+// fired it), so this deliberately doesn't scope by strategy/branch.
+export function getCheckNamesByCategory(manifest: ProjectKernelManifest | undefined, category: string): Set<string> {
+  const names = new Set<string>();
+  for (const strategy of manifest?.validation?.strategies ?? []) {
+    for (const check of strategy.checks) {
+      if (check.category === category) names.add(check.name);
+    }
+  }
+  return names;
+}
+
+// True when this repository's Validation Contract requires a pull_request
+// for CI to fire at all, and the given branch isn't already covered by a
+// required push strategy. Feature-branch workflows (branch !== the push
+// strategy's declared branches, typically just the default branch) need a
+// PR opened before any CI run will ever appear — waiting for one is a
+// deadlock, not a transient delay.
+export function requiresDraftPrFirst(manifest: ProjectKernelManifest | undefined, branch: string): boolean {
+  const strategies = manifest?.validation?.strategies;
+  if (!strategies?.length) return false;
+  const pushCoversBranch = strategies.some(
+    (strategy) => strategy.type === 'push' && strategy.required !== false && (!strategy.branches?.length || strategy.branches.includes(branch)),
+  );
+  if (pushCoversBranch) return false;
+  return strategies.some((strategy) => strategy.type === 'pull_request' && strategy.required !== false);
+}
+
 function parseValidationStrategy(value: unknown, index: number): ProjectKernelValidationStrategy {
   if (!isRecord(value) || typeof value.type !== 'string' || !VALIDATION_TYPES.has(value.type)) {
     throw new Error(`validation.strategies[${index}].type is invalid`);
   }
+  const strategy: ProjectKernelValidationStrategy = { type: value.type as ProjectKernelValidationStrategy['type'], checks: [] };
+
+  if (value.required !== undefined) {
+    if (typeof value.required !== 'boolean') throw new Error(`validation.strategies[${index}].required must be boolean`);
+    strategy.required = value.required;
+  }
+
+  if (value.branches !== undefined) {
+    strategy.branches = parseStringArray(value.branches, `validation.strategies[${index}].branches`);
+  }
+
   const checksRaw = value.checks ?? [];
   if (!Array.isArray(checksRaw)) throw new Error(`validation.strategies[${index}].checks must be an array`);
-  const checks = checksRaw.map((check, checkIndex) => {
+  strategy.checks = checksRaw.map((check, checkIndex) => {
     if (!isRecord(check) || typeof check.name !== 'string' || !check.name.trim()) {
       throw new Error(`validation.strategies[${index}].checks[${checkIndex}].name is required`);
     }
     const category = typeof check.category === 'string' && check.category.trim() ? check.category.trim() : undefined;
     return { name: check.name.trim(), category };
   });
-  return { type: value.type as ProjectKernelValidationStrategy['type'], checks };
+
+  return strategy;
 }
 
 function parseStringRecord(value: unknown, label: string, requireNonEmpty: boolean): Record<string, string> {
