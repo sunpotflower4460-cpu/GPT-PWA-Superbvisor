@@ -109,6 +109,15 @@ export async function readFile(env: GitHubEnv, repository: string, ref: string, 
   return { path, sha: result.sha, size: result.size, content };
 }
 
+export async function readOptionalFile(env: GitHubEnv, repository: string, ref: string, path: string): Promise<GitHubFileResult | null> {
+  try {
+    return await readFile(env, repository, ref, path);
+  } catch (error) {
+    if (error instanceof GitHubHttpError && error.status === 404) return null;
+    throw error;
+  }
+}
+
 export async function writeFile(env: GitHubEnv, repository: string, branch: string, path: string, content: string, message: string) {
   assertSafeBranch(branch);
   assertSafePath(path);
