@@ -109,14 +109,26 @@ export function parseProjectKernel(content: string): ProjectKernelManifest {
   if (typeof value.defaultMode === 'string' && value.defaultMode.trim()) manifest.defaultMode = value.defaultMode.trim();
   if (Array.isArray(value.modes)) manifest.modes = parseStringArray(value.modes, 'modes');
 
-  if (isRecord(value.contextRouting)) {
+  if (value.contextRouting !== undefined) {
+    // Unlike defaultMode/modes above (which silently ignore a wrong-typed
+    // value instead of throwing), contextRouting is rejected outright when
+    // it isn't an object. Silently ignoring it here would leave the
+    // manifest looking valid on this side while GPT-template's producer-side
+    // isValidKernelManifest() already rejects the same input — the parity
+    // gap runs the opposite direction from most others in this file (here
+    // the consumer was the loose one), but it's still a real one.
+    if (!isRecord(value.contextRouting)) throw new Error('contextRouting must be an object');
     const contextRouting: ProjectKernelManifest['contextRouting'] = {};
     for (const key of ['core', 'scoped', 'onDemand'] as const) {
       const raw = value.contextRouting[key];
       if (raw === undefined) continue;
       const items = parseStringArray(raw, `contextRouting.${key}`);
       for (const pathKey of items) {
-        if (!(pathKey in paths)) throw new Error(`contextRouting.${key} references unknown paths key "${pathKey}"`);
+        // `in` also matches inherited Object.prototype names (toString,
+        // constructor, __proto__, ...) even when `paths` has no own key by
+        // that name, silently accepting a routing entry with no real path
+        // behind it. Object.hasOwn is the own-property-only check.
+        if (!Object.hasOwn(paths, pathKey)) throw new Error(`contextRouting.${key} references unknown paths key "${pathKey}"`);
       }
       contextRouting[key] = items;
     }
@@ -238,8 +250,19 @@ function parseStringArray(value: unknown, label: string): string[] {
   });
 }
 
+// A Windows drive-qualified path (e.g. "C:/Windows/..." or "C:foo") is
+// absolute/rooted outside the repository despite starting with neither
+// "/" nor "\\" and containing no "..". An orchestrator resolving this path
+// on Windows would read outside the checkout.
+const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:/;
+
 function assertSafeManifestPath(path: string, label: string) {
-  if (path.startsWith('/') || path.includes('\\') || path.split('/').includes('..')) {
+  if (
+    path.startsWith('/') ||
+    path.includes('\\') ||
+    path.split('/').includes('..') ||
+    WINDOWS_DRIVE_PATH.test(path)
+  ) {
     throw new Error(`${label} contains an unsafe repository path`);
   }
 }
