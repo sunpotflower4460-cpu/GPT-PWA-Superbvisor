@@ -57,6 +57,41 @@ export function assessCi(checks: CiCheckLike[], humanRequiredCheckNames?: Readon
   return { state: 'CODE_FAILURE', failed, transient, humanRequired: [] };
 }
 
+// assessCi() only sees workflow-run-level data (GitHub's /actions/runs),
+// whose `name` is the WORKFLOW's name — but a Project Kernel declares
+// checks[].name at job/check-run granularity (GitHub's
+// /commits/{sha}/check-runs), which is what actually shows up as a named
+// check on a PR. The two coincide only when a workflow has a single job
+// sharing its name (e.g. GPT-template's "guard" workflow/job); they
+// diverge whenever they don't (e.g. the "require-human-approval" workflow
+// contains a job named "check-approval" — Kernel-declared checks[].name
+// is "check-approval", but assessCi() alone can only ever see
+// "require-human-approval"). This reconciles the two: given the actual
+// job/check-run-level data for the same head SHA, upgrade a workflow-run-
+// level CODE_FAILURE/TRANSIENT_FAILURE to HUMAN_REQUIRED when a
+// Kernel-declared human-approval check is the one that's actually failing.
+// A no-op for PENDING/SUCCESS/NO_RUN, and merges into (never replaces) any
+// human-required checks assessCi() already found via action_required.
+export function applyHumanApprovalOverride(
+  assessment: CiAssessment,
+  jobLevelChecks: CiCheckLike[],
+  humanRequiredCheckNames: ReadonlySet<string>,
+): CiAssessment {
+  if (!humanRequiredCheckNames.size) return assessment;
+  if (assessment.state === 'PENDING' || assessment.state === 'SUCCESS' || assessment.state === 'NO_RUN') return assessment;
+
+  const failingHumanChecks = jobLevelChecks.filter(
+    (check) => humanRequiredCheckNames.has(check.name)
+      && check.status === 'completed'
+      && !SUCCESS_CONCLUSIONS.has((check.conclusion || '').toLowerCase()),
+  );
+  if (!failingHumanChecks.length) return assessment;
+
+  const alreadyPresent = new Set(assessment.humanRequired.map((check) => check.name));
+  const humanRequired = [...assessment.humanRequired, ...failingHumanChecks.filter((check) => !alreadyPresent.has(check.name))];
+  return { state: 'HUMAN_REQUIRED', failed: assessment.failed, transient: [], humanRequired };
+}
+
 export function failureFingerprint(headSha: string, checks: CiCheckLike[]) {
   const signature = checks
     .map((check) => `${check.id}:${check.name}:${check.status}:${check.conclusion || ''}`)

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AUTOPILOT_ROUTE_COMPLETE_MARKER,
   AUTOPILOT_ROUTE_HEADER,
+  applyHumanApprovalOverride,
   assessCi,
   buildAutopilotRouteContinuationPrompt,
   buildChatGptHandoff,
@@ -52,11 +53,15 @@ describe('assessCi', () => {
     ]).state).toBe('SUCCESS');
   });
 
-  it('treats a plain failure as human-required when the Kernel declares that check name HUMAN_APPROVAL_REQUIRED', () => {
-    // GitHub-native: require-human-approval.yml's check-approval job calls
-    // core.setFailed(), which reports a plain `failure` conclusion — never
-    // `action_required`. Without the Kernel override this would otherwise
-    // be indistinguishable from a real code failure.
+  it('treats a plain failure as human-required when the check name (as assessCi sees it) matches the Kernel override directly', () => {
+    // assessCi() only ever sees whatever `name` its caller passes in. This
+    // covers the coincidental case where that name already matches the
+    // Kernel-declared check name (e.g. a workflow with a single job sharing
+    // its name, like GPT-template's "guard" workflow/job). The realistic
+    // case — a workflow-run name that does NOT match its job/check name,
+    // e.g. "require-human-approval" (workflow) containing "check-approval"
+    // (job) — is covered by applyHumanApprovalOverride below, which is what
+    // developerAgent.ts actually relies on for that reconciliation.
     const humanRequiredCheckNames = new Set(['check-approval']);
     expect(assessCi([{ ...base, name: 'check-approval', conclusion: 'failure' }], humanRequiredCheckNames).state)
       .toBe('HUMAN_REQUIRED');
@@ -66,6 +71,60 @@ describe('assessCi', () => {
     const humanRequiredCheckNames = new Set(['check-approval']);
     expect(assessCi([{ ...base, name: 'guard', conclusion: 'failure' }], humanRequiredCheckNames).state)
       .toBe('CODE_FAILURE');
+  });
+});
+
+describe('applyHumanApprovalOverride', () => {
+  // Reproduces the actual GitHub API shape for GPT-template's PR #3, where
+  // require-human-approval.yml's check-approval job fails: the WORKFLOW-
+  // run-level view (what assessCi/getBranchWorkflowRuns sees) reports the
+  // workflow's own name, "require-human-approval", with conclusion
+  // "failure" — never "action_required" — while the JOB/check-run-level
+  // view (getCommitCheckRuns) reports the actual job name,
+  // "check-approval", which is what the Kernel's checks[].name declares.
+  // Passing only the workflow-run-level data to assessCi() alone
+  // classifies this as CODE_FAILURE — a real bug, not a hypothetical one.
+  const workflowRunLevelCheck = { ...base, name: 'require-human-approval', conclusion: 'failure' };
+  const jobLevelCheckApproval = { ...base, id: 2, name: 'check-approval', conclusion: 'failure' };
+  const humanRequiredCheckNames = new Set(['check-approval']);
+
+  it('demonstrates the bug: workflow-run-level data alone misclassifies this as CODE_FAILURE', () => {
+    expect(assessCi([workflowRunLevelCheck], humanRequiredCheckNames).state).toBe('CODE_FAILURE');
+  });
+
+  it('reclassifies to HUMAN_REQUIRED once given the real job/check-run-level data', () => {
+    const workflowLevelAssessment = assessCi([workflowRunLevelCheck], humanRequiredCheckNames);
+    const reconciled = applyHumanApprovalOverride(workflowLevelAssessment, [jobLevelCheckApproval], humanRequiredCheckNames);
+    expect(reconciled.state).toBe('HUMAN_REQUIRED');
+    expect(reconciled.humanRequired.map((check) => check.name)).toContain('check-approval');
+  });
+
+  it('is a no-op when no job/check-run matches a declared human-approval name', () => {
+    const workflowLevelAssessment = assessCi([workflowRunLevelCheck], humanRequiredCheckNames);
+    const otherJobCheck = { ...base, id: 3, name: 'guard', conclusion: 'failure' };
+    const reconciled = applyHumanApprovalOverride(workflowLevelAssessment, [otherJobCheck], humanRequiredCheckNames);
+    expect(reconciled).toEqual(workflowLevelAssessment);
+  });
+
+  it('does not override PENDING, SUCCESS, or NO_RUN even if a matching check exists', () => {
+    expect(applyHumanApprovalOverride(assessCi([]), [jobLevelCheckApproval], humanRequiredCheckNames).state).toBe('NO_RUN');
+    expect(applyHumanApprovalOverride(assessCi([{ ...base, status: 'in_progress', conclusion: null }]), [jobLevelCheckApproval], humanRequiredCheckNames).state).toBe('PENDING');
+    expect(applyHumanApprovalOverride(assessCi([base]), [jobLevelCheckApproval], humanRequiredCheckNames).state).toBe('SUCCESS');
+  });
+
+  it('merges with, rather than replaces, human-required checks assessCi already found via action_required', () => {
+    const actionRequiredCheck = { ...base, id: 4, name: 'deploy-approval', conclusion: 'action_required' };
+    const workflowLevelAssessment = assessCi([actionRequiredCheck], humanRequiredCheckNames);
+    expect(workflowLevelAssessment.state).toBe('HUMAN_REQUIRED');
+    const reconciled = applyHumanApprovalOverride(workflowLevelAssessment, [jobLevelCheckApproval], humanRequiredCheckNames);
+    const names = reconciled.humanRequired.map((check) => check.name).sort();
+    expect(names).toEqual(['check-approval', 'deploy-approval']);
+  });
+
+  it('is a no-op when the Kernel declares no human-approval checks at all (GENERIC_REPO-equivalent)', () => {
+    const workflowLevelAssessment = assessCi([workflowRunLevelCheck]);
+    const reconciled = applyHumanApprovalOverride(workflowLevelAssessment, [jobLevelCheckApproval], new Set());
+    expect(reconciled).toEqual(workflowLevelAssessment);
   });
 });
 

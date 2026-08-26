@@ -163,15 +163,19 @@ describe('requiresDraftPrFirst', () => {
   });
 });
 
-// GPT-template's actual project-kernel.json (sunpotflower4460-cpu/GPT-template,
-// branch claude/project-kernel-v2, as of commit deee28c), embedded verbatim.
-// This is the other half of the same cross-repo contract this module
-// implements: if either side's schema assumptions drift — a key GPT-template
-// stops declaring, a contextRouting shape change, a validation field this
-// parser stops understanding — this test fails instead of both repos
-// silently disagreeing about what the manifest means (exactly what
-// happened before this fix: this file's own fixture used literal paths in
-// contextRouting while GPT-template's real manifest used paths keys).
+// A cross-repo golden SNAPSHOT regression test, not an automatic drift
+// detector: this is GPT-template's actual project-kernel.json
+// (sunpotflower4460-cpu/GPT-template, branch claude/project-kernel-v2, as
+// of commit deee28c) embedded verbatim as a point-in-time fixture. It
+// catches this parser regressing against that known-good contract, and it
+// is exactly how the bug it guards against — this file's own fixture using
+// literal paths in contextRouting while GPT-template's real manifest used
+// paths keys — was caught. It does NOT catch GPT-template changing its
+// manifest shape tomorrow without a corresponding update here; nothing
+// currently fetches GPT-template's live manifest at test time. Closing
+// that gap for real needs either a shared JSON Schema both repos validate
+// against, or a CI job that pulls GPT-template's current manifest and
+// re-runs this parser against it.
 const GPT_TEMPLATE_REAL_MANIFEST = `{
   "schemaVersion": 1,
   "kind": "ai-project-kernel",

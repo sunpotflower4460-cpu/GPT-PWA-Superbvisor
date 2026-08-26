@@ -6,11 +6,13 @@ import {
   createPullRequest,
   createWorkspace,
   getBranchWorkflowRuns,
+  getCommitCheckRuns,
   getRepositorySummary,
 } from './githubExecutor';
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
   CiCheckLike,
+  applyHumanApprovalOverride,
   assessCi,
   buildAutopilotRouteContinuationPrompt,
   buildChatGptHandoff,
@@ -233,7 +235,21 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   const allRuns = await getBranchWorkflowRuns(env, job.repository, job.workspace.branch);
   const checks = latestChecksForHead(allRuns.filter((item) => item.headSha === repo.headSha));
   const humanRequiredCheckNames = getCheckNamesByCategory(job.kernelManifest, 'HUMAN_APPROVAL_REQUIRED');
-  const assessment = assessCi(checks, humanRequiredCheckNames);
+  let assessment = assessCi(checks, humanRequiredCheckNames);
+  if (humanRequiredCheckNames.size && assessment.state !== 'PENDING' && assessment.state !== 'SUCCESS' && assessment.state !== 'NO_RUN') {
+    // assessCi() only sees workflow-run names, which don't match Kernel-
+    // declared job/check names in the common case (see
+    // applyHumanApprovalOverride's own comment). Fetch the actual
+    // job/check-run-level data for this head SHA to reconcile. Best-effort:
+    // if this call fails, keep the workflow-run-level assessment as-is
+    // rather than blocking the refresh cycle over a secondary API call.
+    try {
+      const jobLevelChecks = await getCommitCheckRuns(env, job.repository, repo.headSha);
+      assessment = applyHumanApprovalOverride(assessment, jobLevelChecks, humanRequiredCheckNames);
+    } catch {
+      // keep assessment as computed from workflow-run-level data
+    }
+  }
   job = {
     ...job,
     lastHeadSha: repo.headSha,

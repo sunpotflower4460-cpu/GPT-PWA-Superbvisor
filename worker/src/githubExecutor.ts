@@ -195,6 +195,21 @@ export async function getBranchWorkflowRuns(env: GitHubEnv, repository: string, 
   return result.workflow_runs.map((run) => ({ id: run.id, name: run.name, status: run.status, conclusion: run.conclusion, url: run.html_url, headSha: run.head_sha }));
 }
 
+// Job/check-run-level, unlike getBranchWorkflowRuns(): a workflow run's own
+// `name` is the WORKFLOW's name (e.g. "require-human-approval"), but a
+// Project Kernel's validation.strategies[].checks[].name declares the
+// individual check/job name as it actually appears on a PR (e.g.
+// "check-approval" — a job inside the require-human-approval workflow).
+// The two are only the same when a workflow happens to have a single job
+// sharing its name (as with GPT-template's "guard" workflow/job). Anything
+// that needs to match against Kernel-declared check names — the human-
+// approval classification override — needs this endpoint, not workflow runs.
+export async function getCommitCheckRuns(env: GitHubEnv, repository: string, sha: string) {
+  const repo = assertAllowedRepo(env, repository);
+  const result = await githubJson<{ check_runs: Array<{ id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string }> }>(env, repo, 'GET', `/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`);
+  return result.check_runs.map((run) => ({ id: run.id, name: run.name, status: run.status, conclusion: run.conclusion, url: run.html_url, headSha: run.head_sha }));
+}
+
 export function assertSafeBranch(branch: string) {
   if (!branch.startsWith(BRANCH_PREFIX) || branch.includes('..') || branch.includes('~') || branch.includes('^') || branch.includes(':')) {
     throw new Error(`Writes are restricted to ${BRANCH_PREFIX}* branches`);
