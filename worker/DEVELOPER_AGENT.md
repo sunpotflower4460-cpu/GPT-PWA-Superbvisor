@@ -102,3 +102,7 @@ PWAのBackground Worker設定には、従来と同じWorker URLと `SUPERVISOR_C
 - GitHub Actionsを無限ポーリングする
 
 この境界は「AIに実装を任せる」利便性と、「勝手に本番へ出さない」安全性を両立するためのものです。
+
+## 人間承認ゲートとの関係（governance.maintainerMode）
+
+対象リポジトリの `project-kernel.json` が `governance.maintainerMode` を宣言している場合（GPT-templateベースのリポジトリ）、`SOLO_MAINTAINER`（PR作成者本人が `/approve-maintainer` とコメントし、GitHub上の実際のCollaborator Permissionで検証される）と `MULTI_MAINTAINER`（既定。作成者以外による `APPROVED` レビューが必要）のどちらでも、Worker（`orchestratorPolicy.ts` の `assessCi`）は Validation Contract の `checks[].category === 'HUMAN_APPROVAL_REQUIRED'` だけを見て `check-approval` を `HUMAN_REQUIRED` に分類します。モードごとの承認手段の違いを解釈するのは常にGitHub Actions側（`require-human-approval.yml`）であり、この境界線を越えてWorker/Supervisorが承認そのものを代行したり、モードの違いに応じて挙動を変えたりすることはありません。
