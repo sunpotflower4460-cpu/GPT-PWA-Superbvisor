@@ -7,10 +7,12 @@ import {
   createWorkspace,
   getBranchWorkflowRuns,
   getRepositorySummary,
+  getWorkflowRunJobs,
 } from './githubExecutor';
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
   CiCheckLike,
+  applyHumanApprovalOverride,
   assessCi,
   buildAutopilotRouteContinuationPrompt,
   buildChatGptHandoff,
@@ -21,6 +23,13 @@ import {
 } from './orchestratorPolicy';
 import { PushEnv, sendSupervisorPush } from './push';
 import { enqueueChatCommand } from './chatCommandQueue';
+import {
+  ProjectKernelManifest,
+  ProjectKernelMode,
+  detectProjectKernel,
+  getCheckNamesByCategory,
+  requiresDraftPrFirst,
+} from './projectKernel';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -69,6 +78,11 @@ export interface DeveloperJob {
   ciChecks?: CiCheckLike[];
   pullRequest?: { number: number; url: string; draft: true };
   managedByGoalRunId?: string;
+  // Detected once at job creation and cached; never a hard dependency —
+  // GENERIC_REPO (no manifest, or one that failed to parse) falls back to
+  // the pre-Kernel heuristics unchanged. See projectKernel.ts.
+  kernelMode?: ProjectKernelMode;
+  kernelManifest?: ProjectKernelManifest;
   recoveryCount: number;
   lastFailureFingerprint?: string;
   ciAutoReruns: number;
@@ -127,6 +141,12 @@ async function createDeveloperJobInternal(
 ): Promise<DeveloperJob> {
   if (!body.repository?.trim() || !body.goal?.trim() || !body.prompt?.trim()) throw new Error('repository, goal and prompt are required');
   const workspace = existingWorkspace ?? await createWorkspace(env, body.repository, body.projectName || body.goal.slice(0, 32));
+  // Best-effort: a Project Kernel detection failure (network hiccup,
+  // malformed manifest) must never block the job — it only means the
+  // Validation Contract shortcuts below stay unavailable for this job.
+  const kernel = await detectProjectKernel(env, workspace.repository, workspace.defaultBranch).catch(
+    (): Awaited<ReturnType<typeof detectProjectKernel>> => ({ mode: 'GENERIC_REPO', reason: 'not_found' }),
+  );
   const definitionOfDone = (body.definitionOfDone ?? []).filter((item) => typeof item === 'string' && item.trim()).slice(0, 30);
   const deterministicPrompt = buildChatGptHandoff({
     repository: workspace.repository,
@@ -173,6 +193,8 @@ async function createDeveloperJobInternal(
     degradedOrchestration: decision.degraded,
     chatUrl: body.chatUrl?.trim() || undefined,
     autoDispatch: Boolean(body.autoDispatch),
+    kernelMode: kernel.mode,
+    kernelManifest: kernel.manifest,
   };
   await saveJob(env, job);
   job = await queueHandoffIfEnabled(env, job);
@@ -212,7 +234,23 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   const firstChangeSeenAt = headChanged || !job.firstChangeSeenAt ? new Date().toISOString() : job.firstChangeSeenAt;
   const allRuns = await getBranchWorkflowRuns(env, job.repository, job.workspace.branch);
   const checks = latestChecksForHead(allRuns.filter((item) => item.headSha === repo.headSha));
-  const assessment = assessCi(checks);
+  const humanRequiredCheckNames = getCheckNamesByCategory(job.kernelManifest, 'HUMAN_APPROVAL_REQUIRED');
+  let assessment = assessCi(checks, humanRequiredCheckNames);
+  if (humanRequiredCheckNames.size && assessment.failed.length) {
+    // assessCi() only sees workflow-run names, which don't match Kernel-
+    // declared job/check names in the common case (see
+    // applyHumanApprovalOverride's own comment). Fetch the actual job-level
+    // data for each currently-failing workflow run to reconcile, scoped to
+    // those runs' own IDs (getWorkflowRunJobs) rather than every check on
+    // the commit — cheaper, and it can't pick up unrelated third-party App
+    // checks. Best-effort per run: a run whose jobs fail to fetch is simply
+    // absent from the reconciliation rather than blocking the others or the
+    // refresh cycle.
+    const repository = job.repository;
+    const results = await Promise.allSettled(assessment.failed.map((run) => getWorkflowRunJobs(env, repository, run.id)));
+    const jobLevelChecks = results.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
+    assessment = applyHumanApprovalOverride(assessment, jobLevelChecks, humanRequiredCheckNames);
+  }
   job = {
     ...job,
     lastHeadSha: repo.headSha,
@@ -229,6 +267,33 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   }
 
   if (assessment.state === 'NO_RUN') {
+    // Some repositories (e.g. GPT-template's guard.yml: pull_request + push
+    // on main only) never fire CI on a feature branch at all — no amount of
+    // waiting produces a run. If the Kernel's Validation Contract says a
+    // pull_request is required and this branch isn't covered by a required
+    // push strategy, open the Draft PR now instead of waiting out the grace
+    // period first; the same polling loop then picks up the resulting
+    // pull_request-triggered run on the next refresh.
+    if (!job.pullRequest && requiresDraftPrFirst(job.kernelManifest, job.workspace.branch)) {
+      const created = await tryCreateDraftPr(env, job, comparison);
+      if (created.pullRequest) {
+        job = {
+          ...job,
+          pullRequest: created.pullRequest,
+          phase: 'waiting_ci',
+          error: undefined,
+          outputText: `このリポジトリのValidation Contractはpull_request経由のCIを要求しています。CI発火のためDraft PR #${created.pullRequest.number} を作成し、現在headのCI完了を監視しています。`,
+          updatedAt: new Date().toISOString(),
+        };
+        await saveJob(env, job);
+        return job;
+      }
+      // PR creation failed (e.g. a transient API error, or one already
+      // exists that this job lost track of) — don't hard-fail the job over
+      // it, fall through to the existing grace-period wait.
+      job = { ...job, error: created.error };
+    }
+
     const elapsed = Date.now() - new Date(firstChangeSeenAt).getTime();
     if (elapsed < CI_APPEAR_GRACE_MS) {
       job = { ...job, phase: 'waiting_ci', error: undefined, outputText: '変更を検出しました。現在headのCI runが現れるまで監視しています。' };
@@ -308,21 +373,9 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     return job;
   }
 
-  let pullRequest = job.pullRequest;
-  if (!pullRequest) {
-    try {
-      const pr = await createPullRequest(
-        env,
-        job.workspace,
-        `${job.projectName || 'AI DEV DECK'}: ${shortTitle(job.goal)}`,
-        buildPullRequestBody(job, comparison),
-      );
-      pullRequest = { number: pr.number, url: pr.url, draft: true };
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Draft PR creation failed';
-      job = { ...job, error: detail };
-    }
-  }
+  const created = await tryCreateDraftPr(env, job, comparison);
+  const pullRequest = created.pullRequest;
+  if (created.error) job = { ...job, error: created.error };
 
   job = {
     ...job,
@@ -471,6 +524,25 @@ function latestChecksForHead(runs: Awaited<ReturnType<typeof getBranchWorkflowRu
     if (!byName.has(run.name)) byName.set(run.name, run);
   }
   return [...byName.values()];
+}
+
+async function tryCreateDraftPr(
+  env: AgentEnv,
+  job: DeveloperJob,
+  comparison: Awaited<ReturnType<typeof compareWorkspace>>,
+): Promise<{ pullRequest?: DeveloperJob['pullRequest']; error?: string }> {
+  if (job.pullRequest) return { pullRequest: job.pullRequest };
+  try {
+    const pr = await createPullRequest(
+      env,
+      job.workspace,
+      `${job.projectName || 'AI DEV DECK'}: ${shortTitle(job.goal)}`,
+      buildPullRequestBody(job, comparison),
+    );
+    return { pullRequest: { number: pr.number, url: pr.url, draft: true } };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : 'Draft PR creation failed' };
+  }
 }
 
 function buildPullRequestBody(job: DeveloperJob, comparison: Awaited<ReturnType<typeof compareWorkspace>>) {

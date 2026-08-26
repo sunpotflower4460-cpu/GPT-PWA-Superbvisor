@@ -1,0 +1,92 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { getWorkflowRunJobs, type GitHubEnv } from './githubExecutor';
+
+const env: GitHubEnv = {
+  GITHUB_TOKEN: 'test-token',
+  GITHUB_ALLOWED_REPOS: 'sunpotflower4460-cpu/GPT-template',
+};
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('getWorkflowRunJobs', () => {
+  it('calls the Actions API (not the Checks API) and maps job-level fields', async () => {
+    // This is the whole point of using this endpoint over
+    // /commits/{sha}/check-runs: it only needs the "Actions: Read"
+    // fine-grained PAT permission this Worker already documents as its
+    // minimum, not the separate "Checks: Read" permission the Checks API
+    // requires on a private repository.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      expect(url).toBe('https://api.github.com/repos/sunpotflower4460-cpu/GPT-template/actions/runs/32954188422/jobs?per_page=100');
+      return jsonResponse({
+        jobs: [
+          {
+            id: 98132113307,
+            run_id: 32954188422,
+            name: 'guard',
+            status: 'completed',
+            conclusion: 'success',
+            html_url: 'https://github.com/sunpotflower4460-cpu/GPT-template/actions/runs/32954188422/job/98132113307',
+            head_sha: 'deee28cac488e997bb9264d9c5ca5b082cf18a1f',
+          },
+        ],
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const jobs = await getWorkflowRunJobs(env, 'sunpotflower4460-cpu/GPT-template', 32954188422);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(jobs).toEqual([
+      {
+        id: 98132113307,
+        name: 'guard',
+        status: 'completed',
+        conclusion: 'success',
+        url: 'https://github.com/sunpotflower4460-cpu/GPT-template/actions/runs/32954188422/job/98132113307',
+        headSha: 'deee28cac488e997bb9264d9c5ca5b082cf18a1f',
+      },
+    ]);
+  });
+
+  it('resolves the actual require-human-approval -> check-approval hierarchy from a real-shaped response', async () => {
+    // The exact case this whole fix exists for: the workflow is named
+    // "require-human-approval", but the job inside it — what a Project
+    // Kernel's checks[].name actually declares — is "check-approval".
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      jobs: [
+        {
+          id: 1,
+          run_id: 99,
+          name: 'check-approval',
+          status: 'completed',
+          conclusion: 'failure',
+          html_url: 'https://github.com/sunpotflower4460-cpu/GPT-template/actions/runs/99/job/1',
+          head_sha: 'abc123',
+        },
+      ],
+    })));
+
+    const jobs = await getWorkflowRunJobs(env, 'sunpotflower4460-cpu/GPT-template', 99);
+    expect(jobs.map((job) => job.name)).toEqual(['check-approval']);
+    expect(jobs[0].conclusion).toBe('failure');
+  });
+
+  it('propagates a 403 (e.g. a genuinely missing Actions permission) rather than silently returning no jobs', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ message: 'Resource not accessible by integration' }, 403)));
+    await expect(getWorkflowRunJobs(env, 'sunpotflower4460-cpu/GPT-template', 1)).rejects.toThrow();
+  });
+
+  it('rejects a repository that is not allowlisted before making any request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(getWorkflowRunJobs(env, 'someone-else/other-repo', 1)).rejects.toThrow('not allowlisted');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
