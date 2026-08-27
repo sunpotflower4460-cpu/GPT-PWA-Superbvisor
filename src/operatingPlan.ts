@@ -1,5 +1,31 @@
 export type OperatingPlanTarget = 'IMPLEMENTED' | 'CI_GREEN' | 'REVIEW_READY' | 'MANUAL_ONLY' | 'CUSTOM';
 
+// The declared Route plan (Goal/Route/Task separation) — an ordered list
+// of named phases, sent to the Worker alongside a DeveloperJob/GuardianRun
+// (see worker/src/routePlan.ts). Parsed from the same arrow-separated
+// `workflow` text a user already writes for `standard手順`
+// (defaultOperatingPlan's own default: "現状確認 → 未完了の特定 → …") — this
+// is NOT an attempt to understand arbitrary free-text instructions (that
+// would be exactly the kind of unreliable guess the design warns against);
+// it only extracts the phases the user already wrote using a delimiter
+// convention this UI already establishes and displays. A workflow with no
+// arrow at all produces a single-node plan (the whole text, verbatim) —
+// never a fabricated multi-step breakdown.
+export interface RouteNode {
+  id: string;
+  label: string;
+}
+
+const ROUTE_SEPARATOR = /\s*(?:→|➡|->)\s*/;
+
+export function parseRoutePlan(workflow: string): RouteNode[] {
+  const segments = workflow
+    .split(ROUTE_SEPARATOR)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return segments.map((label, index) => ({ id: `node-${index + 1}`, label: label.slice(0, 200) }));
+}
+
 export interface OperatingPlan {
   target: OperatingPlanTarget;
   customTarget: string;
@@ -77,12 +103,25 @@ export function isAutopilotRouteWorkflow(workflow: string) {
   return hasRepeatedPass || (hasConditionalBranch && hasExplicitSequencing);
 }
 
+// The workflow text actually used to build a task/route from a plan — a
+// blank saved workflow (never explicitly set, or cleared to whitespace)
+// falls back to the standard default, same as formatOperatingPlanPrompt
+// below. Anything that derives a routePlan (see parseRoutePlan) from a
+// saved plan MUST go through this instead of reading plan.workflow raw:
+// otherwise the actual dispatched task follows the default workflow while
+// the declared route reports nothing, since a blank string still passes
+// normalizeOperatingPlan's `typeof === 'string'` check and is never
+// replaced by the default there.
+export function effectiveWorkflow(plan: OperatingPlan): string {
+  return plan.workflow.trim() || defaultOperatingPlan().workflow;
+}
+
 export function formatOperatingPlanPrompt(input: OperatingPlan) {
   const plan = normalizeOperatingPlan(input);
   const target = plan.target === 'CUSTOM'
     ? plan.customTarget.trim() || targetLabels.CUSTOM
     : targetLabels[plan.target];
-  const workflow = plan.workflow.trim() || defaultOperatingPlan().workflow;
+  const workflow = effectiveWorkflow(plan);
   const behavior = [
     plan.inspectBeforeWork && '最初に現状・成果物・既完了作業を確認し、重複作業を避ける。',
     plan.continueWithoutConfirmation && 'AIだけで安全に進められる途中工程では、毎回の確認待ちで止まらず連続して進める。',

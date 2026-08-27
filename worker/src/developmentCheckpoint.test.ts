@@ -87,6 +87,7 @@ describe('buildDevelopmentCheckpoint', () => {
     const checkpoint = buildDevelopmentCheckpoint(baseJob());
     expect(checkpoint.routeId).toBeUndefined();
     expect(checkpoint.routeNode).toBeUndefined();
+    expect(checkpoint.route).toEqual([]);
   });
 
   it('labels a repeated failure with its recurrence count', () => {
@@ -96,5 +97,33 @@ describe('buildDevelopmentCheckpoint', () => {
       recurringFailureCount: 3,
     }));
     expect(checkpoint.recentFailures[0]).toContain('x3');
+  });
+
+  it('exposes a declared route plan distinct from self-reported progress', () => {
+    const checkpoint = buildDevelopmentCheckpoint(baseJob({
+      routePlan: [
+        { id: 'inspect', label: '現状確認' },
+        { id: 'implement', label: '実装' },
+        { id: 'review', label: 'レビュー' },
+      ],
+    }));
+    expect(checkpoint.routeId).toBe('job-1');
+    expect(checkpoint.route).toEqual(['現状確認', '実装', 'レビュー']);
+    // No self-report yet — routeNode stays undefined even though a plan exists.
+    expect(checkpoint.routeNode).toBeUndefined();
+  });
+
+  it('derives contextPressure from recovery and route-checkpoint history', () => {
+    expect(buildDevelopmentCheckpoint(baseJob()).contextPressure).toBe('LOW');
+    expect(buildDevelopmentCheckpoint(baseJob({ recoveryCount: 12 })).contextPressure).toBe('HIGH');
+  });
+
+  it('exposes the job trace log as-is, defaulting to empty', () => {
+    expect(buildDevelopmentCheckpoint(baseJob()).trace).toEqual([]);
+    const checkpoint = buildDevelopmentCheckpoint(baseJob({
+      trace: [{ event: 'CREATED', at: '2026-01-01T00:00:00.000Z' }],
+    }));
+    expect(checkpoint.trace).toHaveLength(1);
+    expect(checkpoint.trace[0].event).toBe('CREATED');
   });
 });

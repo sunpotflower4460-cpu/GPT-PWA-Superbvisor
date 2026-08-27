@@ -11,8 +11,10 @@ import {
   OperatingPlan,
   OperatingPlanTarget,
   defaultOperatingPlan,
+  effectiveWorkflow,
   formatOperatingPlanPrompt,
   getOperatingPlan,
+  parseRoutePlan,
   saveOperatingPlan,
   targetLabels,
 } from './operatingPlan';
@@ -191,7 +193,8 @@ export default function OperatingPlanCenter() {
     setMessage('');
     try {
       const prompt = buildActionPrompt(selected, runAction);
-      const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection());
+      const routePlan = parseRoutePlan(effectiveWorkflow(getOperatingPlan(selected.id)));
+      const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection(), routePlan);
       setGuardian(run);
       setBackground(null);
       markLocalExecution('GUARDIAN', 'Guardian · ChatGPT Bridge配送 / 実行待ち', run.updatedAt, 'WAITING_AI');

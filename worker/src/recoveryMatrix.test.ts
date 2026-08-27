@@ -60,6 +60,9 @@ describe('recoveryStrategyPromptHint', () => {
     expect(recoveryStrategyPromptHint('RETRY')).toBe('');
     expect(recoveryStrategyPromptHint('ASK_HUMAN')).toBe('');
     expect(recoveryStrategyPromptHint('NONE')).toBe('');
-    expect(recoveryStrategyPromptHint('CREATE_HANDOFF')).toBe('');
+  });
+
+  it('gives CREATE_HANDOFF a real hint — no DeveloperJobPhase can carry this signal instead', () => {
+    expect(recoveryStrategyPromptHint('CREATE_HANDOFF')).not.toBe('');
   });
 });

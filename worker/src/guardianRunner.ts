@@ -8,6 +8,7 @@ import {
 import { GitHubEnv } from './githubExecutor';
 import { OrchestrationEnv } from './orchestrationModel';
 import { AutopilotRouteState } from './orchestratorPolicy';
+import { RouteNode } from './routePlan';
 import {
   acquireCoordinatorLease,
   hasAtomicCoordinator,
@@ -67,6 +68,7 @@ export interface GuardianRun {
   degradedOrchestration?: boolean;
   orchestratorRateLimited?: boolean;
   autopilotRoute?: AutopilotRouteState;
+  routePlan?: RouteNode[];
   notifiedAt?: string;
 }
 
@@ -111,6 +113,7 @@ export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRu
     degradedOrchestration: developer.degradedOrchestration,
     orchestratorRateLimited: developer.orchestratorRateLimited,
     autopilotRoute: developer.autopilotRoute,
+    routePlan: developer.routePlan,
   };
   await saveRun(env, run);
   await mapDeveloperJob(env, developer.id, run.id);
@@ -219,6 +222,7 @@ async function advanceGuardianRunUnlocked(
     degradedOrchestration: job.degradedOrchestration,
     orchestratorRateLimited: job.orchestratorRateLimited,
     autopilotRoute: job.autopilotRoute,
+    routePlan: job.routePlan,
     transientErrorCount: 0,
     error: job.error,
     updatedAt: new Date().toISOString(),

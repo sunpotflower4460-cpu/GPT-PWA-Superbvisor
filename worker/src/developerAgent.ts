@@ -41,6 +41,8 @@ import { FailureCategory, classifyFailureCategory } from './failureTaxonomy';
 import { RecoveryStrategy, recoveryStrategyPromptHint, recurringFailureSignature, resolveRecoveryStrategy } from './recoveryMatrix';
 import { assembleKernelContext } from './contextAssembler';
 import { hooks } from './lifecycleHooks';
+import { RouteNode, parseRoutePlanInput } from './routePlan';
+import { deriveContextPressure } from './contextPressure';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -58,6 +60,11 @@ export interface CreateDeveloperJobBody {
   maxAutoCiReruns?: number;
   chatUrl?: string;
   autoDispatch?: boolean;
+  // The declared Route plan (see routePlan.ts) — an ordered list of named
+  // phases the caller (the PWA, from src/operatingPlan.ts's
+  // parseRoutePlan) planned upfront. Optional and never required: a caller
+  // with no structured plan simply omits it, same as definitionOfDone.
+  routePlan?: RouteNode[];
 }
 
 export type DeveloperJobStatus = 'starting' | 'running' | 'completed' | 'failed';
@@ -138,6 +145,17 @@ export interface DeveloperJob {
   // Only ever set for a job whose prompt carries the route contract
   // (hasAutopilotRouteContract) — absent for every ordinary job.
   autopilotRoute?: AutopilotRouteState;
+  // The declared Route plan (see routePlan.ts's own comment on why this is
+  // kept separate from autopilotRoute's self-reported progress). Absent
+  // for any job created without one — never required.
+  routePlan?: RouteNode[];
+  // A short, capped chronological log of real state transitions this job
+  // has actually gone through (job created, CI failed, recovery prepared,
+  // human required, completed, …) — literally the design's "trace":
+  // deterministic bookkeeping, not a hook side effect (see
+  // lifecycleHooks.ts's own note on why trace-appending stays plain code
+  // here rather than going through a hook handler).
+  trace?: TraceEntry[];
   chatUrl?: string;
   autoDispatch: boolean;
   lastQueuedHandoffFingerprint?: string;
@@ -145,9 +163,21 @@ export interface DeveloperJob {
   lastDispatchError?: string;
 }
 
+export interface TraceEntry {
+  event: string;
+  at: string;
+  detail?: string;
+}
+
 const JOB_TTL = 60 * 60 * 24 * 14;
 const CI_APPEAR_GRACE_MS = 7 * 60_000;
 const MAX_AUTO_CI_RERUNS = 2;
+const MAX_TRACE_ENTRIES = 30;
+
+function appendTrace(job: DeveloperJob, event: string, detail?: string): TraceEntry[] {
+  const entries = job.trace ?? [];
+  return [...entries, { event, at: new Date().toISOString(), detail }].slice(-MAX_TRACE_ENTRIES);
+}
 
 export async function createDeveloperJob(env: AgentEnv, body: CreateDeveloperJobBody): Promise<DeveloperJob> {
   return createDeveloperJobInternal(env, body);
@@ -179,6 +209,7 @@ export async function continueDeveloperJob(
     maxAutoCiReruns: previous.maxAutoCiReruns,
     chatUrl: previous.chatUrl,
     autoDispatch: previous.autoDispatch,
+    routePlan: previous.routePlan,
   }, previous.workspace, goalRunId ?? previous.managedByGoalRunId);
 }
 
@@ -262,6 +293,8 @@ async function createDeveloperJobInternal(
     kernelMode: kernel.mode,
     kernelManifest: kernel.manifest,
     inferredContract: kernel.inferredContract,
+    routePlan: parseRoutePlanInput(body.routePlan),
+    trace: [{ event: 'CREATED', at: now, detail: body.goal.slice(0, 160) }],
   };
   await saveJob(env, job);
   await hooks.run('AFTER_TASK', { jobId: job.id, repository: job.repository, branch: job.workspace.branch, at: job.updatedAt });
@@ -463,6 +496,14 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       new Date().toISOString(),
       extractAutopilotRouteStep(repo.headCommitMessage),
     );
+    // recordAutopilotRouteCheckpoint returns the SAME reference when the
+    // head hasn't advanced since the last recorded checkpoint (it only
+    // appends on a genuinely new head). Re-entering this branch on every
+    // refresh of an unchanged still-in-progress head must not also
+    // re-append to trace — a minute-by-minute poll would otherwise fill the
+    // capped trace with identical ROUTE_CHECKPOINT entries and evict real
+    // history (creation, recovery) that trace exists to preserve.
+    const routeAdvanced = autopilotRoute !== job.autopilotRoute;
     const continuationPrompt = buildAutopilotRouteContinuationPrompt({
       repository: job.repository,
       branch: job.workspace.branch,
@@ -472,14 +513,28 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       checks,
       routeState: autopilotRoute,
     });
+    // A long-running Autopilot route can drive contextPressure to HIGH
+    // purely through route checkpoints (no CI failures at all — see
+    // deriveContextPressure) — prepareRecovery() below is not the only
+    // place pressure needs to act on. Same enforcement pattern as there:
+    // force-append the handoff hint onto the outgoing prompt rather than
+    // relying on it being requested elsewhere.
+    const routePressure = deriveContextPressure({
+      recoveryCount: job.recoveryCount,
+      routeCheckpointCount: autopilotRoute.checkpoints.length,
+    });
+    const finalContinuationPrompt = routePressure === 'HIGH'
+      ? `${continuationPrompt}\n\n${recoveryStrategyPromptHint('CREATE_HANDOFF')}`
+      : continuationPrompt;
     job = {
       ...job,
       status: 'running',
       phase: 'handoff_ready',
       error: undefined,
-      handoffPrompt: continuationPrompt,
+      handoffPrompt: finalContinuationPrompt,
       outputText: '現在headのCIは成功しました。AUTOPILOT ROUTEの途中チェックポイントとして扱い、完了済み工程を飛ばさず次の未完了工程へ進むChatGPT指示を準備しました。',
       autopilotRoute,
+      trace: routeAdvanced ? appendTrace(job, 'ROUTE_CHECKPOINT', extractAutopilotRouteStep(repo.headCommitMessage)) : job.trace,
       updatedAt: new Date().toISOString(),
     };
     await saveJob(env, job);
@@ -513,6 +568,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     autopilotRoute: hasAutopilotRouteContract(job.prompt)
       ? markAutopilotRouteCompleted(job.autopilotRoute, new Date().toISOString())
       : job.autopilotRoute,
+    trace: appendTrace(job, 'COMPLETED', pullRequest ? `PR #${pullRequest.number}` : undefined),
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, job);
@@ -541,12 +597,46 @@ async function prepareRecovery(
   classification: 'CI_TRANSIENT' | 'CI_CODE_FAILURE' | 'CI_CONFIG_FAILURE' | 'HUMAN_REQUIRED',
   declaredCategories?: readonly string[],
 ): Promise<DeveloperJob> {
+  // Advisory proxy, not a token-count measurement — see contextPressure.ts's
+  // own comment on why the Worker cannot know the chat's real context
+  // usage. Computed from THIS job's own recovery/route history so it only
+  // reflects how long-running *this* conversation has likely been, not
+  // some cross-job global count.
+  //
+  // Uses job.recoveryCount + 1, not job.recoveryCount: this call is IN THE
+  // PROCESS of preparing that (job.recoveryCount + 1)-th recovery (see
+  // `recoveryCount: job.recoveryCount + 1` below) — using the pre-increment
+  // count would compute pressure as of the PREVIOUS recovery, one refresh
+  // stale. Concretely: on the recovery that crosses the HIGH threshold, the
+  // stale count would still read MEDIUM and skip the handoff hint on this
+  // exact call; if the fingerprint then stays unchanged, every later
+  // refresh takes the dedup fast-path (which never recomputes pressure or
+  // rebuilds the prompt at all — see below) and the hint would never get
+  // added until a genuinely new fingerprint appears.
+  const pressure = deriveContextPressure({
+    recoveryCount: job.recoveryCount + 1,
+    routeCheckpointCount: job.autopilotRoute?.checkpoints.length ?? 0,
+  });
   // declaredCategories folds into the fingerprint (see failureFingerprint's
   // own comment) so a category discovered on a later refresh — after an
   // earlier one landed here with it still unknown, since getWorkflowRunJobs
   // is best-effort — invalidates the cached handoffPrompt instead of being
   // silently dropped.
-  const failureCategory = classifyFailureCategory({ ciClassification: classification, declaredCategories });
+  //
+  // contextPressure is deliberately NOT passed into classifyFailureCategory
+  // here: this call site always has a real CI-derived classification (that
+  // field exists for the opposite case — no CI signal at all, see its own
+  // doc comment). recoveryCount/routeCheckpointCount are monotonic and never
+  // reset, so once pressure reaches HIGH it would stay HIGH for the rest of
+  // the job's life, permanently masking the actual failureCategory (and,
+  // through it, recoveryStrategy — e.g. a real GUARD_FAILURE would never
+  // resolve to RELOAD_KERNEL again). High pressure is carried as an
+  // additional handoff signal on the prompt instead (below), never as an
+  // override of which failure this actually is.
+  const failureCategory = classifyFailureCategory({
+    ciClassification: classification,
+    declaredCategories,
+  });
   const fingerprint = checks.length ? failureFingerprint(headSha, checks, declaredCategories) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
     // job.recoveryStrategy is the value a prior call to this function
@@ -588,6 +678,19 @@ async function prepareRecovery(
     evidence: `${reason}\n${checks.map((check) => `${check.name}: ${check.conclusion || check.status} ${check.url}`).join('\n') || 'No CI checks observed for the current head.'}`,
     deterministicPrompt,
   });
+  // A configured orchestration provider's own chatgptPrompt REPLACES
+  // deterministicPrompt rather than composing with it (see parseDecision in
+  // orchestrationModel.ts) — deterministicPrompt only reaches the provider
+  // as "a fallback prompt that may be improved", with no guarantee its
+  // wording (including a strategyHint baked into it) survives. High context
+  // pressure's handoff hint therefore cannot rely on being embedded in
+  // deterministicPrompt; it's enforced here, unconditionally, on whichever
+  // chatgptPrompt actually won (provider-authored or the deterministic
+  // fallback), the same way enforceExecutorBoundary already force-applies
+  // its own prefix regardless of provider output.
+  const finalChatgptPrompt = pressure === 'HIGH'
+    ? `${decision.chatgptPrompt}\n\n${recoveryStrategyPromptHint('CREATE_HANDOFF')}`
+    : decision.chatgptPrompt;
 
   let updated: DeveloperJob = {
     ...job,
@@ -602,7 +705,7 @@ async function prepareRecovery(
     model: decision.model,
     orchestratorProvider: decision.provider,
     outputText: `${reason}\n\n${decision.summary}`,
-    handoffPrompt: decision.chatgptPrompt,
+    handoffPrompt: finalChatgptPrompt,
     error: reason,
     lastFailureFingerprint: fingerprint,
     recoveryCount: job.recoveryCount + 1,
@@ -612,6 +715,7 @@ async function prepareRecovery(
     recurringFailureCount,
     degradedOrchestration: decision.degraded,
     orchestratorRateLimited: decision.rateLimited,
+    trace: appendTrace(job, `RECOVERY:${failureCategory}`, `strategy=${recoveryStrategy}${pressure !== 'LOW' ? ` contextPressure=${pressure}` : ''}`),
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, updated);

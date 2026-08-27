@@ -9,6 +9,7 @@ import {
 import { buildDevelopmentCheckpoint } from './developmentCheckpoint';
 import { buildCompletionCertificate } from './completionJudge';
 import { createCiExecutionFabric } from './executionFabric';
+import { getWorkflowRunJobs } from './githubExecutor';
 import {
   CreateGuardianRunBody,
   advanceGuardianRun,
@@ -116,10 +117,40 @@ export default {
       const job = await getDeveloperJob(env, decodeURIComponent(developerExecutionLogs[1]));
       if (!job) return json({ error: 'developer_job_not_found' }, 404, env, request);
       // CI is the only Execution Fabric this Worker actually has — see
-      // executionFabric.ts's own note on why LOCAL_FAST/ISOLATED/BROWSER
-      // are not faked here.
-      const fabric = createCiExecutionFabric(job.ciChecks, Boolean(job.ciChecks?.length));
-      return json({ kind: fabric.kind, logs: await fabric.inspectLogs() }, 200, env, request);
+      // executionFabric.ts's own note on why LOCAL_FAST/ISOLATED are not
+      // faked here. `phases` isolates evidence by check name when the
+      // target repo's own CI check names allow it (e.g. a job literally
+      // named "playwright" surfaces under `browser`).
+      //
+      // job.ciChecks is workflow-RUN-level (getBranchWorkflowRuns — one
+      // entry per GitHub Actions workflow, e.g. a single entry named "CI"),
+      // not per-job. That's the right granularity for assessCi()'s overall
+      // pass/fail/pending gating, but it is USELESS for phase isolation on
+      // a repo (like this one) that runs several jobs inside one workflow
+      // — every job.name would be the same generic workflow name and
+      // PHASE_KEYWORDS would never match anything but the aggregate
+      // fallback. Fetch the actual job-level names for each known run (same
+      // getWorkflowRunJobs used elsewhere for Kernel category matching) so
+      // `phases` reflects real per-job evidence. Merged per RUN, not
+      // all-or-nothing: a run whose job-level fetch fails (or returns no
+      // jobs) falls back to just THAT run's own workflow-run-level entry,
+      // so its evidence (e.g. a genuinely failing run) is never silently
+      // dropped from `logs`/`phases` just because a DIFFERENT run's
+      // job-level lookup happened to succeed.
+      const runs = job.ciChecks ?? [];
+      const jobLevelResults = await Promise.allSettled(runs.map((run) => getWorkflowRunJobs(env, job.repository, run.id)));
+      const checksForFabric = jobLevelResults.flatMap((result, index) => (
+        result.status === 'fulfilled' && result.value.length ? result.value : [runs[index]]
+      ));
+      const fabric = createCiExecutionFabric(checksForFabric, Boolean(runs.length));
+      const [test, typecheck, build, browser, logs] = await Promise.all([
+        fabric.runTest(),
+        fabric.runTypecheck(),
+        fabric.runBuild(),
+        fabric.runBrowser(),
+        fabric.inspectLogs(),
+      ]);
+      return json({ kind: fabric.kind, phases: { test, typecheck, build, browser }, logs }, 200, env, request);
     }
 
     const latestDeveloper = url.pathname.match(/^\/api\/developer-projects\/([^/]+)\/latest$/);
