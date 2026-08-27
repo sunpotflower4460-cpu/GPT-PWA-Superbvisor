@@ -41,7 +41,7 @@ import { FailureCategory, classifyFailureCategory } from './failureTaxonomy';
 import { RecoveryStrategy, recoveryStrategyPromptHint, recurringFailureSignature, resolveRecoveryStrategy } from './recoveryMatrix';
 import { assembleKernelContext } from './contextAssembler';
 import { hooks } from './lifecycleHooks';
-import { RouteNode, parseRoutePlanInput } from './routePlan';
+import { RouteNode, parseRoutePlanInput, resolveRouteDispatchChatUrl } from './routePlan';
 import { deriveContextPressure } from './contextPressure';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
@@ -734,7 +734,14 @@ async function prepareRecovery(
 }
 
 async function queueHandoffIfEnabled(env: AgentEnv, job: DeveloperJob): Promise<DeveloperJob> {
-  if (!job.autoDispatch || job.phase === 'human_required' || !job.projectId || !job.chatUrl || !job.handoffPrompt?.trim()) return job;
+  // Multi Chat / Specialist Chat: route to whichever chat the CURRENT
+  // declared phase is bound to (Worker-derived from verified checkpoint
+  // count, never the self-reported step text — see
+  // resolveRouteDispatchChatUrl's own comment), falling back to the job's
+  // single default chatUrl for a job with no such binding — identical
+  // behavior to before this existed.
+  const dispatchChatUrl = resolveRouteDispatchChatUrl(job.routePlan, job.autopilotRoute?.checkpoints.length ?? 0, job.chatUrl);
+  if (!job.autoDispatch || job.phase === 'human_required' || !job.projectId || !dispatchChatUrl || !job.handoffPrompt?.trim()) return job;
   const fingerprint = promptFingerprint(job.handoffPrompt);
   if (job.lastQueuedHandoffFingerprint === fingerprint && job.lastQueuedCommandId) return job;
 
@@ -742,7 +749,7 @@ async function queueHandoffIfEnabled(env: AgentEnv, job: DeveloperJob): Promise<
     const command = await enqueueChatCommand(env, {
       projectId: job.projectId,
       projectName: job.projectName,
-      chatUrl: job.chatUrl,
+      chatUrl: dispatchChatUrl,
       prompt: job.handoffPrompt,
       dedupeKey: `developer:${job.id}:${fingerprint}`,
     });

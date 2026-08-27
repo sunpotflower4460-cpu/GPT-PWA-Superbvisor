@@ -126,4 +126,34 @@ describe('buildDevelopmentCheckpoint', () => {
     expect(checkpoint.trace).toHaveLength(1);
     expect(checkpoint.trace[0].event).toBe('CREATED');
   });
+
+  it('resolves dispatchChatUrl to the current declared phase\'s bound chat', () => {
+    const checkpoint = buildDevelopmentCheckpoint(baseJob({
+      chatUrl: 'https://chatgpt.com/c/default',
+      routePlan: [
+        { id: 'inspect', label: '現状確認', chatUrl: 'https://chatgpt.com/c/specialist' },
+        { id: 'implement', label: '実装' },
+      ],
+    }));
+    // No checkpoints yet — Worker-derived current phase is index 0.
+    expect(checkpoint.dispatchChatUrl).toBe('https://chatgpt.com/c/specialist');
+  });
+
+  it('falls back to the job default chatUrl once past a phase with no bound chat', () => {
+    const checkpoint = buildDevelopmentCheckpoint(baseJob({
+      chatUrl: 'https://chatgpt.com/c/default',
+      routePlan: [
+        { id: 'inspect', label: '現状確認', chatUrl: 'https://chatgpt.com/c/specialist' },
+        { id: 'implement', label: '実装' },
+      ],
+      autopilotRoute: {
+        checkpoints: [{ headSha: 'abcdef1234567', reachedAt: '2026-01-01T00:01:00.000Z' }],
+      },
+    }));
+    expect(checkpoint.dispatchChatUrl).toBe('https://chatgpt.com/c/default');
+  });
+
+  it('reports no dispatchChatUrl for an ordinary job with no chat bound at all', () => {
+    expect(buildDevelopmentCheckpoint(baseJob()).dispatchChatUrl).toBeUndefined();
+  });
 });
