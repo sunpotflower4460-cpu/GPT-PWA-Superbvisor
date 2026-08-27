@@ -115,20 +115,36 @@ export function applyDeclaredCategoryOverride(
 ): CiAssessment {
   if (!checkCategories.size || assessment.state !== 'CODE_FAILURE') return assessment;
 
+  // A CODE_FAILURE run can still contain transient-looking checks alongside
+  // the real failure (assessCi only escalates to TRANSIENT_FAILURE when
+  // EVERY failing check is transient) — excluding them here keeps a
+  // cancelled/timed-out/stale check's category from being mistaken for the
+  // actionable failure's own.
   const category = jobLevelChecks
-    .filter((check) => check.status === 'completed' && !SUCCESS_CONCLUSIONS.has((check.conclusion || '').toLowerCase()))
+    .filter((check) => {
+      const conclusion = (check.conclusion || '').toLowerCase();
+      return check.status === 'completed' && !SUCCESS_CONCLUSIONS.has(conclusion) && !TRANSIENT_CONCLUSIONS.has(conclusion);
+    })
     .map((check) => checkCategories.get(check.name))
     .find((value): value is string => Boolean(value) && value !== 'HUMAN_APPROVAL_REQUIRED');
 
   return category ? { ...assessment, declaredCategory: category } : assessment;
 }
 
-export function failureFingerprint(headSha: string, checks: CiCheckLike[]) {
+// declaredCategory is optional and appended only when present, so every
+// existing 2-argument caller (e.g. the CI-auto-rerun dedup check) is
+// unaffected. It matters for prepareRecovery's own dedup specifically:
+// getWorkflowRunJobs is best-effort (Promise.allSettled), so an earlier
+// refresh can land here with the category still unknown, cache a
+// handoffPrompt against a fingerprint built from `checks` alone, and a
+// later refresh — same failing run, same `checks` — would otherwise reuse
+// that stale prompt forever even after the category becomes available.
+export function failureFingerprint(headSha: string, checks: CiCheckLike[], declaredCategory?: string) {
   const signature = checks
     .map((check) => `${check.id}:${check.name}:${check.status}:${check.conclusion || ''}`)
     .sort()
     .join('|');
-  return `${headSha}:${signature}`;
+  return `${headSha}:${signature}${declaredCategory ? `:${declaredCategory}` : ''}`;
 }
 
 export function isRetryableProviderStatus(status: number) {
@@ -183,15 +199,23 @@ export function buildRecoveryPrompt(input: {
   headSha: string;
   checks: CiCheckLike[];
   previousSummary?: string;
+  // The repo's own Validation Contract category for the failing check
+  // (see applyDeclaredCategoryOverride), when known. This is the
+  // deterministic fallback prompt actually sent to ChatGPT whenever no
+  // orchestration provider is configured or every one fails — it must
+  // carry the same category info the LLM-generated path receives via
+  // evidence, or the category silently never reaches ChatGPT on that path.
+  declaredCategory?: string;
 }) {
   const ci = input.checks.length
     ? input.checks.map((check) => `- ${check.name}: ${check.conclusion || check.status} (${check.url})`).join('\n')
     : '- CI runを確認できません';
+  const categoryLine = input.declaredCategory ? `\n宣言されたカテゴリ: ${input.declaredCategory}` : '';
   const routeRecovery = hasAutopilotRouteContract(input.originalTask)
     ? `\n\nAUTOPILOT復旧ルール:\n元TASKのルート契約は復旧後も有効です。完了済み工程を最初から再実行せず、今回失敗した工程を直して再検証した後、最初の未完了工程/パスへ戻って残りルートを続けてください。CIが緑へ戻ったことはルート途中のチェックポイントであり、後続工程が残っている限り最終完了ではありません。全ルートが終わった時だけ ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を最終コミットメッセージに含めてください。`
     : '';
 
-  return `この作業の実装修正担当は、このChatGPTチャットです。Supervisorは外部APIで監視だけを行っています。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\n\nGOAL:\n${input.goal}\n\n元のTASK:\n${input.originalTask}\n\nCI/監視結果:\n${ci}\n\n直前の監督要約:\n${input.previousSummary || 'なし'}\n\n同じ失敗を繰り返さないでください。まず現在のbranch・diff・CI失敗箇所を実際に確認し、原因を切り分け、必要なコード修正またはテスト修正をこのChatGPTから行い、再度CIまで確認してください。CI自体の一時障害ならコードを無意味に変更せず再実行/再確認を優先してください。mainへの直接write・自動merge・本番deployはしないでください。${routeRecovery}`;
+  return `この作業の実装修正担当は、このChatGPTチャットです。Supervisorは外部APIで監視だけを行っています。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\n\nGOAL:\n${input.goal}\n\n元のTASK:\n${input.originalTask}\n\nCI/監視結果:\n${ci}${categoryLine}\n\n直前の監督要約:\n${input.previousSummary || 'なし'}\n\n同じ失敗を繰り返さないでください。まず現在のbranch・diff・CI失敗箇所を実際に確認し、原因を切り分け、必要なコード修正またはテスト修正をこのChatGPTから行い、再度CIまで確認してください。CI自体の一時障害ならコードを無意味に変更せず再実行/再確認を優先してください。mainへの直接write・自動merge・本番deployはしないでください。${routeRecovery}`;
 }
 
 export function buildAutopilotRouteContinuationPrompt(input: {

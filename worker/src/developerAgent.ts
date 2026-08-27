@@ -351,7 +351,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     const reason = assessment.declaredCategory
       ? `現在headのCIが失敗しています(このリポジトリのValidation Contractが宣言するカテゴリ: ${assessment.declaredCategory})。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。`
       : '現在headのCIが失敗しています。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。';
-    return prepareRecovery(env, job, repo.headSha, assessment.failed, reason, 'CI_CODE_FAILURE');
+    return prepareRecovery(env, job, repo.headSha, assessment.failed, reason, 'CI_CODE_FAILURE', assessment.declaredCategory);
   }
 
   if (hasAutopilotRouteContract(job.prompt) && !hasAutopilotRouteCompletionMarker(repo.headCommitMessage)) {
@@ -425,8 +425,14 @@ async function prepareRecovery(
   checks: CiCheckLike[],
   reason: string,
   classification: 'CI_TRANSIENT' | 'CI_CODE_FAILURE' | 'CI_CONFIG_FAILURE' | 'HUMAN_REQUIRED',
+  declaredCategory?: string,
 ): Promise<DeveloperJob> {
-  const fingerprint = checks.length ? failureFingerprint(headSha, checks) : `${headSha}:no-ci`;
+  // declaredCategory folds into the fingerprint (see failureFingerprint's
+  // own comment) so a category discovered on a later refresh — after an
+  // earlier one landed here with it still unknown, since getWorkflowRunJobs
+  // is best-effort — invalidates the cached handoffPrompt instead of being
+  // silently dropped.
+  const fingerprint = checks.length ? failureFingerprint(headSha, checks, declaredCategory) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
     const phase: DeveloperJobPhase = classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready';
     let stable: DeveloperJob = { ...job, phase, error: reason, updatedAt: new Date().toISOString() };
@@ -443,6 +449,7 @@ async function prepareRecovery(
     headSha,
     checks,
     previousSummary: job.outputText,
+    declaredCategory,
   });
   const decision = await runOrchestrationModel(env, {
     mode: 'RECOVER',

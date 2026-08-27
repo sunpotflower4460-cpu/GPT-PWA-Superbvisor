@@ -171,6 +171,33 @@ describe('applyDeclaredCategoryOverride', () => {
     expect(applyDeclaredCategoryOverride(assessCi([base]), [jobLevelLintCheck], checkCategories).state).toBe('SUCCESS');
   });
 
+  it('excludes a transient check from category selection, even when a real failure exists in the same CODE_FAILURE run', () => {
+    // assessCi only escalates to TRANSIENT_FAILURE when EVERY failing check
+    // is transient — a run with one cancelled check and one real failure is
+    // still CODE_FAILURE overall. The cancelled check's category (if any)
+    // must never be mistaken for the actionable failure's own.
+    const runWithMixedFailures = { ...base, name: 'ci', conclusion: 'failure' };
+    const assessment = assessCi([runWithMixedFailures]);
+    expect(assessment.state).toBe('CODE_FAILURE');
+
+    const cancelledJobCheck = { ...base, id: 5, name: 'flaky-e2e', conclusion: 'cancelled' };
+    const realFailureJobCheck = { ...base, id: 6, name: 'lint', conclusion: 'failure' };
+    const categories = new Map([
+      ['flaky-e2e', 'INFRA_FAILURE'],
+      ['lint', 'GUARD_FAILURE'],
+    ]);
+
+    const enriched = applyDeclaredCategoryOverride(assessment, [cancelledJobCheck, realFailureJobCheck], categories);
+    expect(enriched.declaredCategory).toBe('GUARD_FAILURE');
+  });
+
+  it('finds no category when every job-level check with one is transient', () => {
+    const assessment = assessCi([{ ...base, name: 'ci', conclusion: 'failure' }]);
+    const cancelledJobCheck = { ...base, id: 5, name: 'flaky-e2e', conclusion: 'cancelled' };
+    const categories = new Map([['flaky-e2e', 'INFRA_FAILURE']]);
+    expect(applyDeclaredCategoryOverride(assessment, [cancelledJobCheck], categories)).toEqual(assessment);
+  });
+
   it('never re-labels a HUMAN_APPROVAL_REQUIRED-categorized check as a generic declared category', () => {
     // A CODE_FAILURE assessment (not yet reconciled to HUMAN_REQUIRED) whose
     // only matching job-level check happens to be the human-approval one —
@@ -194,6 +221,22 @@ describe('recovery safety', () => {
     expect(failureFingerprint('abc', [base])).not.toBe(failureFingerprint('def', [base]));
   });
 
+  it('changes fingerprint when a declared category is newly discovered, given the same head/checks', () => {
+    // Otherwise: getWorkflowRunJobs is best-effort, so an earlier refresh
+    // can cache a handoffPrompt against a category-less fingerprint, and a
+    // later refresh where the category becomes known — same head, same
+    // checks — would reuse that stale prompt forever instead of
+    // regenerating with the newly discovered category.
+    const withoutCategory = failureFingerprint('abc', [{ ...base, conclusion: 'failure' }]);
+    const withCategory = failureFingerprint('abc', [{ ...base, conclusion: 'failure' }], 'GUARD_FAILURE');
+    expect(withCategory).not.toBe(withoutCategory);
+  });
+
+  it('is unaffected by a declaredCategory of undefined (existing 2-argument callers stay identical)', () => {
+    expect(failureFingerprint('abc', [{ ...base, conclusion: 'failure' }], undefined))
+      .toBe(failureFingerprint('abc', [{ ...base, conclusion: 'failure' }]));
+  });
+
   it('only retries provider statuses that are plausibly transient', () => {
     expect(isRetryableProviderStatus(429)).toBe(true);
     expect(isRetryableProviderStatus(503)).toBe(true);
@@ -211,6 +254,24 @@ describe('recovery safety', () => {
     expect(initial).toContain('実装担当は、このChatGPTチャット');
     expect(initial).toContain('外部APIは実装を行いません');
     expect(recovery).toContain('実装修正担当は、このChatGPTチャット');
+  });
+
+  it('includes the declared category in the deterministic recovery prompt (not only the LLM-orchestrated one)', () => {
+    // runOrchestrationModel falls back to this exact prompt verbatim
+    // whenever no provider is configured or every one fails — the declared
+    // category has to reach ChatGPT on that path too, not only via the
+    // LLM-visible `evidence` string built separately in developerAgent.ts.
+    const withCategory = buildRecoveryPrompt({
+      repository: 'owner/repo', branch: 'ai-dev-deck/task', goal: 'Ship safely', originalTask: 'Fix CI',
+      headSha: 'abc', checks: [{ ...base, conclusion: 'failure' }], declaredCategory: 'GUARD_FAILURE',
+    });
+    expect(withCategory).toContain('宣言されたカテゴリ: GUARD_FAILURE');
+
+    const withoutCategory = buildRecoveryPrompt({
+      repository: 'owner/repo', branch: 'ai-dev-deck/task', goal: 'Ship safely', originalTask: 'Fix CI',
+      headSha: 'abc', checks: [{ ...base, conclusion: 'failure' }],
+    });
+    expect(withoutCategory).not.toContain('宣言されたカテゴリ');
   });
 
   it('makes generic non-GitHub handoffs orchestration-only too', () => {
