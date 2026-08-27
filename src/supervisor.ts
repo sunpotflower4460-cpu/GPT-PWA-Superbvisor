@@ -10,10 +10,13 @@ export type RecoveryAction =
   | 'MARK_COMPLETE';
 
 export interface SupervisorEvidence {
-  testsPassing?: boolean;
   ciPassing?: boolean;
+  // From GitHubProjectSnapshot.openIssues (see integrations/github.ts) —
+  // the repo's open issue count, treated as blocking per this field's own
+  // long-standing intent. No label convention exists to separate a real
+  // blocker from an unrelated backlog issue, so this is a blunt heuristic,
+  // not a precise one; still real evidence, not a self-report.
   openBlockingIssues?: number;
-  unresolvedTodos?: number;
   latestCommitAt?: string;
   workerFailed?: boolean;
   workerIncomplete?: boolean;
@@ -37,14 +40,10 @@ function completionScore(project: DevProject, evidence: SupervisorEvidence) {
     score = Math.max(score, Math.round((completedMilestones / project.milestones.length) * 85));
   }
 
-  if (evidence.testsPassing) score += 4;
   if (evidence.ciPassing) score += 4;
   if (evidence.openBlockingIssues === 0) score += 3;
-  if (evidence.unresolvedTodos === 0) score += 2;
-  if (evidence.testsPassing === false) score = Math.min(score, 90);
   if (evidence.ciPassing === false) score = Math.min(score, 90);
   if ((evidence.openBlockingIssues ?? 0) > 0) score = Math.min(score, 95);
-  if ((evidence.unresolvedTodos ?? 0) > 0) score = Math.min(score, 95);
   if (project.humanBlockers.length > 0) score = Math.min(score, 95);
 
   return Math.max(0, Math.min(100, score));
@@ -116,10 +115,8 @@ export function evaluateProject(project: DevProject, evidence: SupervisorEvidenc
 
   const allMilestonesDone = project.milestones.length > 0 && project.milestones.every((item) => item.state === 'DONE');
   const evidenceClean =
-    evidence.testsPassing !== false &&
     evidence.ciPassing !== false &&
-    (evidence.openBlockingIssues ?? 0) === 0 &&
-    (evidence.unresolvedTodos ?? 0) === 0;
+    (evidence.openBlockingIssues ?? 0) === 0;
 
   if ((project.status === 'COMPLETED' || allMilestonesDone) && evidenceClean) {
     return {

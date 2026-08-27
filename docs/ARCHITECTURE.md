@@ -449,6 +449,7 @@ Implemented foundation:
 19. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
 20. Guardian Cron/manual advance execution lease + lease regression tests
 21. structured Autopilot Route progress (checkpoints + self-reported step marker) persisted chat-text-independently, surfaced in the Handoff packet
+22. Completion Judgeが実際に取得したopen issue件数を完成判定へ反映(従来は表示のみで判定には未使用だった`testsPassing`/`unresolvedTodos`の未使用フィールドは削除)
 
 Next high-priority gaps:
 

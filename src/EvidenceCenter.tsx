@@ -114,6 +114,10 @@ function EvidenceCard({
     ? evaluateProject(project, {
         ciPassing: snapshot.ciState === 'SUCCESS',
         latestCommitAt: snapshot.latestCommitAt,
+        // snapshot.openIssues is already fetched and shown as the "Issues"
+        // metric below — feed it into the actual completion decision too,
+        // instead of only displaying it.
+        openBlockingIssues: snapshot.openIssues,
       })
     : null;
 
