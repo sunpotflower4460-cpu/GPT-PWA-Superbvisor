@@ -1,4 +1,5 @@
 import { buildOperatingPlanPrompt } from './operatingPlan';
+import type { AutopilotRouteState } from './developerAgent';
 
 export type ProjectStatus =
   | 'RUNNING'
@@ -44,6 +45,7 @@ export interface DevProject {
   humanBlockers: string[];
   milestones: Milestone[];
   timeline: TimelineEvent[];
+  autopilotRoute?: AutopilotRouteState;
 }
 
 export interface QuickAction {

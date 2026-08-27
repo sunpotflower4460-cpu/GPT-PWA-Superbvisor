@@ -448,14 +448,14 @@ Implemented foundation:
 18. Setup Doctor atomic-coordinator diagnosis
 19. Concept Guard + mobile bundle budget + Worker Durable Object dry-run
 20. Guardian Cron/manual advance execution lease + lease regression tests
+21. structured Autopilot Route progress (checkpoints + self-reported step marker) persisted chat-text-independently, surfaced in the Handoff packet
 
 Next high-priority gaps:
 
 1. production Workerへ `PROJECT_COORDINATOR` binding/exportを実際にdeployし、healthで `atomicCoordinator:true` を確認
 2. ChatGPT host上でのreal E2E: `PWA → Queue → Bridge → same conversation`
 3. real-device PWA / Push / reconnect / multi-device E2E
-4. structured Autopilot route progressをchat textとは独立して永続化
-5. 実運用で必要性が確認された場合、Guardian / Developer authoritative state自体をCoordinator/D1等へ寄せて完全fencingを追加
-6. 公式に可能になった場合のみChatGPT response/statusのより深いreadback
+4. 実運用で必要性が確認された場合、Guardian / Developer authoritative state自体をCoordinator/D1等へ寄せて完全fencingを追加
+5. 公式に可能になった場合のみChatGPT response/statusのより深いreadback
 
 GuardianやAutopilotの高度化より、**PWA内から複数ChatGPTを自然に操作できることを常に優先する。**

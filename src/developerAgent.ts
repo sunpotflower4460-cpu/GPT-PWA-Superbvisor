@@ -3,6 +3,17 @@ import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 
 export type DeveloperJobPhase = 'handoff_ready' | 'waiting_chatgpt' | 'waiting_ci' | 'recovery_ready' | 'human_required' | 'review_ready';
 
+export interface AutopilotRouteCheckpoint {
+  headSha: string;
+  reachedAt: string;
+  step?: string;
+}
+
+export interface AutopilotRouteState {
+  checkpoints: AutopilotRouteCheckpoint[];
+  completedAt?: string;
+}
+
 export interface DeveloperJob {
   id: string;
   projectId?: string;
@@ -31,6 +42,7 @@ export interface DeveloperJob {
   error?: string;
   degradedOrchestration?: boolean;
   orchestratorRateLimited?: boolean;
+  autopilotRoute?: AutopilotRouteState;
   recoveryCount?: number;
   ciAutoReruns?: number;
   maxAutoCiReruns?: number;

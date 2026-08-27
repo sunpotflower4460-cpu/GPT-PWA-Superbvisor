@@ -164,6 +164,11 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
     automationLevel: 'GUARDIAN',
     humanBlockers: blockers,
     lastActivityAt: run.updatedAt,
+    // Persisted independently of chat text — see developerAgent.ts's
+    // AutopilotRouteState. Preserve the last-known value when this
+    // particular refresh doesn't carry one, rather than wiping out real
+    // recorded history with a transient undefined.
+    autopilotRoute: run.autopilotRoute ?? project.autopilotRoute,
   }, {
     id: `runtime:guardian:${run.id}:${run.status}:${run.phase || ''}:${run.recoveryCount || 0}`,
     at: run.updatedAt,
@@ -226,6 +231,7 @@ function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
     automationLevel: job.autoDispatch ? project.automationLevel : 'ASSIST',
     humanBlockers: blockers,
     lastActivityAt: job.updatedAt,
+    autopilotRoute: job.autopilotRoute ?? project.autopilotRoute,
   }, {
     id: `runtime:developer:${job.id}:${job.status}:${job.phase || ''}:${job.recoveryCount ?? 0}`,
     at: job.updatedAt,

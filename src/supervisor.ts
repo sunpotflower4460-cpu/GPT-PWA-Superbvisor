@@ -149,5 +149,27 @@ export function buildHandoffPacket(project: DevProject) {
   const remaining = project.milestones.filter((item) => item.state !== 'DONE').map((item) => `- ${item.title} (${item.state})`).join('\n') || '- なし';
   const timeline = project.timeline.slice(-8).map((item) => `- ${item.at}: ${item.message}`).join('\n') || '- なし';
 
-  return `# HANDOFF PACKET\n\nPROJECT: ${project.name}\nGOAL: ${project.goal}\nCURRENT PHASE: ${project.currentPhase}\nPROGRESS: ${project.progress}%\nMODE: ${project.executionMode}\nAUTOMATION: ${project.automationLevel}\n\n## COMPLETED\n${done}\n\n## REMAINING\n${remaining}\n\n## HUMAN BLOCKERS\n${project.humanBlockers.map((item) => `- ${item}`).join('\n') || '- なし'}\n\n## RECENT HISTORY\n${timeline}\n\n## CONTINUE RULES\n完了済みを重複せず、成果物を確認して未完了地点から続行する。AIだけで安全に可能な作業は連続して進め、本人しかできない操作または重要判断だけ質問する。`;
+  return `# HANDOFF PACKET\n\nPROJECT: ${project.name}\nGOAL: ${project.goal}\nCURRENT PHASE: ${project.currentPhase}\nPROGRESS: ${project.progress}%\nMODE: ${project.executionMode}\nAUTOMATION: ${project.automationLevel}\n\n## COMPLETED\n${done}\n\n## REMAINING\n${remaining}\n${buildAutopilotRouteSection(project)}\n## HUMAN BLOCKERS\n${project.humanBlockers.map((item) => `- ${item}`).join('\n') || '- なし'}\n\n## RECENT HISTORY\n${timeline}\n\n## CONTINUE RULES\n完了済みを重複せず、成果物を確認して未完了地点から続行する。AIだけで安全に可能な作業は連続して進め、本人しかできない操作または重要判断だけ質問する。`;
+}
+
+// Autopilot Route / completed route steps / current route step-iteration
+// are required Handoff packet contents (docs/ARCHITECTURE.md §6). Rendered
+// only for a project that actually carries route state — this is the
+// structured, chat-text-independent record (see developerAgent.ts's
+// AutopilotRouteState), not anything re-derived from git history or a
+// chat's own conversational memory, which this Handoff explicitly leaves
+// behind.
+function buildAutopilotRouteSection(project: DevProject) {
+  const route = project.autopilotRoute;
+  if (!route) return '';
+  const status = route.completedAt ? `完了済み(${route.completedAt})` : '進行中';
+  const current = [...route.checkpoints].reverse().find((checkpoint) => checkpoint.step)?.step;
+  const history = route.checkpoints.length
+    ? route.checkpoints
+      .slice(-5)
+      .map((checkpoint) => `- ${checkpoint.reachedAt} (${checkpoint.headSha.slice(0, 7)}): ${checkpoint.step || '(工程の自己申告なし)'}`)
+      .join('\n')
+    : '- なし';
+
+  return `\n## AUTOPILOT ROUTE\n状態: ${status}\n記録済みチェックポイント: ${route.checkpoints.length}件\n現在のルート工程/反復(自己申告、Worker未検算): ${current || '不明'}\n\n完了済みルートチェックポイント(直近5件):\n${history}\n`;
 }

@@ -35,6 +35,25 @@ export interface CiAssessment {
 
 export const AUTOPILOT_ROUTE_HEADER = '【AUTOPILOT ROUTE CONTRACT】';
 export const AUTOPILOT_ROUTE_COMPLETE_MARKER = '[AUTOPILOT_ROUTE_COMPLETE]';
+const AUTOPILOT_ROUTE_STEP_PATTERN = /\[AUTOPILOT_ROUTE_STEP:\s*([^\]\n]{1,200})\]/;
+const MAX_AUTOPILOT_ROUTE_CHECKPOINTS = 20;
+
+export interface AutopilotRouteCheckpoint {
+  headSha: string;
+  reachedAt: string;
+  // Verbatim text extracted from an [AUTOPILOT_ROUTE_STEP: ...] marker in
+  // the commit message at this checkpoint, when the executor included one.
+  // Never interpreted, counted, or validated by the Worker — this is
+  // self-reported free text, persisted as-is so a Handoff/new chat session
+  // has real recorded context instead of having to re-derive route
+  // progress from git history or trust discarded in-conversation memory.
+  step?: string;
+}
+
+export interface AutopilotRouteState {
+  checkpoints: AutopilotRouteCheckpoint[];
+  completedAt?: string;
+}
 
 const SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 const TRANSIENT_CONCLUSIONS = new Set(['cancelled', 'timed_out', 'startup_failure', 'stale']);
@@ -171,6 +190,38 @@ export function hasAutopilotRouteCompletionMarker(commitMessage?: string) {
   return Boolean(commitMessage?.includes(AUTOPILOT_ROUTE_COMPLETE_MARKER));
 }
 
+export function extractAutopilotRouteStep(commitMessage?: string): string | undefined {
+  return commitMessage?.match(AUTOPILOT_ROUTE_STEP_PATTERN)?.[1]?.trim() || undefined;
+}
+
+// The persisted, chat-text-independent half of route progress (docs/
+// ARCHITECTURE.md §10 gap #4). Each CI-green-but-route-not-complete
+// checkpoint the Worker's own gating logic (see developerAgent.ts)
+// observes is a real, Worker-witnessed fact — this head, at this time,
+// route not yet marked complete — not something reconstructed from git
+// history or a chat's own conversational memory, which a Handoff
+// explicitly discards. Only appends when the head actually changed since
+// the last recorded checkpoint, so re-refreshing the same still-in-progress
+// head doesn't pad the list; capped to the most recent N so a
+// legitimately long-running route doesn't grow this without bound.
+export function recordAutopilotRouteCheckpoint(
+  state: AutopilotRouteState | undefined,
+  headSha: string,
+  reachedAt: string,
+  step: string | undefined,
+): AutopilotRouteState {
+  const checkpoints = state?.checkpoints ?? [];
+  if (checkpoints[checkpoints.length - 1]?.headSha === headSha) return state ?? { checkpoints };
+  return { ...state, checkpoints: [...checkpoints, { headSha, reachedAt, step }].slice(-MAX_AUTOPILOT_ROUTE_CHECKPOINTS) };
+}
+
+// Idempotent: keeps the first-observed completion time rather than
+// overwriting it on a later refresh that happens to re-check a job whose
+// route was already marked complete.
+export function markAutopilotRouteCompleted(state: AutopilotRouteState | undefined, completedAt: string): AutopilotRouteState {
+  return { checkpoints: state?.checkpoints ?? [], completedAt: state?.completedAt ?? completedAt };
+}
+
 function definitionOfDone(items?: string[]) {
   return items?.length
     ? items.map((item) => `- ${item}`).join('\n')
@@ -179,7 +230,15 @@ function definitionOfDone(items?: string[]) {
 
 function autopilotExecutionRule(task: string) {
   if (!hasAutopilotRouteContract(task)) return '';
-  return `\n\nAUTOPILOT ROUTE:\n元TASK内の ${AUTOPILOT_ROUTE_HEADER} は実行契約です。工程順・反復回数・条件分岐を守り、CIが途中で成功しても後続工程を省略しないでください。中断後は完了済みパスをやり直さず、最初の未完了工程/パスから再開してください。全ルート工程と最終検証が完了した時だけ、最終コミットのメッセージに ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を含めてください。まだ後続工程が残る状態でこのマーカーを付けてはいけません。最終工程で変更が不要だった場合、利用可能なGitHub操作でtreeを変えない安全な空コミットを作れるなら、そのコミットに完了マーカーを付けてください。できない場合は完了を偽装せず、その制約を明示してください。`;
+  return `\n\nAUTOPILOT ROUTE:\n元TASK内の ${AUTOPILOT_ROUTE_HEADER} は実行契約です。工程順・反復回数・条件分岐を守り、CIが途中で成功しても後続工程を省略しないでください。中断後は完了済みパスをやり直さず、最初の未完了工程/パスから再開してください。全ルート工程と最終検証が完了した時だけ、最終コミットのメッセージに ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を含めてください。まだ後続工程が残る状態でこのマーカーを付けてはいけません。最終工程で変更が不要だった場合、利用可能なGitHub操作でtreeを変えない安全な空コミットを作れるなら、そのコミットに完了マーカーを付けてください。できない場合は完了を偽装せず、その制約を明示してください。各コミットのメッセージに、現在のルート工程/反復回数を短く示す [AUTOPILOT_ROUTE_STEP: 内容] 形式の1行(例: [AUTOPILOT_ROUTE_STEP: 3回デバッグ 2/3回目])を含めてください。Supervisorはこの内容を解釈・検算せず、そのまま記録して次回の引き継ぎに使います。`;
+}
+
+function autopilotRouteHistory(routeState?: AutopilotRouteState) {
+  if (!routeState?.checkpoints.length) return '';
+  const lines = routeState.checkpoints
+    .map((checkpoint) => `- ${checkpoint.reachedAt} (${checkpoint.headSha.slice(0, 7)}): ${checkpoint.step || '(工程の自己申告なし)'}`)
+    .join('\n');
+  return `\n\n過去に記録されたルートチェックポイント(chat本文とは独立してWorkerが保存したもの):\n${lines}`;
 }
 
 export function buildGenericChatGptHandoff(input: {
@@ -219,13 +278,16 @@ export function buildRecoveryPrompt(input: {
   // carry the same category info the LLM-generated path receives via
   // evidence, or the categories silently never reach ChatGPT on that path.
   declaredCategories?: readonly string[];
+  // Structured, persisted route progress (see recordAutopilotRouteCheckpoint)
+  // — independent of anything in the chat's own conversational memory.
+  routeState?: AutopilotRouteState;
 }) {
   const ci = input.checks.length
     ? input.checks.map((check) => `- ${check.name}: ${check.conclusion || check.status} (${check.url})`).join('\n')
     : '- CI runを確認できません';
   const categoryLine = input.declaredCategories?.length ? `\n宣言されたカテゴリ: ${input.declaredCategories.join(', ')}` : '';
   const routeRecovery = hasAutopilotRouteContract(input.originalTask)
-    ? `\n\nAUTOPILOT復旧ルール:\n元TASKのルート契約は復旧後も有効です。完了済み工程を最初から再実行せず、今回失敗した工程を直して再検証した後、最初の未完了工程/パスへ戻って残りルートを続けてください。CIが緑へ戻ったことはルート途中のチェックポイントであり、後続工程が残っている限り最終完了ではありません。全ルートが終わった時だけ ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を最終コミットメッセージに含めてください。`
+    ? `\n\nAUTOPILOT復旧ルール:\n元TASKのルート契約は復旧後も有効です。完了済み工程を最初から再実行せず、今回失敗した工程を直して再検証した後、最初の未完了工程/パスへ戻って残りルートを続けてください。CIが緑へ戻ったことはルート途中のチェックポイントであり、後続工程が残っている限り最終完了ではありません。全ルートが終わった時だけ ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を最終コミットメッセージに含めてください。コミットメッセージには引き続き [AUTOPILOT_ROUTE_STEP: 内容] で現在工程を示してください。${autopilotRouteHistory(input.routeState)}`
     : '';
 
   return `この作業の実装修正担当は、このChatGPTチャットです。Supervisorは外部APIで監視だけを行っています。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\n\nGOAL:\n${input.goal}\n\n元のTASK:\n${input.originalTask}\n\nCI/監視結果:\n${ci}${categoryLine}\n\n直前の監督要約:\n${input.previousSummary || 'なし'}\n\n同じ失敗を繰り返さないでください。まず現在のbranch・diff・CI失敗箇所を実際に確認し、原因を切り分け、必要なコード修正またはテスト修正をこのChatGPTから行い、再度CIまで確認してください。CI自体の一時障害ならコードを無意味に変更せず再実行/再確認を優先してください。mainへの直接write・自動merge・本番deployはしないでください。${routeRecovery}`;
@@ -238,9 +300,14 @@ export function buildAutopilotRouteContinuationPrompt(input: {
   originalTask: string;
   headSha: string;
   checks: CiCheckLike[];
+  // Structured, persisted route progress (see recordAutopilotRouteCheckpoint)
+  // — independent of anything in the chat's own conversational memory, so
+  // this continuation prompt carries real history even across a Handoff to
+  // a fresh chat session.
+  routeState?: AutopilotRouteState;
 }) {
   const ci = input.checks.length
     ? input.checks.map((check) => `- ${check.name}: ${check.conclusion || check.status} (${check.url})`).join('\n')
     : '- CI runを確認できません';
-  return `AUTOPILOT ROUTEを継続してください。この作業の実行主体は、このChatGPTチャットです。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\nGOAL: ${input.goal}\n\n元のTASK:\n${input.originalTask}\n\n現在headのCI:\n${ci}\n\n現在のCIは成功していますが、元TASKには ${AUTOPILOT_ROUTE_HEADER} があるため、CI成功だけでは完了扱いにしません。これまでのdiff・作業結果・会話文脈からルート進捗を確認し、完了済みの工程/パスは繰り返さず、最初の未完了工程/未完了パスから続行してください。回数指定と条件分岐を省略しないでください。全ルート工程と最終検証まで完了した場合だけ、最終コミットメッセージへ ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を含めてください。それまではマーカーを付けず、次工程を実行してください。`;
+  return `AUTOPILOT ROUTEを継続してください。この作業の実行主体は、このChatGPTチャットです。\n\nRepository: ${input.repository}\n作業branch: ${input.branch}\n現在head: ${input.headSha}\nGOAL: ${input.goal}\n\n元のTASK:\n${input.originalTask}\n\n現在headのCI:\n${ci}\n\n現在のCIは成功していますが、元TASKには ${AUTOPILOT_ROUTE_HEADER} があるため、CI成功だけでは完了扱いにしません。これまでのdiff・作業結果・会話文脈からルート進捗を確認し、完了済みの工程/パスは繰り返さず、最初の未完了工程/未完了パスから続行してください。回数指定と条件分岐を省略しないでください。全ルート工程と最終検証まで完了した場合だけ、最終コミットメッセージへ ${AUTOPILOT_ROUTE_COMPLETE_MARKER} を含めてください。それまではマーカーを付けず、次工程を実行してください。コミットメッセージには引き続き [AUTOPILOT_ROUTE_STEP: 内容] で現在工程を示してください。${autopilotRouteHistory(input.routeState)}`;
 }
