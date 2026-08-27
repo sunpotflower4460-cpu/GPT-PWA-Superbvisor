@@ -142,6 +142,27 @@ describe('chat command idempotency', () => {
   });
 });
 
+describe('chat command NEXT/STEER priority (KV fallback path)', () => {
+  it('claims a STEER command ahead of an older queued NEXT command', async () => {
+    const { env } = fakeEnv();
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'ordinary follow-up work',
+    });
+    const steer = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: "don't touch the auth file right now",
+      kind: 'STEER',
+    });
+
+    const claimed = await claimNextChatCommand(env, 'bridge-a', 'project-1');
+    expect(claimed?.id).toBe(steer.id);
+    expect(claimed?.kind).toBe('STEER');
+  });
+});
+
 describe('chat command claim recovery', () => {
   it('allows queued commands to be claimed immediately', () => {
     expect(isClaimableCommand(baseCommand, Date.parse('2026-08-23T00:00:01.000Z'))).toBe(true);

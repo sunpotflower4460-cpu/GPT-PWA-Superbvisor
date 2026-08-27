@@ -187,6 +187,38 @@ describe('ProjectCoordinator command atomicity', () => {
     expect(values.get('dedupe:route%3Ashared')).toBe('new-command');
   });
 
+  it('rejects an unrecognized kind', async () => {
+    const coordinator = createCoordinator();
+    const result = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'do the thing',
+      kind: 'URGENT',
+    });
+    expect(result.status).toBe(400);
+  });
+
+  it('claims a STEER command ahead of an older queued NEXT command', async () => {
+    const coordinator = createCoordinator();
+    await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'ordinary follow-up work',
+    });
+    const steer = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: "don't touch the auth file right now",
+      kind: 'STEER',
+    });
+    const steerCommand = (await steer.json() as { command: { id: string } }).command;
+
+    const claim = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    const claimed = (await claim.json() as { command: { id: string; kind?: string } }).command;
+    expect(claimed.id).toBe(steerCommand.id);
+    expect(claimed.kind).toBe('STEER');
+  });
+
   it('lets only one bridge own a simultaneous claim', async () => {
     const coordinator = createCoordinator();
     await post(coordinator, '/commands/enqueue', {

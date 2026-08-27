@@ -37,6 +37,10 @@ import {
   requiresDraftPrFirst,
 } from './projectKernel';
 import { InferredGenericRepoContract } from './genericRepoInference';
+import { FailureCategory, classifyFailureCategory } from './failureTaxonomy';
+import { RecoveryStrategy, recoveryStrategyPromptHint, recurringFailureSignature, resolveRecoveryStrategy } from './recoveryMatrix';
+import { assembleKernelContext } from './contextAssembler';
+import { hooks } from './lifecycleHooks';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -107,6 +111,17 @@ export interface DeveloperJob {
   lastKnownDeclaredCategoriesFingerprint?: string;
   recoveryCount: number;
   lastFailureFingerprint?: string;
+  // Failure Taxonomy / Recovery Matrix (failureTaxonomy.ts, recoveryMatrix.ts).
+  // Set only once a recovery has actually been prepared (CI reached a
+  // non-success, non-pending state); absent for a job that has never
+  // needed recovery. recurringFailureSignature/Count track REPEATED
+  // recovery attempts that fail "the same way" across distinct commits —
+  // see recurringFailureSignature's own comment for why this is not the
+  // same thing as lastFailureFingerprint.
+  failureCategory?: FailureCategory;
+  recoveryStrategy?: RecoveryStrategy;
+  recurringFailureSignature?: string;
+  recurringFailureCount?: number;
   ciAutoReruns: number;
   lastCiRerunFingerprint?: string;
   maxAutoCiReruns: number;
@@ -174,6 +189,8 @@ async function createDeveloperJobInternal(
   managedByGoalRunId?: string,
 ): Promise<DeveloperJob> {
   if (!body.repository?.trim() || !body.goal?.trim() || !body.prompt?.trim()) throw new Error('repository, goal and prompt are required');
+  const jobId = crypto.randomUUID();
+  await hooks.run('BEFORE_TASK', { jobId, repository: body.repository, at: new Date().toISOString(), detail: body.goal });
   const workspace = existingWorkspace ?? await createWorkspace(env, body.repository, body.projectName || body.goal.slice(0, 32));
   // Best-effort: a Project Kernel detection failure (network hiccup,
   // malformed manifest) must never block the job — it only means the
@@ -182,6 +199,19 @@ async function createDeveloperJobInternal(
     (): Awaited<ReturnType<typeof detectProjectKernel>> => ({ mode: 'GENERIC_REPO', reason: 'not_found' }),
   );
   const definitionOfDone = (body.definitionOfDone ?? []).filter((item) => typeof item === 'string' && item.trim()).slice(0, 30);
+  // Context Assembler (contextAssembler.ts): only for KERNEL_AWARE repos —
+  // a GENERIC_REPO has no contextRouting to resolve. Best-effort: a Kernel
+  // doc fetch failure (network hiccup, since-deleted file) must never block
+  // job creation, same reasoning as the kernel detection above.
+  const assembledContext = kernel.mode === 'KERNEL_AWARE' && kernel.manifest
+    ? await assembleKernelContext({
+      env,
+      repository: workspace.repository,
+      ref: workspace.defaultBranch,
+      manifest: kernel.manifest,
+      task: body.prompt,
+    }).catch((): Awaited<ReturnType<typeof assembleKernelContext>> | undefined => undefined)
+    : undefined;
   const deterministicPrompt = buildChatGptHandoff({
     repository: workspace.repository,
     branch: workspace.branch,
@@ -189,20 +219,21 @@ async function createDeveloperJobInternal(
     goal: body.goal,
     task: body.prompt,
     definitionOfDone,
-  });
+  }) + (assembledContext?.text ? `\n\nこのリポジトリのProject Kernelから読み込んだ関連コンテキスト:\n\n${assembledContext.text}` : '');
   const decision = await runOrchestrationModel(env, {
     mode: 'PLAN',
     repository: workspace.repository,
     branch: workspace.branch,
     goal: body.goal,
     task: body.prompt,
-    evidence: `A protected feature branch has been prepared at ${workspace.branch}. No implementation has been performed by the external API.`,
+    evidence: `A protected feature branch has been prepared at ${workspace.branch}. No implementation has been performed by the external API.`
+      + (assembledContext?.text ? `\n\nProject Kernel context (CORE${assembledContext.sections.some((section) => section.tier === 'scoped') ? '+SCOPED' : ''}):\n${assembledContext.text}` : ''),
     deterministicPrompt,
   });
 
   const now = new Date().toISOString();
   let job: DeveloperJob = {
-    id: crypto.randomUUID(),
+    id: jobId,
     projectId: body.projectId,
     projectName: body.projectName,
     repository: workspace.repository,
@@ -233,6 +264,7 @@ async function createDeveloperJobInternal(
     inferredContract: kernel.inferredContract,
   };
   await saveJob(env, job);
+  await hooks.run('AFTER_TASK', { jobId: job.id, repository: job.repository, branch: job.workspace.branch, at: job.updatedAt });
   job = await queueHandoffIfEnabled(env, job);
   return job;
 }
@@ -268,6 +300,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   const repo = await getRepositorySummary(env, job.repository, job.workspace.branch);
   const headChanged = job.lastHeadSha !== repo.headSha;
   const firstChangeSeenAt = headChanged || !job.firstChangeSeenAt ? new Date().toISOString() : job.firstChangeSeenAt;
+  if (headChanged) await hooks.run('BEFORE_VALIDATION', { jobId: job.id, repository: job.repository, branch: job.workspace.branch, at: new Date().toISOString(), detail: repo.headSha });
   const allRuns = await getBranchWorkflowRuns(env, job.repository, job.workspace.branch);
   const checks = latestChecksForHead(allRuns.filter((item) => item.headSha === repo.headSha));
   const humanRequiredCheckNames = getCheckNamesByCategory(job.kernelManifest, 'HUMAN_APPROVAL_REQUIRED');
@@ -411,6 +444,12 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   }
 
   if (assessment.state === 'CODE_FAILURE') {
+    // Fires on every refresh cycle the job remains CODE_FAILURE (not
+    // deduplicated by failureFingerprint) — a future handler that sends a
+    // notification per firing should dedupe on its own, the same way
+    // prepareRecovery's own fingerprint check below avoids re-generating a
+    // recovery prompt for a failure it already handled.
+    await hooks.run('CI_FAILED', { jobId: job.id, repository: job.repository, branch: job.workspace.branch, at: new Date().toISOString(), detail: repo.headSha });
     const reason = assessment.declaredCategories?.length
       ? `現在headのCIが失敗しています(このリポジトリのValidation Contractが宣言するカテゴリ: ${assessment.declaredCategories.join(', ')})。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。`
       : '現在headのCIが失敗しています。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。';
@@ -458,6 +497,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     return job;
   }
 
+  await hooks.run('BEFORE_COMPLETE', { jobId: job.id, repository: job.repository, branch: job.workspace.branch, at: new Date().toISOString(), detail: repo.headSha });
   const created = await tryCreateDraftPr(env, job, comparison);
   const pullRequest = created.pullRequest;
   if (created.error) job = { ...job, error: created.error };
@@ -506,14 +546,21 @@ async function prepareRecovery(
   // earlier one landed here with it still unknown, since getWorkflowRunJobs
   // is best-effort — invalidates the cached handoffPrompt instead of being
   // silently dropped.
+  const failureCategory = classifyFailureCategory({ ciClassification: classification, declaredCategories });
   const fingerprint = checks.length ? failureFingerprint(headSha, checks, declaredCategories) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
     const phase: DeveloperJobPhase = classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready';
-    let stable: DeveloperJob = { ...job, phase, error: reason, updatedAt: new Date().toISOString() };
+    let stable: DeveloperJob = { ...job, phase, error: reason, failureCategory, updatedAt: new Date().toISOString() };
     await saveJob(env, stable);
     if (phase !== 'human_required') stable = await queueHandoffIfEnabled(env, stable);
     return stable;
   }
+
+  // Only counted on an actually-new observation (this branch), never in the
+  // dedup fast-path above — see recurringFailureSignature's own comment.
+  const signature = recurringFailureSignature(checks.map((check) => check.name), failureCategory);
+  const recurringFailureCount = job.recurringFailureSignature === signature ? (job.recurringFailureCount ?? 1) + 1 : 1;
+  const recoveryStrategy = resolveRecoveryStrategy({ category: failureCategory, sameFingerprintRepeatCount: recurringFailureCount });
 
   const deterministicPrompt = buildRecoveryPrompt({
     repository: job.repository,
@@ -525,6 +572,7 @@ async function prepareRecovery(
     previousSummary: job.outputText,
     declaredCategories,
     routeState: job.autopilotRoute,
+    strategyHint: recoveryStrategyPromptHint(recoveryStrategy),
   });
   const decision = await runOrchestrationModel(env, {
     mode: 'RECOVER',
@@ -546,6 +594,10 @@ async function prepareRecovery(
     error: reason,
     lastFailureFingerprint: fingerprint,
     recoveryCount: job.recoveryCount + 1,
+    failureCategory,
+    recoveryStrategy,
+    recurringFailureSignature: signature,
+    recurringFailureCount,
     degradedOrchestration: decision.degraded,
     orchestratorRateLimited: decision.rateLimited,
     updatedAt: new Date().toISOString(),

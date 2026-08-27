@@ -164,13 +164,13 @@ export default function ChatControlCenter() {
     return item;
   }
 
-  async function queue(project: DevProject, value: string, source: string) {
+  async function queue(project: DevProject, value: string, source: string, kind?: 'NEXT' | 'STEER') {
     const text = value.trim();
     if (!text) return;
     setBusy(`${project.id}:${source}`);
     setMessage('');
     try {
-      await enqueueProjectChatCommand(project, text);
+      await enqueueProjectChatCommand(project, text, undefined, kind);
       const [, freshOverview] = await Promise.all([
         project.id === selected?.id ? refreshCommands(project) : Promise.resolve(),
         refreshProjectOverview(project.id),
@@ -386,13 +386,23 @@ export default function ChatControlCenter() {
                         placeholder="例：まず3回デバッグ。問題が残れば追加で数回。問題なければ次の機能を追加し、その後3回補強→3回デバッグ→UI/UX改善を3回。"
                       />
                     </label>
-                    <button
-                      className="chat-command-send"
-                      disabled={!selected.chatUrl || !prompt.trim() || Boolean(busy)}
-                      onClick={() => void queue(selected, prompt, 'free')}
-                    >
-                      {busy ? 'キューへ追加中…' : bridge.connected ? 'このChatGPTへ送る ▶' : '送信キューへ保存 ▶'}
-                    </button>
+                    <div className="chat-command-send-row">
+                      <button
+                        className="chat-command-send"
+                        disabled={!selected.chatUrl || !prompt.trim() || Boolean(busy)}
+                        onClick={() => void queue(selected, prompt, 'free')}
+                      >
+                        {busy ? 'キューへ追加中…' : bridge.connected ? 'このChatGPTへ送る ▶' : '送信キューへ保存 ▶'}
+                      </button>
+                      <button
+                        className="chat-command-steer"
+                        title="現在実行中の作業へ割り込む方向修正。他の送信待ち指示より先に配送されます（例:「その認証fileには触らない」）。"
+                        disabled={!selected.chatUrl || !prompt.trim() || Boolean(busy)}
+                        onClick={() => void queue(selected, prompt, 'steer', 'STEER')}
+                      >
+                        今すぐ割り込み(STEER) ⚡
+                      </button>
+                    </div>
 
                     <section className="chat-command-queue">
                       <div className="section-heading"><span>送信キュー</span><b>{commands.filter((item) => item.status === 'queued' || item.status === 'claimed').length}待機</b></div>
@@ -401,6 +411,7 @@ export default function ChatControlCenter() {
                         <article className={`chat-command-row ${command.status}`} key={command.id}>
                           <div>
                             <span>{chatCommandStatusLabel(command.status)}</span>
+                            {command.kind === 'STEER' && <span className="chat-command-kind-steer">STEER ⚡</span>}
                             <time>{new Date(command.createdAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
                           </div>
                           <p>{command.prompt}</p>

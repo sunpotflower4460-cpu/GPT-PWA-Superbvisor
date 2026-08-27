@@ -1,0 +1,111 @@
+import { DeveloperJob } from './developerAgent';
+
+// The structured, queryable checkpoint the design calls for
+// (DevelopmentCheckpoint), derived on read from a DeveloperJob rather than
+// stored as its own persisted shape. DeveloperJob's flat field bag is
+// already the actual source of truth, persisted in KV and read/written by
+// every code path in developerAgent.ts — introducing a second, independently
+// persisted checkpoint object would mean keeping two representations of the
+// same job in sync, a real source of drift bugs. Building this as a pure
+// projection instead means it can never disagree with the job it was built
+// from, and adding/reshaping a field here never requires a storage
+// migration.
+//
+// worktree stays permanently null/omitted with an explicit note rather than
+// silently absent: this system has no local git worktree at all (every
+// mutation goes through the GitHub REST API — see githubExecutor.ts and
+// docs/ARCHITECTURE.md), so "no worktree" is a true architectural fact, not
+// a gap to fill in later. See also writeLease.ts, which uses the branch
+// itself (not a worktree) as the unit a concurrent-write lease binds to.
+export interface DevelopmentCheckpoint {
+  goal: string;
+  // One Autopilot Route per job today (see orchestratorPolicy.ts's
+  // AutopilotRouteState) — routeId is the job's own id, and routeNode is
+  // the most recently self-reported step, when the job's task actually
+  // carries a route contract. Both undefined for an ordinary (non-route)
+  // job, matching hasAutopilotRouteContract.
+  routeId?: string;
+  routeNode?: string;
+  task: string;
+  repository: string;
+  branch: string;
+  baseSha: string;
+  headSha?: string;
+  worktree: null;
+  verifiedDone: string[];
+  activeWork: string[];
+  validation: {
+    ci?: 'PENDING' | 'PASSING' | 'FAILING' | 'UNKNOWN';
+    guard?: 'PASSING' | 'FAILING' | 'UNKNOWN';
+  };
+  decisions: string[];
+  blockers: string[];
+  recentFailures: string[];
+  nextAction: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function buildDevelopmentCheckpoint(job: DeveloperJob): DevelopmentCheckpoint {
+  const route = job.autopilotRoute;
+  const routeId = route ? job.id : undefined;
+  const routeNode = route ? [...route.checkpoints].reverse().find((checkpoint) => checkpoint.step)?.step : undefined;
+
+  const verifiedDone = (route?.checkpoints ?? [])
+    .filter((checkpoint) => checkpoint.step)
+    .map((checkpoint) => `${checkpoint.step} (${checkpoint.headSha.slice(0, 7)})`);
+
+  const activeWork = job.status === 'running' || job.status === 'starting'
+    ? [job.prompt.slice(0, 400)]
+    : [];
+
+  const ci: DevelopmentCheckpoint['validation']['ci'] = job.phase === 'waiting_ci'
+    ? 'PENDING'
+    : job.phase === 'review_ready'
+      ? 'PASSING'
+      : job.phase === 'recovery_ready' || job.phase === 'human_required'
+        ? 'FAILING'
+        : 'UNKNOWN';
+  const guard = job.failureCategory === 'GUARD_FAILURE' || job.failureCategory === 'POLICY_FAILURE' ? 'FAILING' : 'UNKNOWN';
+
+  const blockers: string[] = [];
+  if (job.phase === 'human_required') blockers.push(job.error || 'Human approval required.');
+  if (job.lastDispatchError) blockers.push(`Chat Control Bus dispatch failed: ${job.lastDispatchError}`);
+
+  const recentFailures: string[] = [];
+  if (job.failureCategory && job.error) {
+    recentFailures.push(`[${job.failureCategory}]${job.recurringFailureCount && job.recurringFailureCount > 1 ? ` (x${job.recurringFailureCount})` : ''} ${job.error}`);
+  }
+
+  const nextAction = job.phase === 'review_ready'
+    ? (job.pullRequest ? `Human review of Draft PR #${job.pullRequest.number}.` : 'Human review of the completed branch.')
+    : job.phase === 'human_required'
+      ? (job.error || 'Waiting on a human decision.')
+      : (job.handoffPrompt?.slice(0, 400) || job.outputText?.slice(0, 400) || 'Waiting for the next observable change.');
+
+  return {
+    goal: job.goal,
+    routeId,
+    routeNode,
+    task: job.prompt,
+    repository: job.repository,
+    branch: job.workspace.branch,
+    baseSha: job.workspace.baseSha,
+    headSha: job.lastHeadSha,
+    worktree: null,
+    verifiedDone,
+    activeWork,
+    validation: { ci, guard },
+    // Always empty today: DeveloperJob carries no structured decision log
+    // (only free-text outputText/handoffPrompt). Left as a real field
+    // rather than dropped so a future structured-decision source (e.g. a
+    // Kernel-aware DECISIONS.md read via contextAssembler.ts) has
+    // somewhere to attach without another shape change.
+    decisions: [],
+    blockers,
+    recentFailures,
+    nextAction,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
