@@ -91,15 +91,21 @@ const PHASE_KEYWORDS: Record<'test' | 'typecheck' | 'build' | 'browser', string[
 };
 
 // A check name like "deployment-inspection" must NOT match keyword "spec"
-// (plain substring inclusion would, since "spec" sits inside "inspection").
-// Treat runs of [a-z0-9] as the check name's "words" and require the
-// keyword to land on a word boundary (start/end of string or a non-
-// alphanumeric separator on both sides) — this still matches a hyphenated
-// keyword like "type-check" or "dry-run" against a check literally named
-// that, while rejecting an accidental substring inside an unrelated word.
+// (plain substring inclusion would, since "spec" sits inside "inspection"),
+// but a check named "tests"/"integration-tests"/"ui-tests" (a keyword as a
+// plural or with a suffix, not just a whole standalone word) MUST still
+// match keyword "test" — an EARLIER version of this required a boundary on
+// BOTH sides and broke exactly that common case. Requiring only a LEADING
+// boundary (start of string, or a non-alphanumeric separator right before
+// the keyword) keeps both properties: "spec" is rejected inside
+// "inspection" (preceded by "n", not a separator) and "test" is rejected
+// inside "ubuntu-latest" (preceded by "a"), while "test" still matches
+// "tests", "testing", "unit-tests", etc. (nothing after the keyword is
+// constrained). Also still matches a hyphenated keyword like "type-check"
+// or "dry-run" against a check literally starting with that.
 function matchesPhaseKeyword(checkName: string, keyword: string): boolean {
   const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i').test(checkName);
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}`, 'i').test(checkName);
 }
 
 export class CiExecutionFabric implements ExecutionFabric {

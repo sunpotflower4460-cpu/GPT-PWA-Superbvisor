@@ -150,6 +150,27 @@ describe('CiExecutionFabric', () => {
     expect(result.command).toContain('worker-type-check-ci');
     expect(result.status).toBe('failed');
   });
+
+  it('still matches a plural/suffixed job name like "tests" or "integration-tests", not just the bare word', async () => {
+    const testsJob: CiCheckLike = { ...passingCheck, id: 3, name: 'integration-tests', conclusion: 'failure' };
+    const otherJob: CiCheckLike = { ...passingCheck, id: 4, name: 'lint', conclusion: 'success' };
+    const fabric = new CiExecutionFabric([testsJob, otherJob], true);
+
+    const result = await fabric.runTest();
+    expect(result.command).toContain('integration-tests');
+    expect(result.command).not.toContain('lint');
+    expect(result.status).toBe('failed');
+  });
+
+  it('never matches "test" against an unrelated word that merely contains it, like "ubuntu-latest"', async () => {
+    const latestJob: CiCheckLike = { ...passingCheck, id: 3, name: 'build-ubuntu-latest', conclusion: 'success' };
+    const genericCiJob: CiCheckLike = { ...passingCheck, id: 4, name: 'ci', conclusion: 'failure' };
+    const fabric = new CiExecutionFabric([latestJob, genericCiJob], true);
+
+    const result = await fabric.runTest();
+    expect(result.command).toContain('aggregate');
+    expect(result.status).toBe('failed');
+  });
 });
 
 describe('createCiExecutionFabric', () => {
