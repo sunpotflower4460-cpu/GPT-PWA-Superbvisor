@@ -275,14 +275,27 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     assessment = applyDeclaredCategoryOverride(assessment, jobLevelChecks, checkCategories);
 
     const currentRunFingerprint = failureFingerprint(repo.headSha, assessment.failed);
+    const sameFailingRunAsLastKnownCategories = lastKnownDeclaredCategoriesFingerprint === currentRunFingerprint;
+    const hadAnyFetchFailure = results.length > 0 && results.some((result) => result.status === 'rejected');
+    const hadTotalFetchFailure = results.length > 0 && results.every((result) => result.status === 'rejected');
     if (assessment.declaredCategories?.length) {
-      lastKnownDeclaredCategories = assessment.declaredCategories;
+      // When multiple runs are failing at once and only SOME of their
+      // job-level fetches succeeded this round, the fresh categories cover
+      // only those runs — overwriting the prior set outright would silently
+      // drop a still-real category whose run's fetch happened to fail this
+      // specific round. Union with the prior set instead, but only for the
+      // SAME set of failing runs (a genuinely different failure composition
+      // gets a clean slate, not stale carry-over).
+      const merged = sameFailingRunAsLastKnownCategories && hadAnyFetchFailure && lastKnownDeclaredCategories?.length
+        ? [...new Set([...lastKnownDeclaredCategories, ...assessment.declaredCategories])].sort()
+        : assessment.declaredCategories;
+      assessment = { ...assessment, declaredCategories: merged };
+      lastKnownDeclaredCategories = merged;
       lastKnownDeclaredCategoriesFingerprint = currentRunFingerprint;
     } else if (
       assessment.state === 'CODE_FAILURE'
-      && results.length > 0
-      && results.every((result) => result.status === 'rejected')
-      && lastKnownDeclaredCategoriesFingerprint === currentRunFingerprint
+      && hadTotalFetchFailure
+      && sameFailingRunAsLastKnownCategories
       && lastKnownDeclaredCategories?.length
     ) {
       // Every job-level fetch failed outright this round for the SAME
