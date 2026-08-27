@@ -16,7 +16,8 @@
 
 セクション間の依存関係:
 
-- 1・2はCloudflareアカウント・GitHub token等の環境構築が前提です。
+- 1・2はCloudflareアカウントでのWorker/Bridge deployが前提です。GitHub tokenは
+  Guardian(GitHub連携)専用の別設定で、Coordinator/Chat Control Bridgeのどちらにも不要です。
 - 3のうち**3-1(PWAインストール)だけ**はWorker未設定でも確認できます。3-2(Push)・3-3(再接続)は
   Worker設定が前提、3-4(複数端末)はさらに§1でAtomic Coordinatorが有効であることが前提です。
 
@@ -96,7 +97,11 @@ window.openai.sendFollowUpMessage → 同じChatGPT会話` という実配送経
 1. `chatgpt-bridge/README.md` に従い、Bridge用のCloudflare Worker(または
    ローカルExpress + HTTPS tunnel)をdeployし、`/mcp` エンドポイントを用意する。
 2. ChatGPTのDeveloper Mode / private appから、その `/mcp` エンドポイントを接続する。
-3. PWA側で対象案件に **実在するChatGPT会話のURL** と **GitHub URL** を登録しておく。
+3. PWA側で対象案件に **実在するChatGPT会話のURL** を登録しておく。
+   Chat Control / Bridge配送はGitHub URLを必要としない
+   (`enqueueChatCommand` はprojectId・chatUrl・promptのみ検証し、Bridgeのclaimも
+   project ID単位でスコープされる)。GitHub連携が必要なのはGuardian固有の機能のみで、
+   この章の検証には無関係。
 
 ### 手順(初回接続)
 
@@ -215,13 +220,21 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
    2台目で「同じ名前の案件」を作り直すと別IDになり、Coordinator側は project ID でスコープされる
    別々のcoordinatorを検証することになってしまうため、Cloud Syncで**同一IDのまま**共有すること。
 
-3. **Cloud State revision競合の確認**: 両端末が手順2で同じrevisionを共有した状態から、
-   両端末でそれぞれ別々の変更(例: 進捗メモや案件名を少し変える)を行い、ほぼ同時に
-   Cloud Syncで保存する。片方は成功し、もう片方は「Cloud Sync: 競合を検出」という通知
-   (自動上書きしない)になることを確認する。両方が無条件に成功して片方の変更が
-   黙って消えてしまう場合は不合格。
+3. **Cloud State revision競合の確認**: 手動保存ボタン(「この端末 → Cloudへ保存」)の
+   競合エラーはUI上ほぼ即座に消えてしまい(保存失敗直後に呼ばれる状態確認処理が
+   エラー表示を上書きするため)、この確認には使えない。代わりに**両端末でAuto Sync
+   (自動同期)をON**にすること。両端末が一度同じrevisionまで自動同期された状態から、
+   Auto Syncが次に同期する前に両端末でそれぞれ別々の変更を行う(例: 進捗メモを変える)。
+   片方の自動同期が先に成功し、もう片方が「Cloud Sync: 競合を検出」という通知
+   (Supervisor Inboxに残る。自動上書きしない)を受け取ることを確認する。
+   タイミングが揃わず両方成功してしまった場合は、変更する間隔を詰めて再試行する。
+   両方が無条件に成功して片方の変更が黙って消えてしまう場合は不合格。
 4. 一方の端末からChat Controlで指示をキューする。
-5. もう一方の端末でも、その指示・状態が(overview経由で)確認できることを確認する。
+5. もう一方の端末で、その指示が実際にキューされたことを確認する。
+   overviewは接続状態・件数・最新timestampなどの集約metadataしか持たないため、
+   overview上の状態だけでは「その指示」を確認したことにならない。対象案件を開き、
+   コマンド一覧(または `GET /api/projects/<project-id>/chat-commands`)で、
+   実際に送った指示の本文・IDと一致する項目があることまで確認する。
 6. **enqueue dedupeの確認**: PWAのUIは送信のたびに端末ローカルの乱数dedupe keyを生成するため、
    2台から「同じ指示」を送ってもdedupe keyは別々になり検証にならない。同じdedupe keyを直接APIで
    2回送って確認する。
