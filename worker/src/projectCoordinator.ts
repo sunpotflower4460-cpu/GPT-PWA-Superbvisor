@@ -1,11 +1,22 @@
 export type CoordinatorChatCommandStatus = 'queued' | 'claimed' | 'delivered' | 'failed' | 'cancelled';
 
+// NEXT (the default, absent for every command enqueued before this field
+// existed) is ordinary follow-up work: claim order among NEXT commands is
+// still oldest-first, unchanged from before this field existed. STEER is a
+// mid-task redirection ("don't touch the auth file right now") that should
+// reach the bridge/chat ahead of whatever ordinary work is already queued —
+// see isBetterClaimCandidate below, the single comparator both the atomic
+// (this file) and KV-fallback (chatCommandQueue.ts) claim paths use so the
+// two never disagree on ordering.
+export type CoordinatorChatCommandKind = 'NEXT' | 'STEER';
+
 export interface CoordinatorChatCommand {
   id: string;
   projectId: string;
   projectName?: string;
   chatUrl: string;
   prompt: string;
+  kind?: CoordinatorChatCommandKind;
   status: CoordinatorChatCommandStatus;
   createdAt: string;
   updatedAt: string;
@@ -129,8 +140,10 @@ export class ProjectCoordinator {
         chatUrl?: string;
         prompt?: string;
         dedupeKey?: string;
+        kind?: string;
       }>(request);
       if (!body?.projectId || !body.chatUrl || !body.prompt) return json({ error: 'invalid_command' }, 400);
+      if (body.kind !== undefined && body.kind !== 'NEXT' && body.kind !== 'STEER') return json({ error: 'invalid_kind' }, 400);
       await this.cleanupCommands();
 
       if (body.dedupeKey) {
@@ -151,6 +164,7 @@ export class ProjectCoordinator {
         projectName: body.projectName,
         chatUrl: body.chatUrl,
         prompt: body.prompt,
+        kind: body.kind as CoordinatorChatCommandKind | undefined,
         status: 'queued',
         createdAt: now,
         updatedAt: now,
@@ -450,8 +464,7 @@ export class ProjectCoordinator {
           && (!existingOwnedClaim || (command.claimedAt || '') < (existingOwnedClaim.claimedAt || ''))) {
           existingOwnedClaim = command;
         }
-        if (isCoordinatorCommandClaimable(command, nowMs)
-          && (!nextClaimable || command.createdAt < nextClaimable.createdAt)) {
+        if (isCoordinatorCommandClaimable(command, nowMs) && isBetterClaimCandidate(command, nextClaimable)) {
           nextClaimable = command;
         }
       }
@@ -485,6 +498,22 @@ export function summarizeCoordinatorCommands(commands: CoordinatorChatCommand[])
     failedCount: commands.filter((command) => command.status === 'failed').length,
     totalCount: commands.length,
   };
+}
+
+// The single comparator both the atomic (this file's findClaimCandidate)
+// and KV-fallback (chatCommandQueue.ts's findClaimCandidate/
+// findProjectClaimCandidateKv) claim paths use, so a project's queue orders
+// identically regardless of which backing store is active. A claimable
+// STEER command always beats a claimable NEXT command, however much older
+// the NEXT one is — STEER exists specifically to redirect work already in
+// flight, so it must not sit behind an ordinary backlog. Within the same
+// kind, oldest createdAt first, unchanged from before `kind` existed.
+export function isBetterClaimCandidate(candidate: CoordinatorChatCommand, current: CoordinatorChatCommand | undefined): boolean {
+  if (!current) return true;
+  const candidateIsSteer = candidate.kind === 'STEER';
+  const currentIsSteer = current.kind === 'STEER';
+  if (candidateIsSteer !== currentIsSteer) return candidateIsSteer;
+  return candidate.createdAt < current.createdAt;
 }
 
 export function isCoordinatorCommandClaimable(command: CoordinatorChatCommand, now = Date.now()) {
@@ -619,13 +648,25 @@ function commandActivity(command: CoordinatorChatCommand): CoordinatorCommandAct
   };
 }
 
+// A dedupe hit must also agree on `kind` — otherwise a retried/second call
+// that asks for STEER (or NEXT) against an existing dedupe key silently
+// gets back a command carrying whatever kind the FIRST call happened to
+// request, defeating the caller's actual intent instead of surfacing as a
+// mismatch the way a changed prompt already does. 'NEXT' and absent are the
+// same value (see CoordinatorChatCommandKind's own comment), so both
+// normalize the same way before comparing.
 function sameCommandPayload(
   command: CoordinatorChatCommand,
-  input: { projectId?: string; chatUrl?: string; prompt?: string },
+  input: { projectId?: string; chatUrl?: string; prompt?: string; kind?: string },
 ) {
   return command.projectId === input.projectId
     && command.chatUrl === input.chatUrl
-    && command.prompt === input.prompt;
+    && command.prompt === input.prompt
+    && normalizeKind(command.kind) === normalizeKind(input.kind);
+}
+
+function normalizeKind(kind: string | undefined): CoordinatorChatCommandKind {
+  return kind === 'STEER' ? 'STEER' : 'NEXT';
 }
 
 function isStoredCommand(value: unknown): value is CoordinatorChatCommand {

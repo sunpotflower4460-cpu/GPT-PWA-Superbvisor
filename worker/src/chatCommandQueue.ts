@@ -1,16 +1,19 @@
 import {
   AtomicCoordinatorEnv,
   CoordinatorChatCommand,
+  CoordinatorChatCommandKind,
   CoordinatorChatCommandStatus,
   CoordinatorCommandOverview,
   applyCommandResult,
   coordinatorFetch,
   hasAtomicCoordinator,
+  isBetterClaimCandidate,
   isCoordinatorCommandClaimable,
   summarizeCoordinatorCommands,
 } from './projectCoordinator';
 
 export type ChatCommandStatus = CoordinatorChatCommandStatus;
+export type ChatCommandKind = CoordinatorChatCommandKind;
 export interface ChatCommand extends CoordinatorChatCommand {}
 export interface ChatCommandOverviewSnapshot extends CoordinatorCommandOverview {
   approximate: boolean;
@@ -65,11 +68,16 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
   chatUrl: string;
   prompt: string;
   dedupeKey?: string;
+  // Absent means NEXT (ordinary follow-up work) — see
+  // CoordinatorChatCommandKind's own comment for why STEER claims ahead of
+  // NEXT regardless of queue age.
+  kind?: ChatCommandKind;
 }) {
   const projectId = input.projectId.trim().slice(0, 200);
   const chatUrl = normalizeChatUrl(input.chatUrl);
   const prompt = sanitizePrompt(input.prompt);
   const dedupeKey = input.dedupeKey?.trim().slice(0, 200) || undefined;
+  const kind = input.kind === 'STEER' ? 'STEER' : input.kind === 'NEXT' ? 'NEXT' : undefined;
   if (!projectId || !chatUrl || !prompt) throw new Error(INVALID_CHAT_COMMAND_ERROR);
 
   if (hasAtomicCoordinator(env)) {
@@ -82,6 +90,7 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
         chatUrl,
         prompt,
         dedupeKey,
+        kind,
       }),
     });
     if (result.status === 409) {
@@ -98,6 +107,7 @@ export async function enqueueChatCommand(env: ChatCommandEnv, input: {
     chatUrl,
     prompt,
     dedupeKey,
+    kind,
   });
 }
 
@@ -328,6 +338,7 @@ async function enqueueChatCommandKv(env: ChatCommandEnv, input: {
   chatUrl: string;
   prompt: string;
   dedupeKey?: string;
+  kind?: ChatCommandKind;
 }) {
   if (input.dedupeKey) {
     const existingId = await env.SUPERVISOR_STATE.get(dedupeStorageKey(input.projectId, input.dedupeKey));
@@ -349,6 +360,7 @@ async function enqueueChatCommandKv(env: ChatCommandEnv, input: {
     projectName: input.projectName?.trim().slice(0, 200) || undefined,
     chatUrl: input.chatUrl,
     prompt: input.prompt,
+    kind: input.kind,
     status: 'queued',
     createdAt: now,
     updatedAt: now,
@@ -418,7 +430,7 @@ async function findProjectClaimCandidateKv(
       if (isOwnedFreshClaim && (!existingOwnedClaim || (command.claimedAt || '') < (existingOwnedClaim.claimedAt || ''))) {
         existingOwnedClaim = command;
       }
-      if (isClaimableCommand(command, nowMs) && (!nextClaimable || command.createdAt < nextClaimable.createdAt)) {
+      if (isClaimableCommand(command, nowMs) && isBetterClaimCandidate(command, nextClaimable)) {
         nextClaimable = command;
       }
     }
@@ -441,7 +453,7 @@ function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: nu
 
   return commands
     .filter((command) => isClaimableCommand(command, nowMs))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0] ?? null;
+    .reduce<ChatCommand | undefined>((best, command) => (isBetterClaimCandidate(command, best) ? command : best), undefined) ?? null;
 }
 
 async function listQueuedCommandsKv(env: ChatCommandEnv, limit: number) {
@@ -586,13 +598,22 @@ function projectIndexCreatedAtMs(indexName: string) {
   return timestamp;
 }
 
+// Kept in sync with projectCoordinator.ts's sameCommandPayload: a dedupe hit
+// must also agree on `kind`, or a retried call asking for a different kind
+// than the original silently inherits the original's kind instead of being
+// treated as a mismatch. 'NEXT' and absent are the same value.
 function sameCommandPayload(
   command: ChatCommand,
-  input: { projectId: string; chatUrl: string; prompt: string },
+  input: { projectId: string; chatUrl: string; prompt: string; kind?: ChatCommandKind },
 ) {
   return command.projectId === input.projectId
     && command.chatUrl === input.chatUrl
-    && command.prompt === input.prompt;
+    && command.prompt === input.prompt
+    && normalizeKind(command.kind) === normalizeKind(input.kind);
+}
+
+function normalizeKind(kind: ChatCommandKind | undefined): ChatCommandKind {
+  return kind === 'STEER' ? 'STEER' : 'NEXT';
 }
 
 function chatScope(projectId: string) {

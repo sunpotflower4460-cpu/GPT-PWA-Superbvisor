@@ -214,9 +214,15 @@
   line-height: 1.6;
 }
 
+.chat-command-send-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 9px;
+}
+
 .chat-command-send {
   width: 100%;
-  margin-top: 9px;
   padding: 13px 16px;
   border: 0;
   border-radius: 14px;
@@ -225,6 +231,26 @@
   font-weight: 800;
 }
 .chat-command-send:disabled { opacity: .38; }
+
+.chat-command-steer {
+  padding: 13px 14px;
+  border: 1px solid #f59e0b;
+  border-radius: 14px;
+  background: #fffbeb;
+  color: #b45309;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.chat-command-steer:disabled { opacity: .38; }
+
+.chat-command-kind-steer {
+  color: #b45309 !important;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+}
 
 .chat-command-queue {
   margin-top: 18px;

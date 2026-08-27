@@ -260,7 +260,8 @@ async function createChatControlOverview(request: Request, env: Env): Promise<Re
 }
 
 async function createChatCommand(request: Request, env: Env): Promise<Response> {
-  const body = await readJson<{ projectId?: string; projectName?: string; chatUrl?: string; prompt?: string; dedupeKey?: string }>(request);
+  const body = await readJson<{ projectId?: string; projectName?: string; chatUrl?: string; prompt?: string; dedupeKey?: string; kind?: string }>(request);
+  if (body?.kind !== undefined && body.kind !== 'NEXT' && body.kind !== 'STEER') return json({ error: 'invalid_kind' }, 400, env, request);
   try {
     const command = await enqueueChatCommand(env, {
       projectId: body?.projectId || '',
@@ -268,6 +269,7 @@ async function createChatCommand(request: Request, env: Env): Promise<Response> 
       chatUrl: body?.chatUrl || '',
       prompt: body?.prompt || '',
       dedupeKey: body?.dedupeKey,
+      kind: body?.kind as 'NEXT' | 'STEER' | undefined,
     });
     return json({ command, transport: 'waiting_bridge' }, 202, env, request);
   } catch (error) {

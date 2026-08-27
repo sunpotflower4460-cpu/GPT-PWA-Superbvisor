@@ -13,12 +13,20 @@ export type ChatProjectActivity =
   | 'BRIDGE_OFFLINE'
   | 'OVERVIEW_ERROR';
 
+// NEXT (default, omitted) is ordinary follow-up work, queued FIFO as
+// before. STEER is a mid-task redirection ("don't touch the auth file
+// right now") that the Worker's claim logic always hands to a bridge ahead
+// of any queued NEXT command — see worker/src/projectCoordinator.ts's
+// isBetterClaimCandidate.
+export type ChatCommandKind = 'NEXT' | 'STEER';
+
 export interface ChatCommand {
   id: string;
   projectId: string;
   projectName?: string;
   chatUrl: string;
   prompt: string;
+  kind?: ChatCommandKind;
   status: ChatCommandStatus;
   createdAt: string;
   updatedAt: string;
@@ -98,6 +106,7 @@ export async function enqueueProjectChatCommand(
   project: DevProject,
   prompt: string,
   connection: WorkerConnection = loadWorkerConnection(),
+  kind?: ChatCommandKind,
 ) {
   if (!project.chatUrl?.trim()) throw new Error('この案件にはChatGPTチャットURLが登録されていません。');
   const pending = getOrCreatePendingCommandDedupe(project.id, prompt);
@@ -110,6 +119,7 @@ export async function enqueueProjectChatCommand(
         chatUrl: project.chatUrl,
         prompt,
         dedupeKey: pending.dedupeKey,
+        kind,
       }),
     }));
     clearPendingCommandDedupe(pending);
@@ -119,7 +129,7 @@ export async function enqueueProjectChatCommand(
     if (isDedupePayloadMismatch(error)) {
       const replacement = replacePendingCommandDedupe(project.id, prompt);
       try {
-        const recovered = await sendProjectChatCommand(project, prompt, replacement.dedupeKey, connection);
+        const recovered = await sendProjectChatCommand(project, prompt, replacement.dedupeKey, connection, kind);
         clearPendingCommandDedupe(replacement);
         return recovered;
       } catch (recoveryError) {
@@ -210,6 +220,7 @@ function sendProjectChatCommand(
   prompt: string,
   dedupeKey: string,
   connection: WorkerConnection,
+  kind?: ChatCommandKind,
 ) {
   return retryIdempotentTransport(() => workerFetch<{ command: ChatCommand; transport: 'waiting_bridge' }>(connection, '/api/chat-commands', {
     method: 'POST',
@@ -219,6 +230,7 @@ function sendProjectChatCommand(
       chatUrl: project.chatUrl,
       prompt,
       dedupeKey,
+      kind,
     }),
   }));
 }

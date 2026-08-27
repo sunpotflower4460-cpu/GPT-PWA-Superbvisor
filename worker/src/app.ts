@@ -6,6 +6,9 @@ import {
   getDeveloperJob,
   getLatestDeveloperJob,
 } from './developerAgent';
+import { buildDevelopmentCheckpoint } from './developmentCheckpoint';
+import { buildCompletionCertificate } from './completionJudge';
+import { createCiExecutionFabric } from './executionFabric';
 import {
   CreateGuardianRunBody,
   advanceGuardianRun,
@@ -92,6 +95,31 @@ export default {
     if (developerJob && request.method === 'GET') {
       const job = await getDeveloperJob(env, decodeURIComponent(developerJob[1]));
       return job ? json({ job }, 200, env, request) : json({ error: 'developer_job_not_found' }, 404, env, request);
+    }
+
+    const developerCheckpoint = url.pathname.match(/^\/api\/developer-jobs\/([^/]+)\/checkpoint$/);
+    if (developerCheckpoint && request.method === 'GET') {
+      const job = await getDeveloperJob(env, decodeURIComponent(developerCheckpoint[1]));
+      if (!job) return json({ error: 'developer_job_not_found' }, 404, env, request);
+      return json({ checkpoint: buildDevelopmentCheckpoint(job) }, 200, env, request);
+    }
+
+    const developerCompletion = url.pathname.match(/^\/api\/developer-jobs\/([^/]+)\/completion$/);
+    if (developerCompletion && request.method === 'GET') {
+      const job = await getDeveloperJob(env, decodeURIComponent(developerCompletion[1]));
+      if (!job) return json({ error: 'developer_job_not_found' }, 404, env, request);
+      return json({ completion: buildCompletionCertificate(job) }, 200, env, request);
+    }
+
+    const developerExecutionLogs = url.pathname.match(/^\/api\/developer-jobs\/([^/]+)\/execution\/logs$/);
+    if (developerExecutionLogs && request.method === 'GET') {
+      const job = await getDeveloperJob(env, decodeURIComponent(developerExecutionLogs[1]));
+      if (!job) return json({ error: 'developer_job_not_found' }, 404, env, request);
+      // CI is the only Execution Fabric this Worker actually has — see
+      // executionFabric.ts's own note on why LOCAL_FAST/ISOLATED/BROWSER
+      // are not faked here.
+      const fabric = createCiExecutionFabric(job.ciChecks, Boolean(job.ciChecks?.length));
+      return json({ kind: fabric.kind, logs: await fabric.inspectLogs() }, 200, env, request);
     }
 
     const latestDeveloper = url.pathname.match(/^\/api\/developer-projects\/([^/]+)\/latest$/);
