@@ -99,10 +99,19 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       title: 'Connect AI DEV DECK Bridge',
       description:
         'Use this when the user wants this ChatGPT development conversation to be remotely controlled from AI DEV DECK. ' +
-        'It attaches a small bridge widget to this conversation. The widget receives queued commands for one allowed project and sends them back into this same ChatGPT conversation as follow-up messages.',
+        'It attaches a small bridge widget to this conversation. The widget receives queued commands for one allowed project and sends them back into this same ChatGPT conversation as follow-up messages. ' +
+        "If the user is dedicating this specific conversation to one declared Route phase of a Multi Chat / Specialist Chat project (as opposed to being the project's only/default chat), pass that phase's own chatUrl as `chatUrl` so only commands destined for THIS chat are claimed here.",
       inputSchema: {
         projectId: z.string().min(1).max(200).describe('AI DEV DECK project ID assigned to this ChatGPT conversation'),
         projectName: z.string().max(200).optional().describe('Human-readable project name shown in the bridge widget'),
+        // Multi Chat / Specialist Chat: this conversation's OWN chatUrl, as
+        // declared by the user for a specific Route phase — never inferred
+        // (a ChatGPT tool call has no reliable way to introspect its own
+        // hosting page's public URL). Optional and backward compatible: a
+        // bridge connected without it claims from the project-wide pool
+        // exactly as before, correct for the common single-chat-per-project
+        // case.
+        chatUrl: z.string().max(2000).optional().describe('This conversation\'s own ChatGPT URL, if the user is dedicating it to one declared Route phase of a multi-chat project'),
       },
       annotations: {
         readOnlyHint: true,
@@ -111,7 +120,7 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       },
       _meta: { ui: { resourceUri: TEMPLATE_URI } },
     },
-    async ({ projectId, projectName }) => {
+    async ({ projectId, projectName, chatUrl }) => {
       assertAllowedProject(projectId);
       return {
         content: [{
@@ -121,6 +130,7 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
         structuredContent: {
           projectId,
           projectName: projectName || projectId,
+          chatUrl: chatUrl || undefined,
           pollIntervalMs: DEFAULT_POLL_MS,
           bridgeMode: 'same-conversation-follow-up',
         },
@@ -168,6 +178,10 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       inputSchema: {
         projectId: z.string().min(1).max(200),
         bridgeId: z.string().min(1).max(200),
+        // Multi Chat / Specialist Chat: this bridge's own chatUrl, when the
+        // widget was connected with one — see connect_ai_dev_deck_bridge's
+        // own comment. Optional/backward compatible.
+        chatUrl: z.string().max(2000).optional(),
       },
       annotations: {
         readOnlyHint: false,
@@ -176,11 +190,11 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       },
       _meta: { ui: { visibility: ['app'] } },
     },
-    async ({ projectId, bridgeId }) => {
+    async ({ projectId, bridgeId, chatUrl }) => {
       assertAllowedProject(projectId);
       const result = await supervisorFetch<{ command: ChatCommand | null }>('/api/chat-commands/claim', {
         method: 'POST',
-        body: JSON.stringify({ projectId, bridgeId }),
+        body: JSON.stringify({ projectId, bridgeId, chatUrl: chatUrl || undefined }),
       });
       if (result.command && result.command.projectId !== projectId) {
         throw new Error('Supervisor returned a command for a different project');
@@ -371,6 +385,11 @@ function bridgeWidgetHtml() {
     return typeof value === 'string' && value ? value : projectId();
   }
 
+  function chatUrl() {
+    const value = input().chatUrl;
+    return typeof value === 'string' && value ? value : undefined;
+  }
+
   function createBridgeId(pid) {
     const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID().slice(0, 8)
@@ -519,7 +538,7 @@ function bridgeWidgetHtml() {
         setStatus('応答待ち', 'work');
         return;
       }
-      const claimedResult = await callTool('ai_dev_deck_bridge_claim', { projectId: pid, bridgeId: bridgeId() });
+      const claimedResult = await callTool('ai_dev_deck_bridge_claim', { projectId: pid, bridgeId: bridgeId(), chatUrl: chatUrl() });
       const data = structured(claimedResult);
       const command = data.command;
       if (!command || typeof command.prompt !== 'string' || !command.prompt.trim()) {

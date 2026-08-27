@@ -186,6 +186,70 @@ describe('chat command NEXT/STEER priority (KV fallback path)', () => {
   });
 });
 
+describe('chat command claim chatUrl scoping (Multi Chat / Specialist Chat)', () => {
+  it('only claims a command destined for the calling bridge\'s own chatUrl when one is given', async () => {
+    const { env } = fakeEnv();
+    const forChatA = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-b',
+      prompt: 'work for chat B',
+    });
+
+    // A bridge polling from chat B must never receive chat A's command, even
+    // though chat A's command is older/would otherwise win the claim race.
+    const claimedByB = await claimNextChatCommand(env, 'bridge-b', 'project-1', 'https://chatgpt.com/c/chat-b');
+    expect(claimedByB?.chatUrl).toBe('https://chatgpt.com/c/chat-b');
+
+    const claimedByA = await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-a');
+    expect(claimedByA?.id).toBe(forChatA.id);
+  });
+
+  it('returns null for a chat with nothing queued for it, even while other chats in the same project have work', async () => {
+    const { env } = fakeEnv();
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+
+    const claimed = await claimNextChatCommand(env, 'bridge-c', 'project-1', 'https://chatgpt.com/c/chat-c');
+    expect(claimed).toBeNull();
+  });
+
+  it('falls back to the project-wide pool when no chatUrl is given, unchanged from before this existed', async () => {
+    const { env } = fakeEnv();
+    const command = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+
+    const claimed = await claimNextChatCommand(env, 'bridge-legacy', 'project-1');
+    expect(claimed?.id).toBe(command.id);
+  });
+
+  it('only recovers a stale owned claim if it was for the same chatUrl', async () => {
+    const { env } = fakeEnv();
+    const command = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+    // bridge-a claims it, then a stale-claim scenario is simulated by a
+    // second call from the SAME bridgeId but scoped to a DIFFERENT chatUrl
+    // (e.g. a reused bridgeId after the tab navigated to another chat) —
+    // it must not recover chat A's claim into a chat-B-scoped call.
+    await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-a');
+    const claimedForOtherChat = await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-b');
+    expect(claimedForOtherChat).toBeNull();
+  });
+});
+
 describe('chat command claim recovery', () => {
   it('allows queued commands to be claimed immediately', () => {
     expect(isClaimableCommand(baseCommand, Date.parse('2026-08-23T00:00:01.000Z'))).toBe(true);

@@ -195,12 +195,13 @@ export class ProjectCoordinator {
     }
 
     if (url.pathname === '/commands/claim' && request.method === 'POST') {
-      const body = await readJson<{ bridgeId?: string }>(request);
+      const body = await readJson<{ bridgeId?: string; chatUrl?: string }>(request);
       const bridgeId = body?.bridgeId?.trim().slice(0, 200) || '';
+      const chatUrl = body?.chatUrl?.trim() || undefined;
       if (!bridgeId) return json({ error: 'bridgeId is required' }, 400);
       await this.cleanupCommands();
       const nowMs = Date.now();
-      const next = await this.findClaimCandidate(bridgeId, nowMs);
+      const next = await this.findClaimCandidate(bridgeId, nowMs, chatUrl);
       if (!next) return json({ command: null });
       if (isFreshClaimOwnedByBridge(next, bridgeId, nowMs)) return json({ command: next });
 
@@ -453,13 +454,20 @@ export class ProjectCoordinator {
     };
   }
 
-  private async findClaimCandidate(bridgeId: string, nowMs: number) {
+  // chatUrl scopes the candidate pool to one specific chat within this
+  // project — see claimNextChatCommand's own comment in chatCommandQueue.ts
+  // on why (Multi Chat / Specialist Chat: without this, whichever Bridge
+  // tab polls first can claim a command meant for a different chat).
+  // Already normalized by the caller; absent preserves the original
+  // project-wide pool exactly.
+  private async findClaimCandidate(bridgeId: string, nowMs: number, chatUrl?: string) {
     let existingOwnedClaim: CoordinatorChatCommand | undefined;
     let nextClaimable: CoordinatorChatCommand | undefined;
 
     await this.forEachCommandPage((page) => {
       for (const command of page.values()) {
         if (!isStoredCommand(command) || isExpiredCommand(command)) continue;
+        if (chatUrl && command.chatUrl !== chatUrl) continue;
         if (isFreshClaimOwnedByBridge(command, bridgeId, nowMs)
           && (!existingOwnedClaim || (command.claimedAt || '') < (existingOwnedClaim.claimedAt || ''))) {
           existingOwnedClaim = command;

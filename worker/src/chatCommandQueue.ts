@@ -177,9 +177,21 @@ export async function getProjectChatCommandOverview(env: ChatCommandEnv, project
   return { ...summarizeCoordinatorCommands(commands), approximate: commands.length >= 100 };
 }
 
-export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string, projectId?: string) {
+// chatUrl is the calling Bridge's OWN current conversation (e.g.
+// window.location.href from the ChatGPT tab it's running in), optional for
+// backward compatibility with an older Bridge build that never sends it.
+// When present, only a command destined for that EXACT chat is eligible —
+// see Multi Chat / Specialist Chat: without this, a project dispatching to
+// several distinct chats has all their commands sitting in one shared
+// project-wide pool, and whichever Bridge tab happens to poll first can
+// claim (and thus receive, in its OWN conversation) a command meant for a
+// different chat entirely. Absent chatUrl preserves the original
+// project-wide claim pool exactly — the correct behavior for the common
+// case of one chat per project.
+export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string, projectId?: string, chatUrl?: string) {
   const normalizedBridgeId = bridgeId.trim().slice(0, 200) || 'unknown-bridge';
   const normalizedProjectId = projectId?.trim().slice(0, 200) || '';
+  const normalizedChatUrl = chatUrl ? normalizeChatUrl(chatUrl) ?? undefined : undefined;
 
   if (hasAtomicCoordinator(env) && normalizedProjectId) {
     await ensureCoordinatorCommandsMigrated(env, normalizedProjectId);
@@ -187,7 +199,7 @@ export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string
       env,
       chatScope(normalizedProjectId),
       '/commands/claim',
-      { method: 'POST', body: JSON.stringify({ bridgeId: normalizedBridgeId }) },
+      { method: 'POST', body: JSON.stringify({ bridgeId: normalizedBridgeId, chatUrl: normalizedChatUrl }) },
     );
     if (!result.ok) throw new Error(result.data.error || `atomic_claim_failed_${result.status}`);
     if (result.data.command) await mirrorCommand(env, result.data.command);
@@ -196,8 +208,8 @@ export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string
 
   const nowMs = Date.now();
   const candidate = normalizedProjectId
-    ? await findProjectClaimCandidateKv(env, normalizedProjectId, normalizedBridgeId, nowMs)
-    : findClaimCandidate(await listQueuedCommandsKv(env, 100), normalizedBridgeId, nowMs);
+    ? await findProjectClaimCandidateKv(env, normalizedProjectId, normalizedBridgeId, nowMs, normalizedChatUrl)
+    : findClaimCandidate(await listQueuedCommandsKv(env, 100), normalizedBridgeId, nowMs, normalizedChatUrl);
   if (!candidate) return null;
   if (candidate.status === 'claimed'
     && candidate.bridgeId === normalizedBridgeId
@@ -405,6 +417,7 @@ async function findProjectClaimCandidateKv(
   projectId: string,
   bridgeId: string,
   nowMs: number,
+  chatUrl?: string,
 ) {
   let cursor: string | undefined;
   let existingOwnedClaim: ChatCommand | undefined;
@@ -423,6 +436,7 @@ async function findProjectClaimCandidateKv(
 
     for (const command of commands) {
       if (!command) continue;
+      if (chatUrl && command.chatUrl !== chatUrl) continue;
       const isOwnedFreshClaim = command.status === 'claimed'
         && command.bridgeId === bridgeId
         && Boolean(command.claimedAt)
@@ -442,8 +456,9 @@ async function findProjectClaimCandidateKv(
   return existingOwnedClaim ?? nextClaimable ?? null;
 }
 
-function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: number) {
-  const existingOwnedClaim = commands
+function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: number, chatUrl?: string) {
+  const scoped = chatUrl ? commands.filter((command) => command.chatUrl === chatUrl) : commands;
+  const existingOwnedClaim = scoped
     .filter((command) => command.status === 'claimed'
       && command.bridgeId === bridgeId
       && Boolean(command.claimedAt)
@@ -451,7 +466,7 @@ function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: nu
     .sort((a, b) => (a.claimedAt || '').localeCompare(b.claimedAt || ''))[0];
   if (existingOwnedClaim) return existingOwnedClaim;
 
-  return commands
+  return scoped
     .filter((command) => isClaimableCommand(command, nowMs))
     .reduce<ChatCommand | undefined>((best, command) => (isBetterClaimCandidate(command, best) ? command : best), undefined) ?? null;
 }
