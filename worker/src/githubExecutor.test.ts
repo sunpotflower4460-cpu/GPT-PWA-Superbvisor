@@ -23,8 +23,9 @@ describe('getWorkflowRunJobs', () => {
     // requires on a private repository.
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      expect(url).toBe('https://api.github.com/repos/sunpotflower4460-cpu/GPT-template/actions/runs/32954188422/jobs?per_page=100');
+      expect(url).toBe('https://api.github.com/repos/sunpotflower4460-cpu/GPT-template/actions/runs/32954188422/jobs?per_page=100&page=1');
       return jsonResponse({
+        total_count: 1,
         jobs: [
           {
             id: 98132113307,
@@ -88,6 +89,45 @@ describe('getWorkflowRunJobs', () => {
     vi.stubGlobal('fetch', fetchMock);
     await expect(getWorkflowRunJobs(env, 'someone-else/other-repo', 1)).rejects.toThrow('not allowlisted');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('paginates past the first 100 jobs so a declared-category job in a large matrix is not silently invisible', async () => {
+    const page1Jobs = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1,
+      run_id: 1,
+      name: `matrix-${index + 1}`,
+      status: 'completed',
+      conclusion: 'success',
+      html_url: `https://example.com/job/${index + 1}`,
+      head_sha: 'abc123',
+    }));
+    const page2Jobs = [
+      { id: 101, run_id: 1, name: 'lint', status: 'completed', conclusion: 'failure', html_url: 'https://example.com/job/101', head_sha: 'abc123' },
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('page=1')) return jsonResponse({ total_count: 101, jobs: page1Jobs });
+      if (url.endsWith('page=2')) return jsonResponse({ total_count: 101, jobs: page2Jobs });
+      throw new Error(`unexpected page request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const jobs = await getWorkflowRunJobs(env, 'sunpotflower4460-cpu/GPT-template', 1);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(jobs).toHaveLength(101);
+    expect(jobs[100]).toEqual({ id: 101, name: 'lint', status: 'completed', conclusion: 'failure', url: 'https://example.com/job/101', headSha: 'abc123' });
+  });
+
+  it('stops after a single request when the first page is not full, without probing for a second page', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      total_count: 1,
+      jobs: [{ id: 1, run_id: 1, name: 'guard', status: 'completed', conclusion: 'success', html_url: 'https://example.com/job/1', head_sha: 'abc123' }],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getWorkflowRunJobs(env, 'sunpotflower4460-cpu/GPT-template', 1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

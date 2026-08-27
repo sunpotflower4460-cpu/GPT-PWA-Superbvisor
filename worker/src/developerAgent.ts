@@ -12,6 +12,7 @@ import {
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
   CiCheckLike,
+  applyDeclaredCategoryOverride,
   applyHumanApprovalOverride,
   assessCi,
   buildAutopilotRouteContinuationPrompt,
@@ -27,6 +28,7 @@ import {
   ProjectKernelManifest,
   ProjectKernelMode,
   detectProjectKernel,
+  getCheckCategoryMap,
   getCheckNamesByCategory,
   requiresDraftPrFirst,
 } from './projectKernel';
@@ -89,6 +91,16 @@ export interface DeveloperJob {
   // for validation-contract heuristics like requiresDraftPrFirst below,
   // never for human-approval check-name classification.
   inferredContract?: InferredGenericRepoContract;
+  // Last confidently-discovered declared category set (see
+  // applyDeclaredCategoryOverride) for the failing run identified by
+  // lastKnownDeclaredCategoriesFingerprint (headSha+checks signature, no
+  // category — see failureFingerprint). getWorkflowRunJobs is best-effort:
+  // when it fails entirely for the SAME failing run a previous refresh
+  // already resolved categories for, this lets that refresh reuse them
+  // instead of a transient fetch failure masquerading as "categories
+  // disappeared" and forcing a wasted recovery regeneration.
+  lastKnownDeclaredCategories?: string[];
+  lastKnownDeclaredCategoriesFingerprint?: string;
   recoveryCount: number;
   lastFailureFingerprint?: string;
   ciAutoReruns: number;
@@ -242,8 +254,11 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   const allRuns = await getBranchWorkflowRuns(env, job.repository, job.workspace.branch);
   const checks = latestChecksForHead(allRuns.filter((item) => item.headSha === repo.headSha));
   const humanRequiredCheckNames = getCheckNamesByCategory(job.kernelManifest, 'HUMAN_APPROVAL_REQUIRED');
+  const checkCategories = getCheckCategoryMap(job.kernelManifest);
   let assessment = assessCi(checks, humanRequiredCheckNames);
-  if (humanRequiredCheckNames.size && assessment.failed.length) {
+  let lastKnownDeclaredCategories = job.lastKnownDeclaredCategories;
+  let lastKnownDeclaredCategoriesFingerprint = job.lastKnownDeclaredCategoriesFingerprint;
+  if ((humanRequiredCheckNames.size || checkCategories.size) && assessment.failed.length) {
     // assessCi() only sees workflow-run names, which don't match Kernel-
     // declared job/check names in the common case (see
     // applyHumanApprovalOverride's own comment). Fetch the actual job-level
@@ -257,6 +272,39 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     const results = await Promise.allSettled(assessment.failed.map((run) => getWorkflowRunJobs(env, repository, run.id)));
     const jobLevelChecks = results.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
     assessment = applyHumanApprovalOverride(assessment, jobLevelChecks, humanRequiredCheckNames);
+    assessment = applyDeclaredCategoryOverride(assessment, jobLevelChecks, checkCategories);
+
+    const currentRunFingerprint = failureFingerprint(repo.headSha, assessment.failed);
+    const sameFailingRunAsLastKnownCategories = lastKnownDeclaredCategoriesFingerprint === currentRunFingerprint;
+    const hadAnyFetchFailure = results.length > 0 && results.some((result) => result.status === 'rejected');
+    const hadTotalFetchFailure = results.length > 0 && results.every((result) => result.status === 'rejected');
+    if (assessment.declaredCategories?.length) {
+      // When multiple runs are failing at once and only SOME of their
+      // job-level fetches succeeded this round, the fresh categories cover
+      // only those runs — overwriting the prior set outright would silently
+      // drop a still-real category whose run's fetch happened to fail this
+      // specific round. Union with the prior set instead, but only for the
+      // SAME set of failing runs (a genuinely different failure composition
+      // gets a clean slate, not stale carry-over).
+      const merged = sameFailingRunAsLastKnownCategories && hadAnyFetchFailure && lastKnownDeclaredCategories?.length
+        ? [...new Set([...lastKnownDeclaredCategories, ...assessment.declaredCategories])].sort()
+        : assessment.declaredCategories;
+      assessment = { ...assessment, declaredCategories: merged };
+      lastKnownDeclaredCategories = merged;
+      lastKnownDeclaredCategoriesFingerprint = currentRunFingerprint;
+    } else if (
+      assessment.state === 'CODE_FAILURE'
+      && hadTotalFetchFailure
+      && sameFailingRunAsLastKnownCategories
+      && lastKnownDeclaredCategories?.length
+    ) {
+      // Every job-level fetch failed outright this round for the SAME
+      // failing run a previous refresh already resolved categories for —
+      // that's a transient lookup failure, not new evidence that the
+      // categories went away. Reuse the last confident answer rather than
+      // letting the gap force a wasted recovery regeneration.
+      assessment = { ...assessment, declaredCategories: lastKnownDeclaredCategories };
+    }
   }
   job = {
     ...job,
@@ -264,6 +312,8 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     firstChangeSeenAt,
     changedFiles: comparison.files ?? [],
     ciChecks: checks,
+    lastKnownDeclaredCategories,
+    lastKnownDeclaredCategoriesFingerprint,
     updatedAt: new Date().toISOString(),
   };
 
@@ -344,7 +394,10 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   }
 
   if (assessment.state === 'CODE_FAILURE') {
-    return prepareRecovery(env, job, repo.headSha, assessment.failed, '現在headのCIが失敗しています。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。', 'CI_CODE_FAILURE');
+    const reason = assessment.declaredCategories?.length
+      ? `現在headのCIが失敗しています(このリポジトリのValidation Contractが宣言するカテゴリ: ${assessment.declaredCategories.join(', ')})。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。`
+      : '現在headのCIが失敗しています。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。';
+    return prepareRecovery(env, job, repo.headSha, assessment.failed, reason, 'CI_CODE_FAILURE', assessment.declaredCategories);
   }
 
   if (hasAutopilotRouteContract(job.prompt) && !hasAutopilotRouteCompletionMarker(repo.headCommitMessage)) {
@@ -418,8 +471,14 @@ async function prepareRecovery(
   checks: CiCheckLike[],
   reason: string,
   classification: 'CI_TRANSIENT' | 'CI_CODE_FAILURE' | 'CI_CONFIG_FAILURE' | 'HUMAN_REQUIRED',
+  declaredCategories?: readonly string[],
 ): Promise<DeveloperJob> {
-  const fingerprint = checks.length ? failureFingerprint(headSha, checks) : `${headSha}:no-ci`;
+  // declaredCategories folds into the fingerprint (see failureFingerprint's
+  // own comment) so a category discovered on a later refresh — after an
+  // earlier one landed here with it still unknown, since getWorkflowRunJobs
+  // is best-effort — invalidates the cached handoffPrompt instead of being
+  // silently dropped.
+  const fingerprint = checks.length ? failureFingerprint(headSha, checks, declaredCategories) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
     const phase: DeveloperJobPhase = classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready';
     let stable: DeveloperJob = { ...job, phase, error: reason, updatedAt: new Date().toISOString() };
@@ -436,6 +495,7 @@ async function prepareRecovery(
     headSha,
     checks,
     previousSummary: job.outputText,
+    declaredCategories,
   });
   const decision = await runOrchestrationModel(env, {
     mode: 'RECOVER',

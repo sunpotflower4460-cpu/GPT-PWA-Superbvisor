@@ -242,10 +242,29 @@ export async function getBranchWorkflowRuns(env: GitHubEnv, repository: string, 
 // run(s) already known to be failing instead of every check on the
 // commit (which would also include unrelated third-party App checks like
 // CodeRabbit or Cursor Bugbot).
+// Paginates rather than trusting the first 100: a large matrix run can
+// carry more jobs than that, and a Kernel-declared category check landing
+// past page 1 would otherwise be silently invisible to both this and the
+// human-approval override. MAX_JOB_PAGES is a sanity backstop (10k jobs),
+// not a realistic ceiling — it exists so a malformed/malicious response
+// can't spin this into an infinite loop.
+const MAX_JOB_PAGES = 100;
+
 export async function getWorkflowRunJobs(env: GitHubEnv, repository: string, runId: number) {
   const repo = assertAllowedRepo(env, repository);
-  const result = await githubJson<{ jobs: Array<{ id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string }> }>(env, repo, 'GET', `/actions/runs/${runId}/jobs?per_page=100`);
-  return result.jobs.map((job) => ({ id: job.id, name: job.name, status: job.status, conclusion: job.conclusion, url: job.html_url, headSha: job.head_sha }));
+  const perPage = 100;
+  const jobs: Array<{ id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string }> = [];
+  for (let page = 1; page <= MAX_JOB_PAGES; page += 1) {
+    const result = await githubJson<{ jobs: typeof jobs; total_count: number }>(
+      env,
+      repo,
+      'GET',
+      `/actions/runs/${runId}/jobs?per_page=${perPage}&page=${page}`,
+    );
+    jobs.push(...result.jobs);
+    if (result.jobs.length < perPage || jobs.length >= result.total_count) break;
+  }
+  return jobs.map((job) => ({ id: job.id, name: job.name, status: job.status, conclusion: job.conclusion, url: job.html_url, headSha: job.head_sha }));
 }
 
 export function assertSafeBranch(branch: string) {
