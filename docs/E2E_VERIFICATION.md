@@ -283,25 +283,31 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
    2台から「同じ指示」を送ってもdedupe keyは別々になり検証にならない。同じdedupe keyを直接APIで
    2回送って確認する。
 
+   dedupe indexはcommand本体と同じ保持期間(14日)残り続けるため、固定文字列のキーだと
+   このrunbookを同じprojectで再実行したときに**前回実行時のcommandがそのまま返るだけ**になり、
+   今回のenqueueを何も検証したことにならない。実行のたびにユニークなキーを生成すること。
+
    ```bash
+   DEDUPE_KEY="e2e-dedupe-test-$(date +%s%N)"
    curl -X POST https://<your-worker>.workers.dev/api/chat-commands \
      -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" \
      -H "Content-Type: application/json" \
-     -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"dedupe test","dedupeKey":"e2e-dedupe-test-1"}'
+     -d "{\"projectId\":\"<project-id>\",\"chatUrl\":\"<chat-url>\",\"prompt\":\"dedupe test\",\"dedupeKey\":\"$DEDUPE_KEY\"}"
    ```
 
    これを2回、間を空けて順番に実行しても「通常の再送」しか確認できない(KV fallbackや
    read-then-writeレースのある実装でも同じ結果になり得る)。Coordinatorが宣言している
-   **atomicな同時enqueue集約**まで確認するには、シェルの `&` で同じリクエストを
-   ほぼ同時に2回発火させる。
+   **atomicな同時enqueue集約**まで確認するには、別のユニークキーで、シェルの `&` で
+   同じリクエストをほぼ同時に2回発火させる。
 
    ```bash
+   DEDUPE_KEY2="e2e-dedupe-test-$(date +%s%N)-b"
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands \
      -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
-     -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"dedupe test","dedupeKey":"e2e-dedupe-test-2"}' &
+     -d "{\"projectId\":\"<project-id>\",\"chatUrl\":\"<chat-url>\",\"prompt\":\"dedupe test\",\"dedupeKey\":\"$DEDUPE_KEY2\"}" &
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands \
      -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
-     -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"dedupe test","dedupeKey":"e2e-dedupe-test-2"}' &
+     -d "{\"projectId\":\"<project-id>\",\"chatUrl\":\"<chat-url>\",\"prompt\":\"dedupe test\",\"dedupeKey\":\"$DEDUPE_KEY2\"}" &
    wait
    ```
 
@@ -317,7 +323,17 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
 
    先に、このprojectへ現在接続されている実際のBridge(2章で接続したChatGPTタブなど)を
    一旦切断する(タブを閉じる、またはWidgetをbackground/unmountしてpollingを止める)。
-   接続中のBridgeがないことを確認したら、この節のためだけの新しいcommandを1件キューする。
+
+   claimは**project内で最も古いqueued/claimed可能なcommand**を返す(特定のcommand IDを
+   指定できない)ため、手順4〜6で作ったcommandがまだ`queued`のまま残っていると
+   (直前まで接続していたBridgeがcooldown中で拾いきれていない場合など)、これから発火する
+   2つのclaimリクエストがそれぞれ**別々の**古いcommandを受け取ってしまい、「片方だけが
+   受け取り、もう片方は空」という結果にならず、正しい実装でもこの確認が不合格に見えてしまう。
+   `GET /api/projects/<project-id>/chat-commands` で未解決(`queued`/`claimed`)のcommandが
+   残っていないことを確認してから次に進むこと。残っている場合は配送か
+   `POST /api/chat-commands/<id>/cancel`(`queued`のみ取消可)で解消する。
+
+   未解決commandがないことを確認したら、この節のためだけの新しいcommandを1件キューする。
 
    ```bash
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands \
@@ -325,8 +341,9 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
      -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"claim race test"}'
    ```
 
-   このcommandに対して、2つの異なる `bridgeId` で `POST /api/chat-commands/claim` を
-   直接、シェルの `&` でほぼ同時に発火させる。
+   レスポンスの `command.id` を控えておく(以降 `<race-command-id>`)。このcommandに対して、
+   2つの異なる `bridgeId` で `POST /api/chat-commands/claim` を直接、シェルの `&` で
+   ほぼ同時に発火させる。
 
    ```bash
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/claim \
@@ -338,8 +355,24 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
    wait
    ```
 
-   片方だけが実際のcommandを受け取り、もう片方は空(claimするcommandなし)を返すことを
-   確認する。両方が同じcommandを受け取ってしまう場合は不合格。
+   片方だけが**手順で控えた`<race-command-id>`と同じ** `command.id` を受け取り、もう片方は
+   空(claimするcommandなし)を返すことを確認する。ここで`command.id`が
+   `<race-command-id>`と一致するかまで見るのは、事前確認をすり抜けた別のcommandを
+   誤って「片方だけが受け取った」と判定しないため。両方が同じcommandを受け取ってしまう
+   場合は不合格。
+
+   確認できたら**必ず**、勝った側の `bridgeId` を使って、この`<race-command-id>`を
+   終端状態にしておく。claimしたまま結果報告しないと2分後にstale claimとして
+   再claim可能に戻り、後で実際のBridgeを再接続した際にこのテスト用プロンプトが
+   本物のChatGPT会話へ誤配送されてしまう。
+
+   ```bash
+   curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/<race-command-id>/result \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"projectId":"<project-id>","bridgeId":"<勝った側のbridgeId>","status":"cancelled","detail":"e2e claim race test cleanup"}'
+   ```
+
+   これを実行してから、実際のBridgeを再接続すること。
    (2台の端末から**別々の**指示をほぼ同時に送る方法は、それぞれ独立したcommandになるため
    claim競合の検証にはならない。)
 
