@@ -75,6 +75,22 @@ describe('chat command validation', () => {
     expect(normalizeChatUrl('javascript:alert(1)')).toBeNull();
   });
 
+  it('discards a fragment and a trailing slash so equivalent spellings of the same conversation compare equal', () => {
+    // Multi Chat / Specialist Chat claim scoping (claimNextChatCommand)
+    // compares normalized chatUrl strings for exact equality — a fragment
+    // (never sent to the server) or a trailing slash must not make two
+    // spellings of the SAME conversation look like different chats, or a
+    // correctly-connected Bridge would poll forever while its own commands
+    // sit queued, unmatched.
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123#section')).toBe('https://chatgpt.com/c/abc123');
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123/')).toBe('https://chatgpt.com/c/abc123');
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123')).toBe(normalizeChatUrl('https://chatgpt.com/c/abc123#section'));
+  });
+
+  it('still distinguishes genuinely different conversations', () => {
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123')).not.toBe(normalizeChatUrl('https://chatgpt.com/c/xyz789'));
+  });
+
   it('trims prompts and caps payload size', () => {
     expect(sanitizePrompt('  continue  ')).toBe('continue');
     expect(sanitizePrompt('x'.repeat(30_000))).toHaveLength(24_000);

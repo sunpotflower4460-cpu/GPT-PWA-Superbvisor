@@ -49,7 +49,18 @@ export function normalizeChatUrl(value: string) {
     const host = url.hostname.toLowerCase();
     if (url.protocol !== 'https:') return null;
     if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com') return null;
-    return url.toString();
+    // A fragment is never sent to the server and can't identify a
+    // different conversation resource; a trailing slash is likewise
+    // insignificant here. Both are discarded so two spellings of the SAME
+    // conversation (e.g. copied from different UI surfaces, or with/without
+    // a "#section" ChatGPT sometimes appends) compare equal — this value is
+    // used as an exact-match identity key for Multi Chat / Specialist Chat
+    // claim scoping (see claimNextChatCommand), and a meaningless spelling
+    // difference there means a correctly-connected Bridge polls forever
+    // while its own commands sit queued, unmatched.
+    url.hash = '';
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    return `${url.origin}${path}${url.search}`;
   } catch {
     return null;
   }

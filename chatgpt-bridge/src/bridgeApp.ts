@@ -419,7 +419,16 @@ function bridgeWidgetHtml() {
   }
 
   function receiptKey() {
-    return 'ai-dev-deck-delivery-receipt:' + (projectId() || 'unknown');
+    // Scoped by bridgeId, not just projectId: bridgeId is cached in
+    // sessionStorage (stable across reloads of THIS tab, distinct from any
+    // other tab's), while the receipt itself is read/written through
+    // localStorage AND sessionStorage — localStorage is shared across every
+    // tab on the same origin. With Multi Chat / Specialist Chat, more than
+    // one Bridge tab can now be open for the same project at once; without
+    // this, one tab's saveReceipt/clearReceipt would silently clobber
+    // another's, and stale-claim recovery could resend a prompt the OTHER
+    // tab already delivered.
+    return 'ai-dev-deck-delivery-receipt:' + (projectId() || 'unknown') + ':' + bridgeId();
   }
 
   function readReceipt() {
