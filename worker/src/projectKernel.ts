@@ -220,6 +220,25 @@ export function getCheckNamesByCategory(manifest: ProjectKernelManifest | undefi
   return names;
 }
 
+// Every declared check name mapped to its category (GUARD_FAILURE,
+// POLICY_FAILURE, ENV_FAILURE, INFRA_FAILURE, HUMAN_APPROVAL_REQUIRED, or
+// anything else a Kernel author declares — category is free-form by
+// design, see ProjectKernelValidationCheck). Unlike getCheckNamesByCategory
+// above (one category, many names), this is the general lookup
+// orchestratorPolicy.ts's applyDeclaredCategoryOverride() needs to enrich a
+// CODE_FAILURE with whatever the repo itself says about the specific check
+// that's actually failing, rather than collapsing every non-transient,
+// non-human-required failure into the same generic message.
+export function getCheckCategoryMap(manifest: ProjectKernelManifest | undefined): Map<string, string> {
+  const categories = new Map<string, string>();
+  for (const strategy of manifest?.validation?.strategies ?? []) {
+    for (const check of strategy.checks) {
+      if (check.category) categories.set(check.name, check.category);
+    }
+  }
+  return categories;
+}
+
 // Mirrors GPT-template's scripts/guard/status.mjs getMaintainerMode(): absent
 // or unrecognized governance.maintainerMode falls back to MULTI_MAINTAINER —
 // today's original "approval from someone other than the author" behavior —

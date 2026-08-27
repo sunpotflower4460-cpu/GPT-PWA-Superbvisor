@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   detectProjectKernel,
+  getCheckCategoryMap,
   getCheckNamesByCategory,
   getMaintainerMode,
   parseProjectKernel,
@@ -294,6 +295,27 @@ describe('getCheckNamesByCategory', () => {
 
   it('returns an empty set for an undeclared manifest', () => {
     expect(getCheckNamesByCategory(undefined, 'HUMAN_APPROVAL_REQUIRED')).toEqual(new Set());
+  });
+});
+
+describe('getCheckCategoryMap', () => {
+  it('maps every declared check name to its category, across strategies', () => {
+    const parsed = parseProjectKernel(JSON.stringify(validManifest));
+    const categories = getCheckCategoryMap(parsed);
+    expect(categories.get('guard')).toBe('GUARD_FAILURE');
+    expect(categories.get('check-approval')).toBe('HUMAN_APPROVAL_REQUIRED');
+  });
+
+  it('omits a declared check that has no category', () => {
+    const parsed = parseProjectKernel(JSON.stringify({
+      ...validManifest,
+      validation: { strategies: [{ type: 'push', checks: [{ name: 'no-category-check' }] }] },
+    }));
+    expect(getCheckCategoryMap(parsed).has('no-category-check')).toBe(false);
+  });
+
+  it('returns an empty map for an undeclared manifest (GENERIC_REPO-equivalent)', () => {
+    expect(getCheckCategoryMap(undefined)).toEqual(new Map());
   });
 });
 

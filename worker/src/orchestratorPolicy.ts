@@ -20,6 +20,13 @@ export interface CiAssessment {
   failed: CiCheckLike[];
   transient: CiCheckLike[];
   humanRequired: CiCheckLike[];
+  // CODE_FAILURE only: the declared category (Validation Contract
+  // checks[].category, e.g. GUARD_FAILURE/POLICY_FAILURE/ENV_FAILURE/
+  // INFRA_FAILURE) of whichever failing check the repo's own Kernel
+  // labeled, if any — see applyDeclaredCategoryOverride below. Never
+  // fabricated from GitHub's own conclusion or guessed; absent whenever
+  // nothing declared a category (including every GENERIC_REPO).
+  declaredCategory?: string;
 }
 
 export const AUTOPILOT_ROUTE_HEADER = '【AUTOPILOT ROUTE CONTRACT】';
@@ -90,6 +97,30 @@ export function applyHumanApprovalOverride(
   const alreadyPresent = new Set(assessment.humanRequired.map((check) => check.name));
   const humanRequired = [...assessment.humanRequired, ...failingHumanChecks.filter((check) => !alreadyPresent.has(check.name))];
   return { state: 'HUMAN_REQUIRED', failed: assessment.failed, transient: [], humanRequired };
+}
+
+// Same job-level-vs-workflow-run-level problem applyHumanApprovalOverride
+// solves for HUMAN_APPROVAL_REQUIRED specifically, generalized to any other
+// declared category: a Kernel's checks[].category is declared at job
+// granularity (e.g. a "lint" job inside a "ci" workflow), but assessCi()
+// only ever sees workflow-run-level names unless given the real job-level
+// data. Only enriches a plain CODE_FAILURE — HUMAN_REQUIRED/TRANSIENT_
+// FAILURE/PENDING/SUCCESS/NO_RUN already have clearer meaning on their own,
+// and re-labeling a human-approval check here would just fight
+// applyHumanApprovalOverride over the same signal.
+export function applyDeclaredCategoryOverride(
+  assessment: CiAssessment,
+  jobLevelChecks: CiCheckLike[],
+  checkCategories: ReadonlyMap<string, string>,
+): CiAssessment {
+  if (!checkCategories.size || assessment.state !== 'CODE_FAILURE') return assessment;
+
+  const category = jobLevelChecks
+    .filter((check) => check.status === 'completed' && !SUCCESS_CONCLUSIONS.has((check.conclusion || '').toLowerCase()))
+    .map((check) => checkCategories.get(check.name))
+    .find((value): value is string => Boolean(value) && value !== 'HUMAN_APPROVAL_REQUIRED');
+
+  return category ? { ...assessment, declaredCategory: category } : assessment;
 }
 
 export function failureFingerprint(headSha: string, checks: CiCheckLike[]) {

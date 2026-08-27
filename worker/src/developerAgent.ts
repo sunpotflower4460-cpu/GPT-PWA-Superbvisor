@@ -12,6 +12,7 @@ import {
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
   CiCheckLike,
+  applyDeclaredCategoryOverride,
   applyHumanApprovalOverride,
   assessCi,
   buildAutopilotRouteContinuationPrompt,
@@ -27,6 +28,7 @@ import {
   ProjectKernelManifest,
   ProjectKernelMode,
   detectProjectKernel,
+  getCheckCategoryMap,
   getCheckNamesByCategory,
   requiresDraftPrFirst,
 } from './projectKernel';
@@ -242,8 +244,9 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   const allRuns = await getBranchWorkflowRuns(env, job.repository, job.workspace.branch);
   const checks = latestChecksForHead(allRuns.filter((item) => item.headSha === repo.headSha));
   const humanRequiredCheckNames = getCheckNamesByCategory(job.kernelManifest, 'HUMAN_APPROVAL_REQUIRED');
+  const checkCategories = getCheckCategoryMap(job.kernelManifest);
   let assessment = assessCi(checks, humanRequiredCheckNames);
-  if (humanRequiredCheckNames.size && assessment.failed.length) {
+  if ((humanRequiredCheckNames.size || checkCategories.size) && assessment.failed.length) {
     // assessCi() only sees workflow-run names, which don't match Kernel-
     // declared job/check names in the common case (see
     // applyHumanApprovalOverride's own comment). Fetch the actual job-level
@@ -257,6 +260,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     const results = await Promise.allSettled(assessment.failed.map((run) => getWorkflowRunJobs(env, repository, run.id)));
     const jobLevelChecks = results.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
     assessment = applyHumanApprovalOverride(assessment, jobLevelChecks, humanRequiredCheckNames);
+    assessment = applyDeclaredCategoryOverride(assessment, jobLevelChecks, checkCategories);
   }
   job = {
     ...job,
@@ -344,7 +348,10 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   }
 
   if (assessment.state === 'CODE_FAILURE') {
-    return prepareRecovery(env, job, repo.headSha, assessment.failed, '現在headのCIが失敗しています。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。', 'CI_CODE_FAILURE');
+    const reason = assessment.declaredCategory
+      ? `現在headのCIが失敗しています(このリポジトリのValidation Contractが宣言するカテゴリ: ${assessment.declaredCategory})。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。`
+      : '現在headのCIが失敗しています。停止せず、ChatGPTへ原因確認と修正を引き継ぎます。';
+    return prepareRecovery(env, job, repo.headSha, assessment.failed, reason, 'CI_CODE_FAILURE');
   }
 
   if (hasAutopilotRouteContract(job.prompt) && !hasAutopilotRouteCompletionMarker(repo.headCommitMessage)) {

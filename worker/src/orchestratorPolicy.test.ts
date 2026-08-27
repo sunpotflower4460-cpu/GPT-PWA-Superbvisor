@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AUTOPILOT_ROUTE_COMPLETE_MARKER,
   AUTOPILOT_ROUTE_HEADER,
+  applyDeclaredCategoryOverride,
   applyHumanApprovalOverride,
   assessCi,
   buildAutopilotRouteContinuationPrompt,
@@ -126,6 +127,59 @@ describe('applyHumanApprovalOverride', () => {
     const workflowLevelAssessment = assessCi([workflowRunLevelCheck]);
     const reconciled = applyHumanApprovalOverride(workflowLevelAssessment, [jobLevelCheckApproval], new Set());
     expect(reconciled).toEqual(workflowLevelAssessment);
+  });
+});
+
+describe('applyDeclaredCategoryOverride', () => {
+  // Same job-level-vs-workflow-run-level gap as applyHumanApprovalOverride
+  // above, but for any other declared category: a workflow named "ci"
+  // containing a job named "lint" labeled GUARD_FAILURE reports as "ci" at
+  // the run level assessCi() alone sees.
+  const workflowRunLevelCheck = { ...base, name: 'ci', conclusion: 'failure' };
+  const jobLevelLintCheck = { ...base, id: 2, name: 'lint', conclusion: 'failure' };
+  const checkCategories = new Map([['lint', 'GUARD_FAILURE']]);
+
+  it('enriches a plain CODE_FAILURE with the declared category once given job-level data', () => {
+    const assessment = assessCi([workflowRunLevelCheck]);
+    expect(assessment.state).toBe('CODE_FAILURE');
+    expect(assessment.declaredCategory).toBeUndefined();
+
+    const enriched = applyDeclaredCategoryOverride(assessment, [jobLevelLintCheck], checkCategories);
+    expect(enriched.state).toBe('CODE_FAILURE');
+    expect(enriched.declaredCategory).toBe('GUARD_FAILURE');
+  });
+
+  it('is a no-op when no job-level check matches a declared category', () => {
+    const assessment = assessCi([workflowRunLevelCheck]);
+    const otherJobCheck = { ...base, id: 3, name: 'typecheck', conclusion: 'failure' };
+    expect(applyDeclaredCategoryOverride(assessment, [otherJobCheck], checkCategories)).toEqual(assessment);
+  });
+
+  it('is a no-op when the Kernel declares no categories at all (GENERIC_REPO-equivalent)', () => {
+    const assessment = assessCi([workflowRunLevelCheck]);
+    expect(applyDeclaredCategoryOverride(assessment, [jobLevelLintCheck], new Map())).toEqual(assessment);
+  });
+
+  it('never overrides HUMAN_REQUIRED, TRANSIENT_FAILURE, PENDING, SUCCESS, or NO_RUN', () => {
+    const humanRequired = assessCi([{ ...base, conclusion: 'action_required' }]);
+    expect(applyDeclaredCategoryOverride(humanRequired, [jobLevelLintCheck], checkCategories)).toEqual(humanRequired);
+
+    const transient = assessCi([{ ...base, conclusion: 'timed_out' }]);
+    expect(applyDeclaredCategoryOverride(transient, [jobLevelLintCheck], checkCategories)).toEqual(transient);
+
+    expect(applyDeclaredCategoryOverride(assessCi([]), [jobLevelLintCheck], checkCategories).state).toBe('NO_RUN');
+    expect(applyDeclaredCategoryOverride(assessCi([base]), [jobLevelLintCheck], checkCategories).state).toBe('SUCCESS');
+  });
+
+  it('never re-labels a HUMAN_APPROVAL_REQUIRED-categorized check as a generic declared category', () => {
+    // A CODE_FAILURE assessment (not yet reconciled to HUMAN_REQUIRED) whose
+    // only matching job-level check happens to be the human-approval one —
+    // applyDeclaredCategoryOverride must leave that to
+    // applyHumanApprovalOverride, never surface it as declaredCategory.
+    const assessment = assessCi([workflowRunLevelCheck]);
+    const jobLevelApprovalCheck = { ...base, id: 4, name: 'check-approval', conclusion: 'failure' };
+    const categoriesWithHumanApproval = new Map([['check-approval', 'HUMAN_APPROVAL_REQUIRED']]);
+    expect(applyDeclaredCategoryOverride(assessment, [jobLevelApprovalCheck], categoriesWithHumanApproval)).toEqual(assessment);
   });
 });
 
