@@ -41,7 +41,13 @@ import { FailureCategory, classifyFailureCategory } from './failureTaxonomy';
 import { RecoveryStrategy, recoveryStrategyPromptHint, recurringFailureSignature, resolveRecoveryStrategy } from './recoveryMatrix';
 import { assembleKernelContext } from './contextAssembler';
 import { hooks } from './lifecycleHooks';
-import { RouteNode, parseRoutePlanInput } from './routePlan';
+import {
+  RouteNode,
+  advanceRoutePhaseIndex,
+  extractRoutePhaseIndex,
+  parseRoutePlanInput,
+  resolveRouteDispatchChatUrl,
+} from './routePlan';
 import { deriveContextPressure } from './contextPressure';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
@@ -149,6 +155,13 @@ export interface DeveloperJob {
   // kept separate from autopilotRoute's self-reported progress). Absent
   // for any job created without one — never required.
   routePlan?: RouteNode[];
+  // The Worker-owned current phase index into routePlan (see routePlan.ts's
+  // resolveCurrentRouteNode/extractRoutePhaseIndex/advanceRoutePhaseIndex) —
+  // drives Multi Chat / Specialist Chat dispatch routing. Only ever
+  // advances via an exact ROUTE_PHASE_ID marker match against a known
+  // routePlan id, monotonically; undefined/0 (phase 0) for any job that
+  // never emits one.
+  routePhaseIndex?: number;
   // A short, capped chronological log of real state transitions this job
   // has actually gone through (job created, CI failed, recovery prepared,
   // human required, completed, …) — literally the design's "trace":
@@ -504,6 +517,15 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     // capped trace with identical ROUTE_CHECKPOINT entries and evict real
     // history (creation, recovery) that trace exists to preserve.
     const routeAdvanced = autopilotRoute !== job.autopilotRoute;
+    // Worker-owned phase pointer for Multi Chat / Specialist Chat dispatch
+    // routing (see routePlan.ts's own comment on why this is NOT the
+    // checkpoint count) — only advances when THIS verified CI-green head's
+    // commit message contains an exact, known ROUTE_PHASE_ID marker;
+    // otherwise stays exactly where it was.
+    const routePhaseIndex = advanceRoutePhaseIndex(
+      job.routePhaseIndex ?? 0,
+      extractRoutePhaseIndex(job.routePlan, repo.headCommitMessage),
+    );
     const continuationPrompt = buildAutopilotRouteContinuationPrompt({
       repository: job.repository,
       branch: job.workspace.branch,
@@ -512,6 +534,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       headSha: repo.headSha,
       checks,
       routeState: autopilotRoute,
+      routePlan: job.routePlan,
     });
     // A long-running Autopilot route can drive contextPressure to HIGH
     // purely through route checkpoints (no CI failures at all — see
@@ -534,6 +557,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       handoffPrompt: finalContinuationPrompt,
       outputText: '現在headのCIは成功しました。AUTOPILOT ROUTEの途中チェックポイントとして扱い、完了済み工程を飛ばさず次の未完了工程へ進むChatGPT指示を準備しました。',
       autopilotRoute,
+      routePhaseIndex,
       trace: routeAdvanced ? appendTrace(job, 'ROUTE_CHECKPOINT', extractAutopilotRouteStep(repo.headCommitMessage)) : job.trace,
       updatedAt: new Date().toISOString(),
     };
@@ -667,6 +691,7 @@ async function prepareRecovery(
     previousSummary: job.outputText,
     declaredCategories,
     routeState: job.autopilotRoute,
+    routePlan: job.routePlan,
     strategyHint: recoveryStrategyPromptHint(recoveryStrategy),
   });
   const decision = await runOrchestrationModel(env, {
@@ -734,7 +759,14 @@ async function prepareRecovery(
 }
 
 async function queueHandoffIfEnabled(env: AgentEnv, job: DeveloperJob): Promise<DeveloperJob> {
-  if (!job.autoDispatch || job.phase === 'human_required' || !job.projectId || !job.chatUrl || !job.handoffPrompt?.trim()) return job;
+  // Multi Chat / Specialist Chat: route to whichever chat the CURRENT
+  // declared phase is bound to (job.routePhaseIndex — Worker-owned, only
+  // advanced by an exact ROUTE_PHASE_ID marker match, never the self-
+  // reported step text or a checkpoint count — see routePlan.ts's own
+  // comment), falling back to the job's single default chatUrl for a job
+  // with no such binding — identical behavior to before this existed.
+  const dispatchChatUrl = resolveRouteDispatchChatUrl(job.routePlan, job.routePhaseIndex ?? 0, job.chatUrl);
+  if (!job.autoDispatch || job.phase === 'human_required' || !job.projectId || !dispatchChatUrl || !job.handoffPrompt?.trim()) return job;
   const fingerprint = promptFingerprint(job.handoffPrompt);
   if (job.lastQueuedHandoffFingerprint === fingerprint && job.lastQueuedCommandId) return job;
 
@@ -742,7 +774,7 @@ async function queueHandoffIfEnabled(env: AgentEnv, job: DeveloperJob): Promise<
     const command = await enqueueChatCommand(env, {
       projectId: job.projectId,
       projectName: job.projectName,
-      chatUrl: job.chatUrl,
+      chatUrl: dispatchChatUrl,
       prompt: job.handoffPrompt,
       dedupeKey: `developer:${job.id}:${fingerprint}`,
     });
