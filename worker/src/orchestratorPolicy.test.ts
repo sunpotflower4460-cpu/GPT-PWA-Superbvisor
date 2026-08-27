@@ -142,11 +142,11 @@ describe('applyDeclaredCategoryOverride', () => {
   it('enriches a plain CODE_FAILURE with the declared category once given job-level data', () => {
     const assessment = assessCi([workflowRunLevelCheck]);
     expect(assessment.state).toBe('CODE_FAILURE');
-    expect(assessment.declaredCategory).toBeUndefined();
+    expect(assessment.declaredCategories).toBeUndefined();
 
     const enriched = applyDeclaredCategoryOverride(assessment, [jobLevelLintCheck], checkCategories);
     expect(enriched.state).toBe('CODE_FAILURE');
-    expect(enriched.declaredCategory).toBe('GUARD_FAILURE');
+    expect(enriched.declaredCategories).toEqual(['GUARD_FAILURE']);
   });
 
   it('is a no-op when no job-level check matches a declared category', () => {
@@ -188,7 +188,35 @@ describe('applyDeclaredCategoryOverride', () => {
     ]);
 
     const enriched = applyDeclaredCategoryOverride(assessment, [cancelledJobCheck, realFailureJobCheck], categories);
-    expect(enriched.declaredCategory).toBe('GUARD_FAILURE');
+    expect(enriched.declaredCategories).toEqual(['GUARD_FAILURE']);
+  });
+
+  it('collects every distinct category when multiple independently-categorized checks fail at once', () => {
+    // Two real, non-transient failures in the same run — picking only the
+    // first (e.g. via .find()) would silently drop the other's evidence.
+    const assessment = assessCi([{ ...base, name: 'ci', conclusion: 'failure' }]);
+    const lintFailure = { ...base, id: 5, name: 'lint', conclusion: 'failure' };
+    const terraformFailure = { ...base, id: 6, name: 'terraform-plan', conclusion: 'failure' };
+    const categories = new Map([
+      ['lint', 'GUARD_FAILURE'],
+      ['terraform-plan', 'INFRA_FAILURE'],
+    ]);
+
+    const enriched = applyDeclaredCategoryOverride(assessment, [lintFailure, terraformFailure], categories);
+    expect(enriched.declaredCategories).toEqual(['GUARD_FAILURE', 'INFRA_FAILURE']);
+  });
+
+  it('deduplicates when multiple failing checks share the same declared category', () => {
+    const assessment = assessCi([{ ...base, name: 'ci', conclusion: 'failure' }]);
+    const lintFailure = { ...base, id: 5, name: 'lint', conclusion: 'failure' };
+    const formatFailure = { ...base, id: 6, name: 'format', conclusion: 'failure' };
+    const categories = new Map([
+      ['lint', 'GUARD_FAILURE'],
+      ['format', 'GUARD_FAILURE'],
+    ]);
+
+    const enriched = applyDeclaredCategoryOverride(assessment, [lintFailure, formatFailure], categories);
+    expect(enriched.declaredCategories).toEqual(['GUARD_FAILURE']);
   });
 
   it('finds no category when every job-level check with one is transient', () => {
@@ -228,8 +256,14 @@ describe('recovery safety', () => {
     // checks — would reuse that stale prompt forever instead of
     // regenerating with the newly discovered category.
     const withoutCategory = failureFingerprint('abc', [{ ...base, conclusion: 'failure' }]);
-    const withCategory = failureFingerprint('abc', [{ ...base, conclusion: 'failure' }], 'GUARD_FAILURE');
+    const withCategory = failureFingerprint('abc', [{ ...base, conclusion: 'failure' }], ['GUARD_FAILURE']);
     expect(withCategory).not.toBe(withoutCategory);
+  });
+
+  it('fingerprints the same category set identically regardless of discovery order', () => {
+    const a = failureFingerprint('abc', [{ ...base, conclusion: 'failure' }], ['GUARD_FAILURE', 'INFRA_FAILURE']);
+    const b = failureFingerprint('abc', [{ ...base, conclusion: 'failure' }], ['INFRA_FAILURE', 'GUARD_FAILURE']);
+    expect(a).toBe(b);
   });
 
   it('is unaffected by a declaredCategory of undefined (existing 2-argument callers stay identical)', () => {
@@ -263,9 +297,9 @@ describe('recovery safety', () => {
     // LLM-visible `evidence` string built separately in developerAgent.ts.
     const withCategory = buildRecoveryPrompt({
       repository: 'owner/repo', branch: 'ai-dev-deck/task', goal: 'Ship safely', originalTask: 'Fix CI',
-      headSha: 'abc', checks: [{ ...base, conclusion: 'failure' }], declaredCategory: 'GUARD_FAILURE',
+      headSha: 'abc', checks: [{ ...base, conclusion: 'failure' }], declaredCategories: ['GUARD_FAILURE', 'INFRA_FAILURE'],
     });
-    expect(withCategory).toContain('宣言されたカテゴリ: GUARD_FAILURE');
+    expect(withCategory).toContain('宣言されたカテゴリ: GUARD_FAILURE, INFRA_FAILURE');
 
     const withoutCategory = buildRecoveryPrompt({
       repository: 'owner/repo', branch: 'ai-dev-deck/task', goal: 'Ship safely', originalTask: 'Fix CI',
