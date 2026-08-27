@@ -396,11 +396,11 @@ export default function ChatControlCenter() {
                       </button>
                       <button
                         className="chat-command-steer"
-                        title="現在実行中の作業へ割り込む方向修正。他の送信待ち指示より先に配送されます（例:「その認証fileには触らない」）。"
+                        title="他の送信待ち指示より優先してBridgeへ配送されます（例:「その認証fileには触らない」）。Bridgeは配送後30秒程度クールダウンするため、進行中の応答へ即座に割り込むわけではありません。"
                         disabled={!selected.chatUrl || !prompt.trim() || Boolean(busy)}
                         onClick={() => void queue(selected, prompt, 'steer', 'STEER')}
                       >
-                        今すぐ割り込み(STEER) ⚡
+                        優先指示として送る(STEER) ⚡
                       </button>
                     </div>
 

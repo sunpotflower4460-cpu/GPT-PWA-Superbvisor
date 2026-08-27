@@ -1,4 +1,4 @@
-import { CiCheckLike } from './orchestratorPolicy';
+import { CiCheckLike, SUCCESS_CONCLUSIONS } from './orchestratorPolicy';
 
 // The design's Execution Fabric abstraction (LOCAL_FAST / ISOLATED /
 // BROWSER / CI), with one deliberate, explicit gap: this Worker runs on
@@ -89,7 +89,7 @@ export class CiExecutionFabric implements ExecutionFabric {
       command: check.name,
       exitCode: null,
       durationMs: null,
-      failures: check.conclusion && check.conclusion !== 'success' ? [{ message: `${check.name}: ${check.conclusion} — ${check.url}` }] : [],
+      failures: check.conclusion && !SUCCESS_CONCLUSIONS.has(check.conclusion.toLowerCase()) ? [{ message: `${check.name}: ${check.conclusion} — ${check.url}` }] : [],
       artifact: check.url,
     }));
   }
@@ -107,7 +107,7 @@ export class CiExecutionFabric implements ExecutionFabric {
     const pending = this.checks.some((check) => check.status !== 'completed');
     if (pending) return { status: 'pending', command, exitCode: null, durationMs: null, failures: [] };
 
-    const failed = this.checks.filter((check) => (check.conclusion || '').toLowerCase() !== 'success');
+    const failed = this.checks.filter((check) => !SUCCESS_CONCLUSIONS.has((check.conclusion || '').toLowerCase()));
     return {
       status: failed.length ? 'failed' : 'passed',
       command,
@@ -131,5 +131,5 @@ export function createCiExecutionFabric(ciChecks: readonly CiCheckLike[] | undef
 function mapConclusion(conclusion: string | null, status: string): ExecutionResult['status'] {
   if (status !== 'completed') return 'pending';
   if (!conclusion) return 'unknown';
-  return conclusion.toLowerCase() === 'success' ? 'passed' : 'failed';
+  return SUCCESS_CONCLUSIONS.has(conclusion.toLowerCase()) ? 'passed' : 'failed';
 }

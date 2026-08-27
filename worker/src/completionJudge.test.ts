@@ -88,11 +88,33 @@ describe('buildCompletionCertificate', () => {
     expect(buildCompletionCertificate(baseJob()).state).toBe('NOT_CANDIDATE');
   });
 
-  it('is COMPLETION_CANDIDATE, never CERTIFIED, once deterministic checks pass — semantic review stays PENDING', () => {
+  it('is COMPLETION_CANDIDATE, never CERTIFIED, once deterministic checks pass — semantic review and goal stay PENDING', () => {
     const certificate = buildCompletionCertificate(baseJob({ status: 'completed', phase: 'review_ready' }));
     expect(certificate.state).toBe('COMPLETION_CANDIDATE');
     expect(certificate.semanticReview).toBe('PENDING');
-    expect(certificate.goal).toBe('PASS');
+    // Deterministic evidence alone (CI green, route complete) never claims
+    // the goal/definitionOfDone was actually satisfied — that requires a
+    // real Semantic Judge, which doesn't exist yet. Only REJECTED reports
+    // 'FAIL' (real negative evidence); a passing deterministic check has no
+    // positive-evidence equivalent to report 'PASS' with.
+    expect(certificate.goal).toBe('PENDING');
+  });
+
+  it('reports goal as FAIL only once deterministic checks actively contradict completion', () => {
+    expect(buildCompletionCertificate(baseJob({ status: 'completed', phase: 'human_required' })).goal).toBe('FAIL');
+  });
+
+  it('reports guard as PASS once CI is green, and PENDING before any CI result exists', () => {
+    expect(buildCompletionCertificate(baseJob({ status: 'completed', phase: 'review_ready' })).guard).toBe('PASS');
+    expect(buildCompletionCertificate(baseJob({ phase: 'waiting_ci' })).guard).toBe('PENDING');
+  });
+
+  it('reports guard as FAIL only when the observed failure was guard/policy-specific', () => {
+    const guardFailure = buildCompletionCertificate(baseJob({ phase: 'recovery_ready', failureCategory: 'GUARD_FAILURE' }));
+    expect(guardFailure.guard).toBe('FAIL');
+
+    const unrelatedFailure = buildCompletionCertificate(baseJob({ phase: 'recovery_ready', failureCategory: 'CODE_FAILURE' }));
+    expect(unrelatedFailure.guard).toBe('PASS');
   });
 
   it('is REJECTED when the job reached a terminal phase but deterministic checks fail', () => {

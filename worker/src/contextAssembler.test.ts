@@ -186,4 +186,38 @@ describe('assembleKernelContext', () => {
 
     expect(result.usedChars).toBeLessThanOrEqual(result.budgetChars);
   });
+
+  it('keeps the actual rendered text within budget, including section headers and separators', async () => {
+    // Headers ("### [TIER] key (path)\n") and the "\n\n" join separator
+    // between sections are real characters in the prompt this produces —
+    // if they're never deducted from the budget, `text.length` can exceed
+    // `budgetChars` even when `usedChars` claims otherwise.
+    const longContent = 'x'.repeat(5000);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('SOUL.md')) return fileResponse(longContent);
+      if (url.includes('FEATURES.md')) return fileResponse(longContent);
+      throw new Error(`unexpected fetch beyond budget: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const budgetChars = 2000;
+    const result = await assembleKernelContext({
+      env,
+      repository: 'octocat/example',
+      ref: 'main',
+      manifest,
+      task: 'anything',
+      budgetChars,
+    });
+
+    // A small, bounded slack remains acceptable: each truncated section's
+    // own notice ("…(truncated, N more characters omitted)") is appended
+    // after slicing to its allowance (a soft budget, not a byte-exact cap —
+    // see the module's own top comment) — but that slack is at most a few
+    // dozen characters per section, never the unbounded overshoot header/
+    // separator accounting would otherwise allow.
+    const maxAcceptableSlack = 80 * result.sections.length;
+    expect(result.text.length).toBeLessThanOrEqual(budgetChars + maxAcceptableSlack);
+  });
 });

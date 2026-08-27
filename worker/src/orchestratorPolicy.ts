@@ -55,7 +55,11 @@ export interface AutopilotRouteState {
   completedAt?: string;
 }
 
-const SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
+// Exported so other CI-conclusion consumers (executionFabric.ts) use the
+// exact same success set instead of a separate, driftable copy — GitHub
+// reports 'neutral' and 'skipped' conclusions for a completed, non-blocking
+// check, not just 'success'.
+export const SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 const TRANSIENT_CONCLUSIONS = new Set(['cancelled', 'timed_out', 'startup_failure', 'stale']);
 const HUMAN_CONCLUSIONS = new Set(['action_required']);
 

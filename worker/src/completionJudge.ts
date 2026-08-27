@@ -95,7 +95,18 @@ export function buildCompletionCertificate(job: DeveloperJob): CompletionCertifi
       : 'REJECTED';
 
   return {
-    goal: deterministic.pass ? 'PASS' : (state === 'NOT_CANDIDATE' ? 'PENDING' : 'FAIL'),
+    // Deliberately never 'PASS': deterministic.pass only means "no
+    // deterministic check contradicts completion" (CI green, route
+    // complete, no outstanding approval) — it says nothing about whether
+    // job.definitionOfDone was actually satisfied, which only a real
+    // Semantic Judge could confirm, and none exists yet (pendingSemanticJudge
+    // above always reports PENDING). Claiming 'PASS' here from deterministic
+    // evidence alone would be exactly the "AI says done -> treat as done"
+    // shortcut this whole module exists to prevent. 'FAIL' is still
+    // warranted once REJECTED: a deterministic check actively contradicting
+    // completion (e.g. CI red) is real negative evidence, unlike the
+    // positive case which has no equivalent real evidence yet.
+    goal: state === 'REJECTED' ? 'FAIL' : 'PENDING',
     // deterministic.ciPassing is a plain boolean (true only once phase
     // reaches review_ready), so reporting its negation directly here would
     // certify a job still in waiting_ci/waiting_chatgpt/handoff_ready as a
@@ -103,7 +114,7 @@ export function buildCompletionCertificate(job: DeveloperJob): CompletionCertifi
     // reserved for a phase reached specifically because CI/recovery
     // observed an actual problem.
     ci: ciCertificateStatus(job),
-    guard: deterministic.guardPassing ? 'PASS' : 'FAIL',
+    guard: guardCertificateStatus(job),
     semanticReview: 'PENDING',
     blockingIssues: deterministic.reasons.length,
     headSha: job.lastHeadSha,
@@ -116,4 +127,17 @@ function ciCertificateStatus(job: DeveloperJob): 'PASS' | 'FAIL' | 'PENDING' {
   if (job.phase === 'review_ready') return 'PASS';
   if (job.phase === 'recovery_ready' || job.phase === 'human_required') return 'FAIL';
   return 'PENDING'; // handoff_ready / waiting_chatgpt / waiting_ci — no CI result yet, not a failure
+}
+
+// Reuses ciCertificateStatus's phase bucketing (PENDING before any CI
+// result exists, PASS once review_ready) and only overrides the FAIL case:
+// a job in a failed CI phase whose specific observed failure was NOT
+// guard/policy-related has no evidence its guard checks themselves failed
+// (they may simply not have run yet, or passed while something else
+// broke), so it stays PASS rather than inheriting the unrelated failure.
+function guardCertificateStatus(job: DeveloperJob): 'PASS' | 'FAIL' | 'PENDING' {
+  const status = ciCertificateStatus(job);
+  if (status !== 'FAIL') return status;
+  const guardFailing = job.failureCategory === 'GUARD_FAILURE' || job.failureCategory === 'POLICY_FAILURE';
+  return guardFailing ? 'FAIL' : 'PASS';
 }

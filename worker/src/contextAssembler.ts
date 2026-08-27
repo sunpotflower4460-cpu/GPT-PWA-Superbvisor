@@ -41,6 +41,11 @@ const MAX_BUDGET_CHARS = 40_000;
 const MIN_SECTION_CHARS = 200;
 const CORE_SHARE = 0.6;
 const SCOPED_SHARE = 0.25;
+const SECTION_SEPARATOR = '\n\n';
+
+function sectionHeader(tier: 'core' | 'scoped', key: string, path: string): string {
+  return `### [${tier.toUpperCase()}] ${key} (${path})\n`;
+}
 
 export interface AssembleKernelContextInput {
   env: GitHubEnv;
@@ -64,7 +69,16 @@ export async function assembleKernelContext(input: AssembleKernelContextInput): 
   let remaining = budgetChars;
 
   for (const entry of [...core, ...scoped]) {
-    if (remaining < MIN_SECTION_CHARS) {
+    // The rendered `text` below joins "### [TIER] key (path)\n" + content
+    // per section with a "\n\n" separator between sections — both are
+    // per-section overhead the earlier version of this budget never
+    // deducted, so `text.length` could exceed `budgetChars` even though
+    // `usedChars` reported staying within it. Reserved up front, before
+    // deciding how much of the file's own content this section gets.
+    const header = sectionHeader(entry.tier, entry.key, entry.path);
+    const separator = sections.length ? SECTION_SEPARATOR : '';
+    const overhead = header.length + separator.length;
+    if (remaining - overhead < MIN_SECTION_CHARS) {
       omittedForBudgetKeys.push(entry.key);
       continue;
     }
@@ -72,20 +86,22 @@ export async function assembleKernelContext(input: AssembleKernelContextInput): 
     if (!file) continue; // declared path missing from the repo — skip, not fatal (readOptionalFile's own contract)
 
     const share = entry.tier === 'core' ? CORE_SHARE : SCOPED_SHARE;
-    const allowance = Math.max(MIN_SECTION_CHARS, Math.min(remaining, Math.ceil(budgetChars * share)));
+    const contentBudget = remaining - overhead;
+    const allowance = Math.max(MIN_SECTION_CHARS, Math.min(contentBudget, Math.ceil(budgetChars * share)));
     const truncated = file.content.length > allowance;
     const content = truncated ? `${file.content.slice(0, allowance)}\n…(truncated, ${file.content.length - allowance} more characters omitted)` : file.content;
     sections.push({ key: entry.key, path: entry.path, tier: entry.tier, content, truncated });
-    // content.length can exceed `allowance` by the truncation notice's own
-    // length (appended after slicing to allowance, see above) — clamp so a
-    // section that just barely fits its allowance can't drive `remaining`
-    // negative and inflate usedChars past budgetChars below.
-    remaining = Math.max(0, remaining - content.length);
+    // content.length can still exceed `allowance` by the truncation
+    // notice's own length (appended after slicing to allowance, see
+    // above) — that residual slack is small and already accepted (this is
+    // a soft budget, not a byte-exact cap); clamp so it can't drive
+    // `remaining` negative and inflate usedChars past budgetChars below.
+    remaining = Math.max(0, remaining - overhead - content.length);
   }
 
   const text = sections
-    .map((section) => `### [${section.tier.toUpperCase()}] ${section.key} (${section.path})\n${section.content}`)
-    .join('\n\n');
+    .map((section) => `${sectionHeader(section.tier, section.key, section.path)}${section.content}`)
+    .join(SECTION_SEPARATOR);
 
   return {
     sections,

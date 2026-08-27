@@ -38,6 +38,18 @@ describe('CiExecutionFabric', () => {
     expect(result.failures).toEqual([]);
   });
 
+  it('treats neutral and skipped conclusions as passing, not failing', async () => {
+    const fabric = new CiExecutionFabric([
+      { ...passingCheck, conclusion: 'neutral' },
+      { ...passingCheck, id: 3, conclusion: 'skipped' },
+    ], true);
+    const result = await fabric.runBuild();
+    expect(result.status).toBe('passed');
+    expect(result.failures).toEqual([]);
+    const logs = await fabric.inspectLogs();
+    expect(logs.every((log) => log.status === 'passed' && log.failures.length === 0)).toBe(true);
+  });
+
   it('reports failed with structured failures, not a raw log dump', async () => {
     const fabric = new CiExecutionFabric([passingCheck, failingCheck], true);
     const result = await fabric.runTypecheck();
