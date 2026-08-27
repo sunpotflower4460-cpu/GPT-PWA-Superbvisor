@@ -128,6 +128,18 @@ window.openai.sendFollowUpMessage → 同じChatGPT会話` という実配送経
 以下は `chatgpt-bridge/README.md` の "Background resilience" に書かれている設計を、
 実機で裏取りする作業です。すべて1回ずつで構いません。
 
+以下の「別の端末・別ブラウザから指示をキューする」は、**その同じproject IDへ向けて
+直接APIを叩けば十分**です。案件登録はlocalStorageに保存され新規作成のたびに新しい
+IDが割り当てられるため、2台目の端末でPWAを開いて同じ名前の案件を作り直しても別IDに
+なり、この案件のBridgeには届きません(3-4で詳しく扱う制約と同じ)。UIでの再登録や
+Cloud Syncは不要で、1台目で確認済みのproject IDとChat URLを使って直接キューします。
+
+```bash
+curl -X POST https://<your-worker>.workers.dev/api/chat-commands \
+  -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"resilience test"}'
+```
+
 - **Widget休止からの復帰**: ChatGPTアプリ/タブをバックグラウンドにし、**その状態のまま**
   別の端末・別ブラウザからその案件へ指示を1件キューする。数分放置してから前面に戻し、
   休止中にキューされていたその指示が復帰後に配送されることを確認する。
@@ -195,6 +207,13 @@ Supervisor Inbox(`?supervisor=inbox`)へ遷移する。案件別の遷移まで�
 このテストPushではなくGuardian/Watchdogが実際に発行する案件紐付きの通知
 (例: `WAITING_USER`到達時のPush)を使うこと。
 
+また `/api/push/test`(`sendSupervisorPush`)はKVから購読を最大100件しか取得せず
+(`worker/src/push.ts`: `SUPERVISOR_STATE.list({ prefix: PREFIX, limit: 100 })`、
+cursorによる続き取得なし)、登録済み端末が100件を超える環境では取得順で後ろに
+なった端末に届かないことがある。届かない場合は購読自体が壊れているとは限らず、
+この上限によるものである可能性を先に切り分けること(検証用デプロイでは登録端末数を
+少数に保つのが望ましい)。
+
 合格条件: **診断** の `通知権限` と `Web Push購読` が両方PASSになり、
 PWAを閉じた状態でテストPushが実機の通知センターに届く。
 
@@ -227,19 +246,28 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
 3. **Cloud State revision競合の確認**: 手動保存ボタン(「この端末 → Cloudへ保存」)の
    競合エラーはUI上ほぼ即座に消えてしまい(保存失敗直後に呼ばれる状態確認処理が
    エラー表示を上書きするため)、この確認には使えない。代わりに**両端末でAuto Sync
-   (自動同期)をON**にすること。両端末が一度同じrevisionまで自動同期された状態から、
-   Auto Syncが次に同期する前に両端末でそれぞれ**別々のフィールドを**変更する
-   (例: 端末Aは案件の名前を変える、端末Bは同じ案件の進捗メモを変える。同じフィールドを
-   両方が変えると、後段のマージで片方が上書きされるのが正しい挙動になり、「両方残るべき」
-   という期待値が成立しない)。
+   (自動同期)をON**にすること。
+
+   マージ処理(`mergeNewestBackup`、`src/DataBackupCenter.tsx`)は案件を**project ID単位で
+   丸ごと**マージし、同じIDの案件が両端末にある場合は `lastActivityAt` が新しい方の
+   レコードを丸ごと採用する(フィールド単位のマージではない)。そのため**同じ案件の
+   別々のフィールドを両端末で変えても、両方は残らない**(新しい方の端末の変更だけが残るのが
+   正しい挙動になり、「両方残るべき」という期待値が成立しない)。データを失わずにマージ
+   できることを確認するには、**別々の案件(別のproject ID)**を使う必要がある。
+
+   両端末が一度同じrevisionまで自動同期された状態から、Auto Syncが次に同期する前に、
+   端末Aは共有中の案件(1台目と同じproject ID)の名前を変え、端末Bは**それとは別の
+   新しい案件をローカルで作成する**(端末Bだけのローカル案件でよく、project IDが
+   共有案件と違う限り新規作成で構わない)。
    片方の自動同期が先に成功し、もう片方が「Cloud Sync: 競合を検出」という通知
    (Supervisor Inboxに残る。自動上書きしない)を受け取ることを確認する。
    タイミングが揃わず両方成功してしまった場合は、変更する間隔を詰めて再試行する。
    両方が無条件に成功して片方の変更が黙って消えてしまう場合は不合格。
    競合を確認したら、負けた側の端末で通知の案内どおり「設定 → データバックアップ →
-   Cloudから安全にマージ」を実行し、**両端末で行った2つの変更(名前の変更と進捗メモの変更の
-   両方)が消えずに残っている**ことを確認する。競合通知が出るだけで、実際のマージ結果を
-   確認しない場合、マージ処理自体が壊れていて片方の変更を黙って捨てていても見逃す。
+   Cloudから安全にマージ」を実行し、**共有案件の名前変更と、端末Bが作った別案件の
+   両方が(別々のIDのまま)消えずに残っている**ことを確認する。競合通知が出るだけで、
+   実際のマージ結果(案件一覧の件数と内容)を確認しない場合、マージ処理自体が壊れていて
+   片方の案件を黙って消していても見逃す。
 4. 一方の端末からChat Controlで指示をキューする。
 5. もう一方の端末で、その指示が実際にキューされたことを確認する。
    overviewは接続状態・件数・最新timestampなどの集約metadataしか持たないため、
@@ -280,16 +308,25 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
    両方のレスポンスが**同じcommand ID**を指していることを確認する(順番に送った1回目の
    確認と合わせて、通常の再送・同時実行の両方を見たことになる)。
 
-7. **claim競合の確認**: まず2台のBridge(2章で接続したChatGPT会話を2つ用意するか、Bridgeを
-   2箇所へdeployする)を**両方とも先に**同じprojectへ接続してからcommandをキューする。
-   (2章のBridgeが接続されたままだと、先にcommandをキューしてから2台目のBridgeを準備する
-   順序では、2台目が揃う前に1台目が即座にclaim・配送してしまい、claim競合の検証にならない。)
-   両方のBridgeが揃った状態で1件だけcommandをキューする。
+7. **claim競合の確認**: この確認はCoordinatorが本当に単一ownerしか許可しないことを
+   確定的に検証するためのもので、実際に稼働中のBridge widgetは不要かつ**邪魔になる**。
+   `chatgpt-bridge/src/bridgeApp.ts` の `tick()` は接続中ずっと一定間隔で
+   `POST /api/chat-commands/claim` をpollingし続けるため、2章で接続したBridgeが
+   同じprojectへ接続されたままだと、これから発火するcurlの2リクエストより先に
+   そのBridgeが自分のpollingでcommandをclaimしてしまい、結果が不確定になる。
 
-   Bridge同士のpollingは間隔があり、片方が先にclaimしてから2台目がpollするだけでも
-   「二重配送なし」に見えてしまう(claimが本当に競合したのか、単に片方が先に処理した
-   だけなのか区別できない)。実際に競合させて確認するには、2つの異なる `bridgeId` で
-   `POST /api/chat-commands/claim` を直接、シェルの `&` でほぼ同時に発火させる。
+   先に、このprojectへ現在接続されている実際のBridge(2章で接続したChatGPTタブなど)を
+   一旦切断する(タブを閉じる、またはWidgetをbackground/unmountしてpollingを止める)。
+   接続中のBridgeがないことを確認したら、この節のためだけの新しいcommandを1件キューする。
+
+   ```bash
+   curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"claim race test"}'
+   ```
+
+   このcommandに対して、2つの異なる `bridgeId` で `POST /api/chat-commands/claim` を
+   直接、シェルの `&` でほぼ同時に発火させる。
 
    ```bash
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/claim \
