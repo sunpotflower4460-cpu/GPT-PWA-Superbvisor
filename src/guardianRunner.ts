@@ -39,6 +39,7 @@ export interface GuardianRun {
   handoffPrompt?: string;
   recoveryCount?: number;
   degradedOrchestration?: boolean;
+  orchestratorRateLimited?: boolean;
   notifiedAt?: string;
 }
 

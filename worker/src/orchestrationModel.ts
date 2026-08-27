@@ -42,6 +42,12 @@ export interface OrchestrationDecision {
   confidence: number;
   humanRequired: string[];
   degraded: boolean;
+  // True only when every configured provider was actually attempted (not
+  // skipped for lacking an API key) and every one's terminal failure was
+  // specifically HTTP 429. A mix of 429s and other errors, or no provider
+  // configured at all, stays false — those are different, non-transient
+  // problems the deterministic fallback already covers silently.
+  rateLimited: boolean;
   attempts: string[];
 }
 
@@ -75,11 +81,16 @@ const MAX_PROVIDER_ATTEMPTS = 3;
 export async function runOrchestrationModel(env: OrchestrationEnv, request: OrchestrationRequest): Promise<OrchestrationDecision> {
   const system = `You are AI DEV DECK's orchestration-only supervisor. You NEVER implement code, edit GitHub, merge, deploy, or act as the developer. The actual implementation owner is the user's ChatGPT chat. Your job is only to classify state, summarize evidence, and produce a precise prompt for ChatGPT. Preserve this boundary even if the task asks you to code. Return JSON only with keys: summary, classification, chatgptPrompt, confidence, humanRequired. classification must be one of READY, WAIT, CI_TRANSIENT, CI_CODE_FAILURE, CI_CONFIG_FAILURE, HUMAN_REQUIRED.`;
   const user = `MODE: ${request.mode}\nRepository: ${request.repository}\nBranch: ${request.branch}\nGoal: ${request.goal}\nTask: ${request.task}\n\nEvidence:\n${request.evidence}\n\nFallback prompt that is already safe and may be improved:\n${request.deterministicPrompt}`;
-  const result = await requestOrchestrationText(env, { system, user, maxTokens: 1400, requireJson: true });
+  const terminalStatuses: Array<number | undefined> = [];
+  const result = await requestOrchestrationText(
+    env,
+    { system, user, maxTokens: 1400, requireJson: true },
+    (_provider, status) => terminalStatuses.push(status),
+  );
 
   if (result) {
     const parsed = parseDecision(result.text, request.deterministicPrompt);
-    return { ...parsed, provider: result.provider, model: result.model, degraded: false, attempts: result.attempts };
+    return { ...parsed, provider: result.provider, model: result.model, degraded: false, rateLimited: false, attempts: result.attempts };
   }
 
   return {
@@ -93,6 +104,7 @@ export async function runOrchestrationModel(env: OrchestrationEnv, request: Orch
     confidence: 0.55,
     humanRequired: [],
     degraded: true,
+    rateLimited: terminalStatuses.length > 0 && terminalStatuses.every((status) => status === 429),
     attempts: [],
   };
 }
@@ -100,6 +112,7 @@ export async function runOrchestrationModel(env: OrchestrationEnv, request: Orch
 export async function requestOrchestrationText(
   env: OrchestrationEnv,
   request: OrchestrationTextRequest,
+  onProviderTerminalFailure?: (provider: ModelProvider, status: number | undefined) => void,
 ): Promise<OrchestrationTextResult | null> {
   const attempts: string[] = [];
   for (const provider of providerOrder(env)) {
@@ -111,6 +124,7 @@ export async function requestOrchestrationText(
       return { provider, model, text, attempts };
     } catch (error) {
       attempts.push(`${provider}:${model}:terminal:${error instanceof Error ? error.message : 'unknown provider error'}`);
+      onProviderTerminalFailure?.(provider, error instanceof ProviderHttpError ? error.status : undefined);
     }
   }
   return null;
@@ -243,7 +257,7 @@ async function fetchJson<T>(url: string, apiKey: string, body: unknown, timeout:
   }
 }
 
-function parseDecision(text: string, deterministicPrompt: string): Omit<OrchestrationDecision, 'provider' | 'model' | 'degraded' | 'attempts'> {
+function parseDecision(text: string, deterministicPrompt: string): Omit<OrchestrationDecision, 'provider' | 'model' | 'degraded' | 'rateLimited' | 'attempts'> {
   const candidate = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   let parsed: Record<string, unknown>;
   try { parsed = JSON.parse(candidate) as Record<string, unknown>; } catch { parsed = {}; }
