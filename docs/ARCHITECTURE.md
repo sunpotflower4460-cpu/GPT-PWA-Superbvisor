@@ -459,4 +459,7 @@ Next high-priority gaps:
 4. 実運用で必要性が確認された場合、Guardian / Developer authoritative state自体をCoordinator/D1等へ寄せて完全fencingを追加
 5. 公式に可能になった場合のみChatGPT response/statusのより深いreadback
 
+1〜3はコードでは閉じられず実機・手動検証が必要な項目です。手順は
+[`E2E_VERIFICATION.md`](./E2E_VERIFICATION.md) を参照してください。
+
 GuardianやAutopilotの高度化より、**PWA内から複数ChatGPTを自然に操作できることを常に優先する。**
