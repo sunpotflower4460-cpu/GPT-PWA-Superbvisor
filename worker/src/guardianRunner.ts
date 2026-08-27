@@ -64,6 +64,7 @@ export interface GuardianRun {
   handoffPrompt?: string;
   recoveryCount?: number;
   degradedOrchestration?: boolean;
+  orchestratorRateLimited?: boolean;
   notifiedAt?: string;
 }
 
@@ -106,6 +107,7 @@ export async function createGuardianRun(env: GuardianEnv, body: CreateGuardianRu
     finalSummary: developer.outputText,
     recoveryCount: developer.recoveryCount,
     degradedOrchestration: developer.degradedOrchestration,
+    orchestratorRateLimited: developer.orchestratorRateLimited,
   };
   await saveRun(env, run);
   await mapDeveloperJob(env, developer.id, run.id);
@@ -212,6 +214,7 @@ async function advanceGuardianRunUnlocked(
     finalSummary: job.outputText,
     handoffPrompt: job.handoffPrompt,
     degradedOrchestration: job.degradedOrchestration,
+    orchestratorRateLimited: job.orchestratorRateLimited,
     transientErrorCount: 0,
     error: job.error,
     updatedAt: new Date().toISOString(),

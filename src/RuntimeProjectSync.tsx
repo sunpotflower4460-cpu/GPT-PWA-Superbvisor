@@ -98,9 +98,12 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
       progress = Math.max(progress, 35);
       phase = 'ChatGPT Bridge配送 / 実行待ち';
     } else if (run.phase === 'recovery_ready') {
-      status = 'WAITING_AI';
+      const exhausted = (run.recoveryCount ?? 0) >= run.maxCycles;
+      status = exhausted ? 'STALLED' : 'WAITING_AI';
       progress = Math.max(progress, 65);
-      phase = 'CI失敗を検出 · ChatGPT復旧Queue';
+      phase = exhausted
+        ? `復旧サイクル上限(${run.maxCycles}回)を超過 · 状況確認を推奨`
+        : 'CI失敗を検出 · ChatGPT復旧Queue';
       kind = 'warning';
     } else {
       progress = Math.max(progress, 45);
@@ -140,6 +143,17 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
     status = 'ERROR';
     phase = 'Guardian設定エラー';
     kind = 'error';
+  }
+
+  // Only downgrades an otherwise-normal in-flight status: once a human
+  // decision or a final outcome is already the reason for `status` (WAITING_
+  // USER/COMPLETED/ERROR/STALLED above), that takes priority over the
+  // orchestration LLM having been rate-limited at some point along the way —
+  // the safe deterministic fallback already covers classification either way.
+  if (run.orchestratorRateLimited && (status === 'RUNNING' || status === 'WAITING_AI')) {
+    status = 'RATE_LIMITED';
+    phase = `${phase} · オーケストレーションAIが上限待ち（決定論的フォールバック使用中）`;
+    kind = 'warning';
   }
 
   return patchRuntime(project, {
@@ -194,6 +208,14 @@ function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
     status = 'ERROR';
     phase = 'ChatGPT Orchestrator設定エラー';
     kind = 'error';
+  }
+
+  // See the matching guard in applyGuardian: only downgrades an otherwise
+  // in-flight status, never overrides a human decision or a final outcome.
+  if (job.orchestratorRateLimited && status === 'WAITING_AI') {
+    status = 'RATE_LIMITED';
+    phase = `${phase} · オーケストレーションAIが上限待ち（決定論的フォールバック使用中）`;
+    kind = 'warning';
   }
 
   return patchRuntime(project, {
@@ -273,7 +295,14 @@ function runtimeGuardianMessage(run: GuardianRun) {
   if (run.status === 'review_ready') return `Guardian: ${run.phase === 'human_required' ? '人間操作が必要' : 'レビュー待ち'}`;
   if (run.status === 'waiting_ci') return 'Guardian: 現在headのGitHub Actionsを監視中';
   if (run.status === 'expired') return 'Guardian: 監視時間上限。状態保存済み';
-  if (run.phase === 'recovery_ready') return `Guardian: CI失敗を検出しChatGPT復旧指示をQueue（${run.recoveryCount || 0}回目）`;
+  if (run.phase === 'recovery_ready') {
+    const exhausted = (run.recoveryCount ?? 0) >= run.maxCycles;
+    const base = exhausted
+      ? `Guardian: 復旧サイクル上限(${run.maxCycles}回)を超過。状況確認を推奨`
+      : `Guardian: CI失敗を検出しChatGPT復旧指示をQueue（${run.recoveryCount || 0}回目）`;
+    return run.orchestratorRateLimited ? `${base} · オーケストレーションAIが上限待ち` : base;
+  }
+  if (run.orchestratorRateLimited) return 'Guardian: オーケストレーションAIが上限待ち。決定論的フォールバックで監督を継続';
   if (run.phase === 'handoff_ready' || run.phase === 'waiting_chatgpt') return 'Guardian: ChatGPT Bridge配送 / 実行待ち。Workerは監督を継続';
   if (run.status === 'failed') return `Guardian設定エラー: ${run.message || run.error || 'unknown'}`;
   return 'Guardian: オーケストレーション監督中';
@@ -281,11 +310,15 @@ function runtimeGuardianMessage(run: GuardianRun) {
 
 function runtimeDeveloperMessage(job: DeveloperJob) {
   if (job.status === 'completed') return job.pullRequest ? `ChatGPT作業後のCI成功: Draft PR #${job.pullRequest.number}` : 'ChatGPT作業後のCI成功確認済み';
-  if (job.phase === 'recovery_ready') return job.autoDispatch
-    ? `CI失敗: ChatGPT復旧指示を自動Queue（${job.recoveryCount ?? 0}回目）`
-    : `CI失敗: ChatGPT復旧指示を準備（${job.recoveryCount ?? 0}回目）`;
+  if (job.phase === 'recovery_ready') {
+    const base = job.autoDispatch
+      ? `CI失敗: ChatGPT復旧指示を自動Queue（${job.recoveryCount ?? 0}回目）`
+      : `CI失敗: ChatGPT復旧指示を準備（${job.recoveryCount ?? 0}回目）`;
+    return job.orchestratorRateLimited ? `${base} · オーケストレーションAIが上限待ち` : base;
+  }
   if (job.phase === 'waiting_ci') return 'ChatGPT変更を検出: CI監視中';
   if (job.phase === 'human_required') return `人間操作が必要: ${job.error || '確認してください'}`;
+  if (job.orchestratorRateLimited) return 'オーケストレーションAIが上限待ち。決定論的フォールバックで継続';
   if (job.status === 'failed') return `Orchestrator設定エラー: ${job.error || 'unknown error'}`;
   return job.autoDispatch ? `ChatGPT Bridge配送 / 実行待ち: ${job.workspace.branch}` : `ChatGPT実行待ち: ${job.workspace.branch}`;
 }

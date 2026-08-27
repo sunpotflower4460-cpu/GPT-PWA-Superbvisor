@@ -30,6 +30,7 @@ export interface DeveloperJob {
   handoffPrompt?: string;
   error?: string;
   degradedOrchestration?: boolean;
+  orchestratorRateLimited?: boolean;
   recoveryCount?: number;
   ciAutoReruns?: number;
   maxAutoCiReruns?: number;

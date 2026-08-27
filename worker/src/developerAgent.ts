@@ -107,6 +107,13 @@ export interface DeveloperJob {
   lastCiRerunFingerprint?: string;
   maxAutoCiReruns: number;
   degradedOrchestration?: boolean;
+  // Narrower than degradedOrchestration: true only when every configured
+  // orchestrator provider's terminal failure was specifically HTTP 429 (see
+  // OrchestrationDecision.rateLimited). Lets the PWA distinguish "will
+  // likely resolve itself once quota resets" from a generic degraded
+  // fallback (missing/invalid keys, network errors, etc.) that needs a
+  // human to actually fix something.
+  orchestratorRateLimited?: boolean;
   chatUrl?: string;
   autoDispatch: boolean;
   lastQueuedHandoffFingerprint?: string;
@@ -209,6 +216,7 @@ async function createDeveloperJobInternal(
     ciAutoReruns: 0,
     maxAutoCiReruns: clamp(body.maxAutoCiReruns ?? 2, 0, MAX_AUTO_CI_RERUNS),
     degradedOrchestration: decision.degraded,
+    orchestratorRateLimited: decision.rateLimited,
     chatUrl: body.chatUrl?.trim() || undefined,
     autoDispatch: Boolean(body.autoDispatch),
     kernelMode: kernel.mode,
@@ -518,6 +526,7 @@ async function prepareRecovery(
     lastFailureFingerprint: fingerprint,
     recoveryCount: job.recoveryCount + 1,
     degradedOrchestration: decision.degraded,
+    orchestratorRateLimited: decision.rateLimited,
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, updated);
