@@ -140,6 +140,29 @@ describe('chat command idempotency', () => {
       code: 'dedupe_payload_mismatch',
     });
   });
+
+  it('rejects reuse of a KV dedupe key when kind changes from NEXT to STEER', async () => {
+    const { env } = fakeEnv();
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue route',
+      dedupeKey: 'developer:job-1:phase-a',
+    });
+
+    // Same dedupeKey and prompt, but this call actually wants STEER — must
+    // not silently return the original NEXT command.
+    await expect(enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/abc123',
+      prompt: 'continue route',
+      dedupeKey: 'developer:job-1:phase-a',
+      kind: 'STEER',
+    })).rejects.toMatchObject({
+      name: 'ChatCommandConflictError',
+      code: 'dedupe_payload_mismatch',
+    });
+  });
 });
 
 describe('chat command NEXT/STEER priority (KV fallback path)', () => {

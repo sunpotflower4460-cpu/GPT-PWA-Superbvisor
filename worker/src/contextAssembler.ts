@@ -76,7 +76,11 @@ export async function assembleKernelContext(input: AssembleKernelContextInput): 
     const truncated = file.content.length > allowance;
     const content = truncated ? `${file.content.slice(0, allowance)}\n…(truncated, ${file.content.length - allowance} more characters omitted)` : file.content;
     sections.push({ key: entry.key, path: entry.path, tier: entry.tier, content, truncated });
-    remaining -= content.length;
+    // content.length can exceed `allowance` by the truncation notice's own
+    // length (appended after slicing to allowance, see above) — clamp so a
+    // section that just barely fits its allowance can't drive `remaining`
+    // negative and inflate usedChars past budgetChars below.
+    remaining = Math.max(0, remaining - content.length);
   }
 
   const text = sections

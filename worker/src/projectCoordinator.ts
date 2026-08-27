@@ -648,13 +648,25 @@ function commandActivity(command: CoordinatorChatCommand): CoordinatorCommandAct
   };
 }
 
+// A dedupe hit must also agree on `kind` — otherwise a retried/second call
+// that asks for STEER (or NEXT) against an existing dedupe key silently
+// gets back a command carrying whatever kind the FIRST call happened to
+// request, defeating the caller's actual intent instead of surfacing as a
+// mismatch the way a changed prompt already does. 'NEXT' and absent are the
+// same value (see CoordinatorChatCommandKind's own comment), so both
+// normalize the same way before comparing.
 function sameCommandPayload(
   command: CoordinatorChatCommand,
-  input: { projectId?: string; chatUrl?: string; prompt?: string },
+  input: { projectId?: string; chatUrl?: string; prompt?: string; kind?: string },
 ) {
   return command.projectId === input.projectId
     && command.chatUrl === input.chatUrl
-    && command.prompt === input.prompt;
+    && command.prompt === input.prompt
+    && normalizeKind(command.kind) === normalizeKind(input.kind);
+}
+
+function normalizeKind(kind: string | undefined): CoordinatorChatCommandKind {
+  return kind === 'STEER' ? 'STEER' : 'NEXT';
 }
 
 function isStoredCommand(value: unknown): value is CoordinatorChatCommand {

@@ -158,4 +158,32 @@ describe('assembleKernelContext', () => {
     expect(result.sections.map((section) => section.key)).toEqual(['soul', 'features']);
     expect(result.omittedForBudgetKeys).toContain('uiJudgments');
   });
+
+  it('never reports usedChars above budgetChars even when several sections truncate back-to-back', async () => {
+    // Each truncated section's own "…(truncated, N more characters
+    // omitted)" notice is appended AFTER slicing to its allowance, so its
+    // real length can exceed the allowance by the notice's own length.
+    // With a small budget and two large CORE sections in a row, that
+    // overshoot used to drive `remaining` negative and inflate usedChars
+    // past budgetChars.
+    const longContent = 'x'.repeat(2000);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('SOUL.md')) return fileResponse(longContent);
+      if (url.includes('FEATURES.md')) return fileResponse(longContent);
+      throw new Error(`unexpected fetch beyond budget: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await assembleKernelContext({
+      env,
+      repository: 'octocat/example',
+      ref: 'main',
+      manifest,
+      task: 'anything',
+      budgetChars: 1000,
+    });
+
+    expect(result.usedChars).toBeLessThanOrEqual(result.budgetChars);
+  });
 });

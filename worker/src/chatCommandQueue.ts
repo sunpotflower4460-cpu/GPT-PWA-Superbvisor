@@ -598,13 +598,22 @@ function projectIndexCreatedAtMs(indexName: string) {
   return timestamp;
 }
 
+// Kept in sync with projectCoordinator.ts's sameCommandPayload: a dedupe hit
+// must also agree on `kind`, or a retried call asking for a different kind
+// than the original silently inherits the original's kind instead of being
+// treated as a mismatch. 'NEXT' and absent are the same value.
 function sameCommandPayload(
   command: ChatCommand,
-  input: { projectId: string; chatUrl: string; prompt: string },
+  input: { projectId: string; chatUrl: string; prompt: string; kind?: ChatCommandKind },
 ) {
   return command.projectId === input.projectId
     && command.chatUrl === input.chatUrl
-    && command.prompt === input.prompt;
+    && command.prompt === input.prompt
+    && normalizeKind(command.kind) === normalizeKind(input.kind);
+}
+
+function normalizeKind(kind: ChatCommandKind | undefined): ChatCommandKind {
+  return kind === 'STEER' ? 'STEER' : 'NEXT';
 }
 
 function chatScope(projectId: string) {

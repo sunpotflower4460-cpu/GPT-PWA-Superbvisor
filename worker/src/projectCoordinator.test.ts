@@ -136,6 +136,30 @@ describe('ProjectCoordinator command atomicity', () => {
     expect((await changedChat.json() as { error: string }).error).toBe('dedupe_payload_mismatch');
   });
 
+  it('rejects the same dedupe key when kind changes from NEXT to STEER', async () => {
+    const coordinator = createCoordinator();
+    const first = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue phase one',
+      dedupeKey: 'route:step-1',
+    });
+    expect(first.status).toBe(201);
+
+    // A second call with the SAME dedupeKey and prompt but a different
+    // `kind` must not silently hand back the original NEXT command — the
+    // caller's intent to escalate to STEER would be lost otherwise.
+    const changedKind = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue phase one',
+      dedupeKey: 'route:step-1',
+      kind: 'STEER',
+    });
+    expect(changedKind.status).toBe(409);
+    expect((await changedKind.json() as { error: string }).error).toBe('dedupe_payload_mismatch');
+  });
+
   it('removes an expired command dedupe index when it still points to that command', async () => {
     const { coordinator, values } = createCoordinatorHarness();
     values.set('command:expired-command', {
