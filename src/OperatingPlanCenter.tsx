@@ -11,6 +11,7 @@ import {
   OperatingPlan,
   OperatingPlanTarget,
   defaultOperatingPlan,
+  effectiveWorkflow,
   formatOperatingPlanPrompt,
   getOperatingPlan,
   parseRoutePlan,
@@ -192,7 +193,7 @@ export default function OperatingPlanCenter() {
     setMessage('');
     try {
       const prompt = buildActionPrompt(selected, runAction);
-      const routePlan = parseRoutePlan(getOperatingPlan(selected.id).workflow);
+      const routePlan = parseRoutePlan(effectiveWorkflow(getOperatingPlan(selected.id)));
       const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection(), routePlan);
       setGuardian(run);
       setBackground(null);

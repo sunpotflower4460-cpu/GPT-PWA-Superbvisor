@@ -103,12 +103,25 @@ export function isAutopilotRouteWorkflow(workflow: string) {
   return hasRepeatedPass || (hasConditionalBranch && hasExplicitSequencing);
 }
 
+// The workflow text actually used to build a task/route from a plan — a
+// blank saved workflow (never explicitly set, or cleared to whitespace)
+// falls back to the standard default, same as formatOperatingPlanPrompt
+// below. Anything that derives a routePlan (see parseRoutePlan) from a
+// saved plan MUST go through this instead of reading plan.workflow raw:
+// otherwise the actual dispatched task follows the default workflow while
+// the declared route reports nothing, since a blank string still passes
+// normalizeOperatingPlan's `typeof === 'string'` check and is never
+// replaced by the default there.
+export function effectiveWorkflow(plan: OperatingPlan): string {
+  return plan.workflow.trim() || defaultOperatingPlan().workflow;
+}
+
 export function formatOperatingPlanPrompt(input: OperatingPlan) {
   const plan = normalizeOperatingPlan(input);
   const target = plan.target === 'CUSTOM'
     ? plan.customTarget.trim() || targetLabels.CUSTOM
     : targetLabels[plan.target];
-  const workflow = plan.workflow.trim() || defaultOperatingPlan().workflow;
+  const workflow = effectiveWorkflow(plan);
   const behavior = [
     plan.inspectBeforeWork && '最初に現状・成果物・既完了作業を確認し、重複作業を避ける。',
     plan.continueWithoutConfirmation && 'AIだけで安全に進められる途中工程では、毎回の確認待ちで止まらず連続して進める。',

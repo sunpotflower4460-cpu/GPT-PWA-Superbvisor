@@ -8,7 +8,7 @@ import {
   startDeveloperJob,
 } from './developerAgent';
 import { GuardianRun, getLatestGuardianRun, startGuardianRun } from './guardianRunner';
-import { getOperatingPlan, parseRoutePlan } from './operatingPlan';
+import { effectiveWorkflow, getOperatingPlan, parseRoutePlan } from './operatingPlan';
 
 const defaultAction = quickActions.find((action) => action.id === 'manual-only') ?? quickActions[0];
 type DeveloperMode = 'single' | 'guardian';
@@ -81,7 +81,7 @@ export default function DeveloperAgentCenter() {
       // a typed custom one-off task has no relationship to the saved
       // workflow, so declaring that unrelated plan alongside it would have
       // the checkpoint misreport what route this specific dispatch follows.
-      const routePlan = customTask ? undefined : parseRoutePlan(getOperatingPlan(selected.id).workflow);
+      const routePlan = customTask ? undefined : parseRoutePlan(effectiveWorkflow(getOperatingPlan(selected.id)));
       if (mode === 'guardian') {
         const next = await startGuardianRun(selected, task, { maxCycles, maxToolTurns: 10, maxMinutes }, connection, routePlan);
         setGuardian(next);
