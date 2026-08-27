@@ -1,5 +1,6 @@
 import { DevProject } from './core';
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
+import { RouteNode } from './operatingPlan';
 
 export type DeveloperJobPhase = 'handoff_ready' | 'waiting_chatgpt' | 'waiting_ci' | 'recovery_ready' | 'human_required' | 'review_ready';
 
@@ -43,6 +44,7 @@ export interface DeveloperJob {
   degradedOrchestration?: boolean;
   orchestratorRateLimited?: boolean;
   autopilotRoute?: AutopilotRouteState;
+  routePlan?: RouteNode[];
   recoveryCount?: number;
   ciAutoReruns?: number;
   maxAutoCiReruns?: number;
@@ -75,6 +77,7 @@ export async function startDeveloperJob(
   prompt: string,
   maxToolTurns = 10,
   connection: WorkerConnection = loadWorkerConnection(),
+  routePlan?: RouteNode[],
 ): Promise<DeveloperJob> {
   if (!project.githubUrl) throw new Error('この案件にはGitHub URLが登録されていません。');
   const result = await api<{ job: DeveloperJob }>(connection, '/api/developer-jobs', {
@@ -90,6 +93,7 @@ export async function startDeveloperJob(
       maxAutoCiReruns: 2,
       chatUrl: project.chatUrl,
       autoDispatch: project.automationLevel === 'AUTO' || project.automationLevel === 'GUARDIAN',
+      routePlan,
     }),
   });
   return result.job;

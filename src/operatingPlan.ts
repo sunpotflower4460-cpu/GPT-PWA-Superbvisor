@@ -1,5 +1,31 @@
 export type OperatingPlanTarget = 'IMPLEMENTED' | 'CI_GREEN' | 'REVIEW_READY' | 'MANUAL_ONLY' | 'CUSTOM';
 
+// The declared Route plan (Goal/Route/Task separation) — an ordered list
+// of named phases, sent to the Worker alongside a DeveloperJob/GuardianRun
+// (see worker/src/routePlan.ts). Parsed from the same arrow-separated
+// `workflow` text a user already writes for `standard手順`
+// (defaultOperatingPlan's own default: "現状確認 → 未完了の特定 → …") — this
+// is NOT an attempt to understand arbitrary free-text instructions (that
+// would be exactly the kind of unreliable guess the design warns against);
+// it only extracts the phases the user already wrote using a delimiter
+// convention this UI already establishes and displays. A workflow with no
+// arrow at all produces a single-node plan (the whole text, verbatim) —
+// never a fabricated multi-step breakdown.
+export interface RouteNode {
+  id: string;
+  label: string;
+}
+
+const ROUTE_SEPARATOR = /\s*(?:→|➡|->)\s*/;
+
+export function parseRoutePlan(workflow: string): RouteNode[] {
+  const segments = workflow
+    .split(ROUTE_SEPARATOR)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return segments.map((label, index) => ({ id: `node-${index + 1}`, label: label.slice(0, 200) }));
+}
+
 export interface OperatingPlan {
   target: OperatingPlanTarget;
   customTarget: string;

@@ -78,6 +78,55 @@ describe('CiExecutionFabric', () => {
     expect((await new CiExecutionFabric([], false).health()).available).toBe(false);
     expect((await new CiExecutionFabric([], true).health()).available).toBe(true);
   });
+
+  it('isolates a phase by check name instead of reporting the aggregate when names allow it', async () => {
+    const unitTests: CiCheckLike = { ...passingCheck, id: 3, name: 'unit-tests', conclusion: 'failure' };
+    const buildJob: CiCheckLike = { ...passingCheck, id: 4, name: 'build', conclusion: 'success' };
+    const typecheckJob: CiCheckLike = { ...passingCheck, id: 5, name: 'typecheck', conclusion: 'success' };
+    const fabric = new CiExecutionFabric([unitTests, buildJob, typecheckJob], true);
+
+    // The failing test check must not drag down build/typecheck once the
+    // fabric can isolate them by name — that's the whole point of this
+    // routing over the old always-aggregate behavior.
+    expect((await fabric.runTest()).status).toBe('failed');
+    expect((await fabric.runBuild()).status).toBe('passed');
+    expect((await fabric.runTypecheck()).status).toBe('passed');
+  });
+
+  it('labels the command with which checks it matched by name', async () => {
+    const unitTests: CiCheckLike = { ...passingCheck, id: 3, name: 'unit-tests', conclusion: 'success' };
+    const fabric = new CiExecutionFabric([unitTests], true);
+    const result = await fabric.runTest();
+    expect(result.command).toContain('unit-tests');
+    expect(result.command).not.toContain('aggregate');
+  });
+
+  it('falls back to the full aggregate, and says so, when no check name matches the phase', async () => {
+    const combinedJob: CiCheckLike = { ...passingCheck, id: 3, name: 'worker-check', conclusion: 'success' };
+    const fabric = new CiExecutionFabric([combinedJob], true);
+    const result = await fabric.runTest();
+    expect(result.status).toBe('passed');
+    expect(result.command).toContain('aggregate');
+    expect(result.command).toContain('no check name matched');
+  });
+
+  it('surfaces a target repo\'s own browser/visual CI job by name, without launching a browser itself', async () => {
+    const playwrightJob: CiCheckLike = { ...passingCheck, id: 3, name: 'playwright-e2e', conclusion: 'failure' };
+    const otherJob: CiCheckLike = { ...passingCheck, id: 4, name: 'lint', conclusion: 'success' };
+    const fabric = new CiExecutionFabric([playwrightJob, otherJob], true);
+
+    const result = await fabric.runBrowser();
+    expect(fabric.kind).toBe('CI');
+    expect(result.status).toBe('failed');
+    expect(result.command).toContain('playwright-e2e');
+    expect(result.command).not.toContain('lint');
+  });
+
+  it('falls back to the aggregate for runBrowser when no check name looks like a browser job', async () => {
+    const fabric = new CiExecutionFabric([passingCheck], true);
+    const result = await fabric.runBrowser();
+    expect(result.command).toContain('aggregate');
+  });
 });
 
 describe('createCiExecutionFabric', () => {

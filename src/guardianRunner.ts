@@ -1,6 +1,7 @@
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 import { DevProject } from './core';
 import { AutopilotRouteState, DeveloperJobPhase } from './developerAgent';
+import { RouteNode } from './operatingPlan';
 
 export interface GuardianCiCheck {
   id?: number;
@@ -41,6 +42,7 @@ export interface GuardianRun {
   degradedOrchestration?: boolean;
   orchestratorRateLimited?: boolean;
   autopilotRoute?: AutopilotRouteState;
+  routePlan?: RouteNode[];
   notifiedAt?: string;
 }
 
@@ -49,6 +51,7 @@ export async function startGuardianRun(
   prompt: string,
   options: { maxCycles?: number; maxToolTurns?: number; maxMinutes?: number } = {},
   connection: WorkerConnection = loadWorkerConnection(),
+  routePlan?: RouteNode[],
 ): Promise<GuardianRun> {
   if (!project.githubUrl) throw new Error('この案件にはGitHub URLが登録されていません。');
   if (!project.chatUrl) throw new Error('Guardian自動運転には対象ChatGPT URLが必要です。');
@@ -67,6 +70,7 @@ export async function startGuardianRun(
       maxAutoCiReruns: 2,
       chatUrl: project.chatUrl,
       autoDispatch: true,
+      routePlan,
     }),
   });
   return result.run;

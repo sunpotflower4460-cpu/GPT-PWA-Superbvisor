@@ -1,4 +1,5 @@
 import { DeveloperJob } from './developerAgent';
+import { ContextPressureLevel, deriveContextPressure } from './contextPressure';
 
 // The structured, queryable checkpoint the design calls for
 // (DevelopmentCheckpoint), derived on read from a DeveloperJob rather than
@@ -19,12 +20,18 @@ import { DeveloperJob } from './developerAgent';
 // itself (not a worktree) as the unit a concurrent-write lease binds to.
 export interface DevelopmentCheckpoint {
   goal: string;
-  // One Autopilot Route per job today (see orchestratorPolicy.ts's
-  // AutopilotRouteState) — routeId is the job's own id, and routeNode is
-  // the most recently self-reported step, when the job's task actually
-  // carries a route contract. Both undefined for an ordinary (non-route)
-  // job, matching hasAutopilotRouteContract.
+  // routeId/routeNode/route are the design's Route layer, kept distinct
+  // from Goal and Task on purpose (see routePlan.ts's own comment on why
+  // the declared plan and the self-reported progress against it are two
+  // separate things, never merged). routeId is set whenever the job has
+  // EITHER a declared plan or self-reported route progress. `route` is the
+  // declared plan (job.routePlan, an ordered list of phase labels — empty
+  // when no plan was declared). `routeNode` is the most recently
+  // self-reported step from orchestratorPolicy.ts's AutopilotRouteState —
+  // free text ChatGPT wrote into a commit message, never validated against
+  // `route`, since the Worker cannot verify that self-report is accurate.
   routeId?: string;
+  route: string[];
   routeNode?: string;
   task: string;
   repository: string;
@@ -42,16 +49,24 @@ export interface DevelopmentCheckpoint {
   blockers: string[];
   recentFailures: string[];
   nextAction: string;
+  // Advisory proxy for how long-running this job's conversation likely is
+  // — see contextPressure.ts's own note on why this is not a real
+  // token-count measurement.
+  contextPressure: ContextPressureLevel;
+  // Chronological log of real state transitions (see developerAgent.ts's
+  // appendTrace) — capped, oldest-dropped-first.
+  trace: Array<{ event: string; at: string; detail?: string }>;
   createdAt: string;
   updatedAt: string;
 }
 
 export function buildDevelopmentCheckpoint(job: DeveloperJob): DevelopmentCheckpoint {
-  const route = job.autopilotRoute;
-  const routeId = route ? job.id : undefined;
-  const routeNode = route ? [...route.checkpoints].reverse().find((checkpoint) => checkpoint.step)?.step : undefined;
+  const progress = job.autopilotRoute;
+  const routeId = progress || job.routePlan?.length ? job.id : undefined;
+  const route = (job.routePlan ?? []).map((node) => node.label);
+  const routeNode = progress ? [...progress.checkpoints].reverse().find((checkpoint) => checkpoint.step)?.step : undefined;
 
-  const verifiedDone = (route?.checkpoints ?? [])
+  const verifiedDone = (progress?.checkpoints ?? [])
     .filter((checkpoint) => checkpoint.step)
     .map((checkpoint) => `${checkpoint.step} (${checkpoint.headSha.slice(0, 7)})`);
 
@@ -95,6 +110,7 @@ export function buildDevelopmentCheckpoint(job: DeveloperJob): DevelopmentCheckp
   return {
     goal: job.goal,
     routeId,
+    route,
     routeNode,
     task: job.prompt,
     repository: job.repository,
@@ -114,6 +130,11 @@ export function buildDevelopmentCheckpoint(job: DeveloperJob): DevelopmentCheckp
     blockers,
     recentFailures,
     nextAction,
+    contextPressure: deriveContextPressure({
+      recoveryCount: job.recoveryCount,
+      routeCheckpointCount: progress?.checkpoints.length ?? 0,
+    }),
+    trace: job.trace ?? [],
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
   };

@@ -100,8 +100,15 @@ export function resolveRecoveryStrategy(input: RecoveryMatrixInput): RecoveryStr
 // prompt (see orchestratorPolicy.ts's buildRecoveryPrompt strategyHint
 // param) rather than a label nobody reads. Empty string for strategies that
 // don't need to change how the prompt reads (RETRY is already the default
-// prompt behavior; ASK_HUMAN/NONE/CREATE_HANDOFF are handled by phase
-// routing, not prompt wording).
+// prompt behavior; ASK_HUMAN/NONE are handled by phase routing in
+// developerAgent.ts's prepareRecovery, not prompt wording — this Worker has
+// no way to hand a conversation off to a human by editing a prompt).
+// CREATE_HANDOFF has no phase-routing equivalent (there is no
+// "handoff_pending" DeveloperJobPhase, and the Worker cannot itself create
+// a PWA-side HandoffCheckpoint — see src/handoff.ts), so a prompt hint is
+// the only real lever available: ask ChatGPT to produce a compact summary
+// now, before continuing, so a fresh chat session could pick up cleanly if
+// this conversation's context does run out.
 export function recoveryStrategyPromptHint(strategy: RecoveryStrategy): string {
   switch (strategy) {
     case 'TRY_ALTERNATIVE':
@@ -110,6 +117,8 @@ export function recoveryStrategyPromptHint(strategy: RecoveryStrategy): string {
       return '環境・インフラ起因の失敗が疑われます。可能であれば別の実行経路（再実行、別ジョブ、別ランナー）を確認してください。';
     case 'RELOAD_KERNEL':
       return 'このリポジトリのガードレール/ポリシー設定（project-kernel.json、guard設定）を読み直し、最新の制約に沿っているか確認してから修正してください。';
+    case 'CREATE_HANDOFF':
+      return 'このセッションが長くなっている可能性があります。修正を続ける前に、完了済み内容・現在地点・残作業・未解決事項を短く要約してください。会話が途中で切れても、その要約と現在のGitHub状態から別セッションが再開できるようにしてください。';
     default:
       return '';
   }

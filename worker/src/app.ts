@@ -116,10 +116,20 @@ export default {
       const job = await getDeveloperJob(env, decodeURIComponent(developerExecutionLogs[1]));
       if (!job) return json({ error: 'developer_job_not_found' }, 404, env, request);
       // CI is the only Execution Fabric this Worker actually has — see
-      // executionFabric.ts's own note on why LOCAL_FAST/ISOLATED/BROWSER
-      // are not faked here.
+      // executionFabric.ts's own note on why LOCAL_FAST/ISOLATED are not
+      // faked here. `phases` isolates evidence by check name when the
+      // target repo's own CI check names allow it (e.g. a job literally
+      // named "playwright" surfaces under `browser`); `logs` is the flat,
+      // unfiltered per-check view underneath that.
       const fabric = createCiExecutionFabric(job.ciChecks, Boolean(job.ciChecks?.length));
-      return json({ kind: fabric.kind, logs: await fabric.inspectLogs() }, 200, env, request);
+      const [test, typecheck, build, browser, logs] = await Promise.all([
+        fabric.runTest(),
+        fabric.runTypecheck(),
+        fabric.runBuild(),
+        fabric.runBrowser(),
+        fabric.inspectLogs(),
+      ]);
+      return json({ kind: fabric.kind, phases: { test, typecheck, build, browser }, logs }, 200, env, request);
     }
 
     const latestDeveloper = url.pathname.match(/^\/api\/developer-projects\/([^/]+)\/latest$/);

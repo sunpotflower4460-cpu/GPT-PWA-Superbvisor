@@ -41,6 +41,8 @@ import { FailureCategory, classifyFailureCategory } from './failureTaxonomy';
 import { RecoveryStrategy, recoveryStrategyPromptHint, recurringFailureSignature, resolveRecoveryStrategy } from './recoveryMatrix';
 import { assembleKernelContext } from './contextAssembler';
 import { hooks } from './lifecycleHooks';
+import { RouteNode, parseRoutePlanInput } from './routePlan';
+import { deriveContextPressure } from './contextPressure';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -58,6 +60,11 @@ export interface CreateDeveloperJobBody {
   maxAutoCiReruns?: number;
   chatUrl?: string;
   autoDispatch?: boolean;
+  // The declared Route plan (see routePlan.ts) — an ordered list of named
+  // phases the caller (the PWA, from src/operatingPlan.ts's
+  // parseRoutePlan) planned upfront. Optional and never required: a caller
+  // with no structured plan simply omits it, same as definitionOfDone.
+  routePlan?: RouteNode[];
 }
 
 export type DeveloperJobStatus = 'starting' | 'running' | 'completed' | 'failed';
@@ -138,6 +145,17 @@ export interface DeveloperJob {
   // Only ever set for a job whose prompt carries the route contract
   // (hasAutopilotRouteContract) — absent for every ordinary job.
   autopilotRoute?: AutopilotRouteState;
+  // The declared Route plan (see routePlan.ts's own comment on why this is
+  // kept separate from autopilotRoute's self-reported progress). Absent
+  // for any job created without one — never required.
+  routePlan?: RouteNode[];
+  // A short, capped chronological log of real state transitions this job
+  // has actually gone through (job created, CI failed, recovery prepared,
+  // human required, completed, …) — literally the design's "trace":
+  // deterministic bookkeeping, not a hook side effect (see
+  // lifecycleHooks.ts's own note on why trace-appending stays plain code
+  // here rather than going through a hook handler).
+  trace?: TraceEntry[];
   chatUrl?: string;
   autoDispatch: boolean;
   lastQueuedHandoffFingerprint?: string;
@@ -145,9 +163,21 @@ export interface DeveloperJob {
   lastDispatchError?: string;
 }
 
+export interface TraceEntry {
+  event: string;
+  at: string;
+  detail?: string;
+}
+
 const JOB_TTL = 60 * 60 * 24 * 14;
 const CI_APPEAR_GRACE_MS = 7 * 60_000;
 const MAX_AUTO_CI_RERUNS = 2;
+const MAX_TRACE_ENTRIES = 30;
+
+function appendTrace(job: DeveloperJob, event: string, detail?: string): TraceEntry[] {
+  const entries = job.trace ?? [];
+  return [...entries, { event, at: new Date().toISOString(), detail }].slice(-MAX_TRACE_ENTRIES);
+}
 
 export async function createDeveloperJob(env: AgentEnv, body: CreateDeveloperJobBody): Promise<DeveloperJob> {
   return createDeveloperJobInternal(env, body);
@@ -179,6 +209,7 @@ export async function continueDeveloperJob(
     maxAutoCiReruns: previous.maxAutoCiReruns,
     chatUrl: previous.chatUrl,
     autoDispatch: previous.autoDispatch,
+    routePlan: previous.routePlan,
   }, previous.workspace, goalRunId ?? previous.managedByGoalRunId);
 }
 
@@ -262,6 +293,8 @@ async function createDeveloperJobInternal(
     kernelMode: kernel.mode,
     kernelManifest: kernel.manifest,
     inferredContract: kernel.inferredContract,
+    routePlan: parseRoutePlanInput(body.routePlan),
+    trace: [{ event: 'CREATED', at: now, detail: body.goal.slice(0, 160) }],
   };
   await saveJob(env, job);
   await hooks.run('AFTER_TASK', { jobId: job.id, repository: job.repository, branch: job.workspace.branch, at: job.updatedAt });
@@ -480,6 +513,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       handoffPrompt: continuationPrompt,
       outputText: '現在headのCIは成功しました。AUTOPILOT ROUTEの途中チェックポイントとして扱い、完了済み工程を飛ばさず次の未完了工程へ進むChatGPT指示を準備しました。',
       autopilotRoute,
+      trace: appendTrace(job, 'ROUTE_CHECKPOINT', extractAutopilotRouteStep(repo.headCommitMessage)),
       updatedAt: new Date().toISOString(),
     };
     await saveJob(env, job);
@@ -513,6 +547,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     autopilotRoute: hasAutopilotRouteContract(job.prompt)
       ? markAutopilotRouteCompleted(job.autopilotRoute, new Date().toISOString())
       : job.autopilotRoute,
+    trace: appendTrace(job, 'COMPLETED', pullRequest ? `PR #${pullRequest.number}` : undefined),
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, job);
@@ -541,12 +576,25 @@ async function prepareRecovery(
   classification: 'CI_TRANSIENT' | 'CI_CODE_FAILURE' | 'CI_CONFIG_FAILURE' | 'HUMAN_REQUIRED',
   declaredCategories?: readonly string[],
 ): Promise<DeveloperJob> {
+  // Advisory proxy, not a token-count measurement — see contextPressure.ts's
+  // own comment on why the Worker cannot know the chat's real context
+  // usage. Computed from THIS job's own recovery/route history so it only
+  // reflects how long-running *this* conversation has likely been, not
+  // some cross-job global count.
+  const pressure = deriveContextPressure({
+    recoveryCount: job.recoveryCount,
+    routeCheckpointCount: job.autopilotRoute?.checkpoints.length ?? 0,
+  });
   // declaredCategories folds into the fingerprint (see failureFingerprint's
   // own comment) so a category discovered on a later refresh — after an
   // earlier one landed here with it still unknown, since getWorkflowRunJobs
   // is best-effort — invalidates the cached handoffPrompt instead of being
   // silently dropped.
-  const failureCategory = classifyFailureCategory({ ciClassification: classification, declaredCategories });
+  const failureCategory = classifyFailureCategory({
+    ciClassification: classification,
+    declaredCategories,
+    contextPressure: pressure === 'HIGH',
+  });
   const fingerprint = checks.length ? failureFingerprint(headSha, checks, declaredCategories) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
     // job.recoveryStrategy is the value a prior call to this function
@@ -612,6 +660,7 @@ async function prepareRecovery(
     recurringFailureCount,
     degradedOrchestration: decision.degraded,
     orchestratorRateLimited: decision.rateLimited,
+    trace: appendTrace(job, `RECOVERY:${failureCategory}`, `strategy=${recoveryStrategy}${pressure !== 'LOW' ? ` contextPressure=${pressure}` : ''}`),
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, updated);
