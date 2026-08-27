@@ -122,10 +122,33 @@ describe('CiExecutionFabric', () => {
     expect(result.command).not.toContain('lint');
   });
 
-  it('falls back to the aggregate for runBrowser when no check name looks like a browser job', async () => {
+  it('reports unknown, not a borrowed aggregate, for runBrowser when no check name looks like a browser job', async () => {
     const fabric = new CiExecutionFabric([passingCheck], true);
     const result = await fabric.runBrowser();
+    expect(result.status).toBe('unknown');
+    expect(result.command).toContain('no browser CI evidence available');
+    expect(result.command).not.toContain('aggregate');
+  });
+
+  it('matches phase keywords on word boundaries, not as an arbitrary substring', async () => {
+    const inspectionJob: CiCheckLike = { ...passingCheck, id: 3, name: 'deployment-inspection', conclusion: 'success' };
+    const genericCiJob: CiCheckLike = { ...passingCheck, id: 4, name: 'ci', conclusion: 'failure' };
+    const fabric = new CiExecutionFabric([inspectionJob, genericCiJob], true);
+
+    // "inspection" contains "spec" as a substring but is not the word
+    // "spec" — must not be picked up by the test keyword, so this falls
+    // back to the (failing) aggregate instead of reporting a false pass.
+    const result = await fabric.runTest();
     expect(result.command).toContain('aggregate');
+    expect(result.status).toBe('failed');
+  });
+
+  it('still matches a hyphenated keyword against a check literally named that phase', async () => {
+    const typeCheckJob: CiCheckLike = { ...passingCheck, id: 3, name: 'worker-type-check-ci', conclusion: 'failure' };
+    const fabric = new CiExecutionFabric([typeCheckJob], true);
+    const result = await fabric.runTypecheck();
+    expect(result.command).toContain('worker-type-check-ci');
+    expect(result.status).toBe('failed');
   });
 });
 

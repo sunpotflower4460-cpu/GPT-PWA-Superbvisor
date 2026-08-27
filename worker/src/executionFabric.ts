@@ -90,6 +90,18 @@ const PHASE_KEYWORDS: Record<'test' | 'typecheck' | 'build' | 'browser', string[
   browser: ['browser', 'e2e', 'playwright', 'cypress', 'visual', 'screenshot', 'ui-test'],
 };
 
+// A check name like "deployment-inspection" must NOT match keyword "spec"
+// (plain substring inclusion would, since "spec" sits inside "inspection").
+// Treat runs of [a-z0-9] as the check name's "words" and require the
+// keyword to land on a word boundary (start/end of string or a non-
+// alphanumeric separator on both sides) — this still matches a hyphenated
+// keyword like "type-check" or "dry-run" against a check literally named
+// that, while rejecting an accidental substring inside an unrelated word.
+function matchesPhaseKeyword(checkName: string, keyword: string): boolean {
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i').test(checkName);
+}
+
 export class CiExecutionFabric implements ExecutionFabric {
   readonly kind: ExecutionFabricKind = 'CI';
 
@@ -108,7 +120,12 @@ export class CiExecutionFabric implements ExecutionFabric {
   }
 
   async runBrowser(): Promise<ExecutionResult> {
-    return this.fromChecksForPhase('browser', PHASE_KEYWORDS.browser);
+    // Unlike test/typecheck/build, most repos have no browser/visual CI job
+    // at all — falling back to the aggregate here would misreport an
+    // unrelated lint-only or build-only run as passing browser evidence.
+    // 'unknown' is the honest answer when nothing named like a browser job
+    // was observed.
+    return this.fromChecksForPhase('browser', PHASE_KEYWORDS.browser, { allowAggregateFallback: false });
   }
 
   async runCommand(command: string): Promise<ExecutionResult> {
@@ -138,10 +155,23 @@ export class CiExecutionFabric implements ExecutionFabric {
       : { available: false, detail: 'No CI run has been observed for the current head yet.' };
   }
 
-  private fromChecksForPhase(phase: string, keywords: readonly string[]): ExecutionResult {
-    const matching = this.checks.filter((check) => keywords.some((keyword) => check.name.toLowerCase().includes(keyword)));
+  private fromChecksForPhase(
+    phase: string,
+    keywords: readonly string[],
+    options: { allowAggregateFallback?: boolean } = {},
+  ): ExecutionResult {
+    const matching = this.checks.filter((check) => keywords.some((keyword) => matchesPhaseKeyword(check.name, keyword)));
     if (matching.length) {
       return this.fromChecksSubset(matching, `ci: checks matching "${phase}" by name (${matching.map((check) => check.name).join(', ')})`);
+    }
+    if (options.allowAggregateFallback === false) {
+      return {
+        status: 'unknown',
+        command: `ci: no check name matched "${phase}" — no ${phase} CI evidence available`,
+        exitCode: null,
+        durationMs: null,
+        failures: [],
+      };
     }
     return this.fromChecksSubset(
       this.checks,

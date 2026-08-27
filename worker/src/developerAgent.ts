@@ -496,6 +496,14 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       new Date().toISOString(),
       extractAutopilotRouteStep(repo.headCommitMessage),
     );
+    // recordAutopilotRouteCheckpoint returns the SAME reference when the
+    // head hasn't advanced since the last recorded checkpoint (it only
+    // appends on a genuinely new head). Re-entering this branch on every
+    // refresh of an unchanged still-in-progress head must not also
+    // re-append to trace — a minute-by-minute poll would otherwise fill the
+    // capped trace with identical ROUTE_CHECKPOINT entries and evict real
+    // history (creation, recovery) that trace exists to preserve.
+    const routeAdvanced = autopilotRoute !== job.autopilotRoute;
     const continuationPrompt = buildAutopilotRouteContinuationPrompt({
       repository: job.repository,
       branch: job.workspace.branch,
@@ -513,7 +521,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       handoffPrompt: continuationPrompt,
       outputText: '現在headのCIは成功しました。AUTOPILOT ROUTEの途中チェックポイントとして扱い、完了済み工程を飛ばさず次の未完了工程へ進むChatGPT指示を準備しました。',
       autopilotRoute,
-      trace: appendTrace(job, 'ROUTE_CHECKPOINT', extractAutopilotRouteStep(repo.headCommitMessage)),
+      trace: routeAdvanced ? appendTrace(job, 'ROUTE_CHECKPOINT', extractAutopilotRouteStep(repo.headCommitMessage)) : job.trace,
       updatedAt: new Date().toISOString(),
     };
     await saveJob(env, job);
@@ -590,10 +598,20 @@ async function prepareRecovery(
   // earlier one landed here with it still unknown, since getWorkflowRunJobs
   // is best-effort — invalidates the cached handoffPrompt instead of being
   // silently dropped.
+  //
+  // contextPressure is deliberately NOT passed into classifyFailureCategory
+  // here: this call site always has a real CI-derived classification (that
+  // field exists for the opposite case — no CI signal at all, see its own
+  // doc comment). recoveryCount/routeCheckpointCount are monotonic and never
+  // reset, so once pressure reaches HIGH it would stay HIGH for the rest of
+  // the job's life, permanently masking the actual failureCategory (and,
+  // through it, recoveryStrategy — e.g. a real GUARD_FAILURE would never
+  // resolve to RELOAD_KERNEL again). High pressure is carried as an
+  // additional handoff signal on the prompt instead (below), never as an
+  // override of which failure this actually is.
   const failureCategory = classifyFailureCategory({
     ciClassification: classification,
     declaredCategories,
-    contextPressure: pressure === 'HIGH',
   });
   const fingerprint = checks.length ? failureFingerprint(headSha, checks, declaredCategories) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
@@ -615,6 +633,14 @@ async function prepareRecovery(
   const recurringFailureCount = job.recurringFailureSignature === signature ? (job.recurringFailureCount ?? 1) + 1 : 1;
   const recoveryStrategy = resolveRecoveryStrategy({ category: failureCategory, sameFingerprintRepeatCount: recurringFailureCount });
 
+  // High context pressure rides alongside the real strategy hint (never in
+  // place of it) — see the note above classifyFailureCategory on why the
+  // failure category/strategy itself must stay accurate even when pressure
+  // is high.
+  const strategyHint = [
+    recoveryStrategyPromptHint(recoveryStrategy),
+    pressure === 'HIGH' ? recoveryStrategyPromptHint('CREATE_HANDOFF') : '',
+  ].filter(Boolean).join('\n');
   const deterministicPrompt = buildRecoveryPrompt({
     repository: job.repository,
     branch: job.workspace.branch,
@@ -625,7 +651,7 @@ async function prepareRecovery(
     previousSummary: job.outputText,
     declaredCategories,
     routeState: job.autopilotRoute,
-    strategyHint: recoveryStrategyPromptHint(recoveryStrategy),
+    strategyHint,
   });
   const decision = await runOrchestrationModel(env, {
     mode: 'RECOVER',
