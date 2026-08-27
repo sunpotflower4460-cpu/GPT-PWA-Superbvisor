@@ -589,8 +589,19 @@ async function prepareRecovery(
   // usage. Computed from THIS job's own recovery/route history so it only
   // reflects how long-running *this* conversation has likely been, not
   // some cross-job global count.
+  //
+  // Uses job.recoveryCount + 1, not job.recoveryCount: this call is IN THE
+  // PROCESS of preparing that (job.recoveryCount + 1)-th recovery (see
+  // `recoveryCount: job.recoveryCount + 1` below) — using the pre-increment
+  // count would compute pressure as of the PREVIOUS recovery, one refresh
+  // stale. Concretely: on the recovery that crosses the HIGH threshold, the
+  // stale count would still read MEDIUM and skip the handoff hint on this
+  // exact call; if the fingerprint then stays unchanged, every later
+  // refresh takes the dedup fast-path (which never recomputes pressure or
+  // rebuilds the prompt at all — see below) and the hint would never get
+  // added until a genuinely new fingerprint appears.
   const pressure = deriveContextPressure({
-    recoveryCount: job.recoveryCount,
+    recoveryCount: job.recoveryCount + 1,
     routeCheckpointCount: job.autopilotRoute?.checkpoints.length ?? 0,
   });
   // declaredCategories folds into the fingerprint (see failureFingerprint's
@@ -633,14 +644,6 @@ async function prepareRecovery(
   const recurringFailureCount = job.recurringFailureSignature === signature ? (job.recurringFailureCount ?? 1) + 1 : 1;
   const recoveryStrategy = resolveRecoveryStrategy({ category: failureCategory, sameFingerprintRepeatCount: recurringFailureCount });
 
-  // High context pressure rides alongside the real strategy hint (never in
-  // place of it) — see the note above classifyFailureCategory on why the
-  // failure category/strategy itself must stay accurate even when pressure
-  // is high.
-  const strategyHint = [
-    recoveryStrategyPromptHint(recoveryStrategy),
-    pressure === 'HIGH' ? recoveryStrategyPromptHint('CREATE_HANDOFF') : '',
-  ].filter(Boolean).join('\n');
   const deterministicPrompt = buildRecoveryPrompt({
     repository: job.repository,
     branch: job.workspace.branch,
@@ -651,7 +654,7 @@ async function prepareRecovery(
     previousSummary: job.outputText,
     declaredCategories,
     routeState: job.autopilotRoute,
-    strategyHint,
+    strategyHint: recoveryStrategyPromptHint(recoveryStrategy),
   });
   const decision = await runOrchestrationModel(env, {
     mode: 'RECOVER',
@@ -662,6 +665,19 @@ async function prepareRecovery(
     evidence: `${reason}\n${checks.map((check) => `${check.name}: ${check.conclusion || check.status} ${check.url}`).join('\n') || 'No CI checks observed for the current head.'}`,
     deterministicPrompt,
   });
+  // A configured orchestration provider's own chatgptPrompt REPLACES
+  // deterministicPrompt rather than composing with it (see parseDecision in
+  // orchestrationModel.ts) — deterministicPrompt only reaches the provider
+  // as "a fallback prompt that may be improved", with no guarantee its
+  // wording (including a strategyHint baked into it) survives. High context
+  // pressure's handoff hint therefore cannot rely on being embedded in
+  // deterministicPrompt; it's enforced here, unconditionally, on whichever
+  // chatgptPrompt actually won (provider-authored or the deterministic
+  // fallback), the same way enforceExecutorBoundary already force-applies
+  // its own prefix regardless of provider output.
+  const finalChatgptPrompt = pressure === 'HIGH'
+    ? `${decision.chatgptPrompt}\n\n${recoveryStrategyPromptHint('CREATE_HANDOFF')}`
+    : decision.chatgptPrompt;
 
   let updated: DeveloperJob = {
     ...job,
@@ -676,7 +692,7 @@ async function prepareRecovery(
     model: decision.model,
     orchestratorProvider: decision.provider,
     outputText: `${reason}\n\n${decision.summary}`,
-    handoffPrompt: decision.chatgptPrompt,
+    handoffPrompt: finalChatgptPrompt,
     error: reason,
     lastFailureFingerprint: fingerprint,
     recoveryCount: job.recoveryCount + 1,

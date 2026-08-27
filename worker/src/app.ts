@@ -129,17 +129,19 @@ export default {
       // a repo (like this one) that runs several jobs inside one workflow
       // — every job.name would be the same generic workflow name and
       // PHASE_KEYWORDS would never match anything but the aggregate
-      // fallback. Fetch the actual job-level names for each known run
-      // (same getWorkflowRunJobs used elsewhere for Kernel category
-      // matching) so `phases` reflects real per-job evidence; best-effort
-      // per run (a run whose jobs fail to fetch just falls out of the
-      // phase view, same pattern as the CI-failure reconciliation in
-      // developerAgent.ts), falling back to the workflow-run-level list
-      // only if no job-level data could be fetched at all.
+      // fallback. Fetch the actual job-level names for each known run (same
+      // getWorkflowRunJobs used elsewhere for Kernel category matching) so
+      // `phases` reflects real per-job evidence. Merged per RUN, not
+      // all-or-nothing: a run whose job-level fetch fails (or returns no
+      // jobs) falls back to just THAT run's own workflow-run-level entry,
+      // so its evidence (e.g. a genuinely failing run) is never silently
+      // dropped from `logs`/`phases` just because a DIFFERENT run's
+      // job-level lookup happened to succeed.
       const runs = job.ciChecks ?? [];
       const jobLevelResults = await Promise.allSettled(runs.map((run) => getWorkflowRunJobs(env, job.repository, run.id)));
-      const jobLevelChecks = jobLevelResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
-      const checksForFabric = jobLevelChecks.length ? jobLevelChecks : runs;
+      const checksForFabric = jobLevelResults.flatMap((result, index) => (
+        result.status === 'fulfilled' && result.value.length ? result.value : [runs[index]]
+      ));
       const fabric = createCiExecutionFabric(checksForFabric, Boolean(runs.length));
       const [test, typecheck, build, browser, logs] = await Promise.all([
         fabric.runTest(),
