@@ -549,7 +549,12 @@ async function prepareRecovery(
   const failureCategory = classifyFailureCategory({ ciClassification: classification, declaredCategories });
   const fingerprint = checks.length ? failureFingerprint(headSha, checks, declaredCategories) : `${headSha}:no-ci`;
   if (job.lastFailureFingerprint === fingerprint && job.handoffPrompt) {
-    const phase: DeveloperJobPhase = classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready';
+    // job.recoveryStrategy is the value a prior call to this function
+    // already computed for this exact fingerprint (nothing new happened
+    // since — that's what makes this the dedup fast-path) — reuse it rather
+    // than recomputing, so an ASK_HUMAN escalation from a prior refresh
+    // isn't lost just because this refresh saw the identical evidence.
+    const phase: DeveloperJobPhase = classification === 'HUMAN_REQUIRED' || job.recoveryStrategy === 'ASK_HUMAN' ? 'human_required' : 'recovery_ready';
     let stable: DeveloperJob = { ...job, phase, error: reason, failureCategory, updatedAt: new Date().toISOString() };
     await saveJob(env, stable);
     if (phase !== 'human_required') stable = await queueHandoffIfEnabled(env, stable);
@@ -586,7 +591,14 @@ async function prepareRecovery(
 
   let updated: DeveloperJob = {
     ...job,
-    phase: classification === 'HUMAN_REQUIRED' || decision.classification === 'HUMAN_REQUIRED' ? 'human_required' : 'recovery_ready',
+    // recoveryStrategy === 'ASK_HUMAN' covers the Recovery Matrix's own
+    // escalation (e.g. a TRANSIENT_FAILURE/CI_CONFIG_FAILURE that has now
+    // recurred past ALTERNATIVE_STRATEGY_THRESHOLD — see recoveryMatrix.ts)
+    // — without this, recoveryStrategyPromptHint() correctly stays empty
+    // for ASK_HUMAN (it documents itself as "handled by phase routing"),
+    // but nothing actually routed the phase, so auto-dispatch kept
+    // re-queuing the same unhelpful retry prompt to ChatGPT indefinitely.
+    phase: classification === 'HUMAN_REQUIRED' || decision.classification === 'HUMAN_REQUIRED' || recoveryStrategy === 'ASK_HUMAN' ? 'human_required' : 'recovery_ready',
     model: decision.model,
     orchestratorProvider: decision.provider,
     outputText: `${reason}\n\n${decision.summary}`,

@@ -96,7 +96,13 @@ export function buildCompletionCertificate(job: DeveloperJob): CompletionCertifi
 
   return {
     goal: deterministic.pass ? 'PASS' : (state === 'NOT_CANDIDATE' ? 'PENDING' : 'FAIL'),
-    ci: deterministic.ciPassing ? 'PASS' : 'FAIL',
+    // deterministic.ciPassing is a plain boolean (true only once phase
+    // reaches review_ready), so reporting its negation directly here would
+    // certify a job still in waiting_ci/waiting_chatgpt/handoff_ready as a
+    // CI *failure* — there's no failure yet, just no result. FAIL is
+    // reserved for a phase reached specifically because CI/recovery
+    // observed an actual problem.
+    ci: ciCertificateStatus(job),
     guard: deterministic.guardPassing ? 'PASS' : 'FAIL',
     semanticReview: 'PENDING',
     blockingIssues: deterministic.reasons.length,
@@ -104,4 +110,10 @@ export function buildCompletionCertificate(job: DeveloperJob): CompletionCertifi
     knownLimitations: deterministic.reasons,
     state,
   };
+}
+
+function ciCertificateStatus(job: DeveloperJob): 'PASS' | 'FAIL' | 'PENDING' {
+  if (job.phase === 'review_ready') return 'PASS';
+  if (job.phase === 'recovery_ready' || job.phase === 'human_required') return 'FAIL';
+  return 'PENDING'; // handoff_ready / waiting_chatgpt / waiting_ci — no CI result yet, not a failure
 }

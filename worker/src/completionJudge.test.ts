@@ -100,6 +100,21 @@ describe('buildCompletionCertificate', () => {
     expect(certificate.state).toBe('REJECTED');
     expect(certificate.blockingIssues).toBeGreaterThan(0);
   });
+
+  it('reports ci as PENDING for a job still in progress, not FAIL', () => {
+    for (const phase of ['handoff_ready', 'waiting_chatgpt', 'waiting_ci'] as const) {
+      expect(buildCompletionCertificate(baseJob({ phase })).ci).toBe('PENDING');
+    }
+  });
+
+  it('reports ci as FAIL only once CI/recovery actually observed a problem', () => {
+    expect(buildCompletionCertificate(baseJob({ phase: 'recovery_ready' })).ci).toBe('FAIL');
+    expect(buildCompletionCertificate(baseJob({ phase: 'human_required' })).ci).toBe('FAIL');
+  });
+
+  it('reports ci as PASS once CI actually succeeded', () => {
+    expect(buildCompletionCertificate(baseJob({ status: 'completed', phase: 'review_ready' })).ci).toBe('PASS');
+  });
 });
 
 describe('pendingSemanticJudge', () => {

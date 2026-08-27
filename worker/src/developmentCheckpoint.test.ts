@@ -44,6 +44,26 @@ describe('buildDevelopmentCheckpoint', () => {
     expect(buildDevelopmentCheckpoint(baseJob({ phase: 'handoff_ready' })).validation.ci).toBe('UNKNOWN');
   });
 
+  it('does not report a stale guard failure once CI has since passed', () => {
+    // failureCategory persists from the most recent recovery even after a
+    // later successful CI run — a review_ready job that already fixed its
+    // guard violation must not still project a live guard failure.
+    const checkpoint = buildDevelopmentCheckpoint(baseJob({
+      status: 'completed',
+      phase: 'review_ready',
+      failureCategory: 'GUARD_FAILURE',
+    }));
+    expect(checkpoint.validation.guard).toBe('UNKNOWN');
+  });
+
+  it('reports a currently-active guard failure', () => {
+    const checkpoint = buildDevelopmentCheckpoint(baseJob({
+      phase: 'recovery_ready',
+      failureCategory: 'POLICY_FAILURE',
+    }));
+    expect(checkpoint.validation.guard).toBe('FAILING');
+  });
+
   it('surfaces a human_required phase as a blocker', () => {
     const checkpoint = buildDevelopmentCheckpoint(baseJob({ phase: 'human_required', error: 'Needs sign-off.' }));
     expect(checkpoint.blockers).toContain('Needs sign-off.');

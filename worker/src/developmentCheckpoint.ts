@@ -66,7 +66,16 @@ export function buildDevelopmentCheckpoint(job: DeveloperJob): DevelopmentCheckp
       : job.phase === 'recovery_ready' || job.phase === 'human_required'
         ? 'FAILING'
         : 'UNKNOWN';
-  const guard = job.failureCategory === 'GUARD_FAILURE' || job.failureCategory === 'POLICY_FAILURE' ? 'FAILING' : 'UNKNOWN';
+  // Guarded by `ci !== 'PASSING'`, not just the presence of a guard-related
+  // failureCategory: that field persists from the most recent recovery even
+  // after a later successful CI run (job.failureCategory is never cleared
+  // on success), so without this check a job that already fixed its guard
+  // violation and reached review_ready would still project a live guard
+  // failure here. completionJudge.ts's evaluateDeterministicCompletion()
+  // guards the same way (guardPassing = ciPassing || ...) for the same
+  // reason — keep both in agreement.
+  const guardFailing = job.failureCategory === 'GUARD_FAILURE' || job.failureCategory === 'POLICY_FAILURE';
+  const guard = guardFailing && ci !== 'PASSING' ? 'FAILING' : 'UNKNOWN';
 
   const blockers: string[] = [];
   if (job.phase === 'human_required') blockers.push(job.error || 'Human approval required.');
