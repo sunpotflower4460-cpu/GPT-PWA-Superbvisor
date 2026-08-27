@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getWorkflowRunJobs, type GitHubEnv } from './githubExecutor';
+import { getWorkflowRunJobs, listRecentWorkflowEvents, type GitHubEnv } from './githubExecutor';
 
 const env: GitHubEnv = {
   GITHUB_TOKEN: 'test-token',
@@ -87,6 +87,52 @@ describe('getWorkflowRunJobs', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     await expect(getWorkflowRunJobs(env, 'someone-else/other-repo', 1)).rejects.toThrow('not allowlisted');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('listRecentWorkflowEvents', () => {
+  it('calls the repo-wide Actions run-history API (not scoped to a branch) and returns distinct event types', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      expect(url).toBe('https://api.github.com/repos/sunpotflower4460-cpu/GPT-template/actions/runs?per_page=50');
+      return jsonResponse({
+        workflow_runs: [
+          { event: 'push' },
+          { event: 'pull_request' },
+          { event: 'push' },
+          { event: 'schedule' },
+        ],
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const events = await listRecentWorkflowEvents(env, 'sunpotflower4460-cpu/GPT-template');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(new Set(['push', 'pull_request', 'schedule']));
+  });
+
+  it('returns an empty set for a repository with no workflow run history yet', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ workflow_runs: [] })));
+    const events = await listRecentWorkflowEvents(env, 'sunpotflower4460-cpu/GPT-template');
+    expect(events).toEqual(new Set());
+  });
+
+  it('clamps an out-of-range perPage into the API-accepted 1-100 window', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe('https://api.github.com/repos/sunpotflower4460-cpu/GPT-template/actions/runs?per_page=100');
+      return jsonResponse({ workflow_runs: [] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await listRecentWorkflowEvents(env, 'sunpotflower4460-cpu/GPT-template', 500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a repository that is not allowlisted before making any request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(listRecentWorkflowEvents(env, 'someone-else/other-repo')).rejects.toThrow('not allowlisted');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

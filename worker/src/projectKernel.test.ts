@@ -1,11 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  detectProjectKernel,
   getCheckNamesByCategory,
   getMaintainerMode,
   parseProjectKernel,
   requiresDraftPrFirst,
   resolveContextRoutingPaths,
 } from './projectKernel';
+import type { GitHubEnv } from './githubExecutor';
 
 // contextRouting entries are KEYS into `paths` (e.g. "soul" -> paths.soul),
 // not literal repository paths. This mirrors the contract GPT-template's
@@ -142,6 +144,66 @@ describe('getMaintainerMode', () => {
   it('returns the declared mode when present and valid', () => {
     const parsed = parseProjectKernel(JSON.stringify({ ...validManifest, governance: { maintainerMode: 'SOLO_MAINTAINER' } }));
     expect(getMaintainerMode(parsed)).toBe('SOLO_MAINTAINER');
+  });
+});
+
+const detectionEnv: GitHubEnv = { GITHUB_TOKEN: 'test-token', GITHUB_ALLOWED_REPOS: 'sunpotflower4460-cpu/x' };
+
+function jsonFileResponse(content: string) {
+  return new Response(JSON.stringify({
+    type: 'file',
+    encoding: 'base64',
+    content: Buffer.from(content, 'utf-8').toString('base64'),
+    sha: 'x',
+    size: content.length,
+  }), { status: 200 });
+}
+
+// detectProjectKernel had zero test coverage before this block — every
+// prior "cross-repo contract" test below calls parseProjectKernel() on a
+// string directly, never exercising detectProjectKernel's own network
+// path. That gap is exactly how a real bug shipped silently: readFile()
+// used to call assertSafeBranch(ref), which only permits the Worker's own
+// ai-dev-deck/* branches — but detectProjectKernel is always called with
+// workspace.defaultBranch (e.g. "main"), so the project-kernel.json lookup
+// threw on every single call, silently caught by developerAgent.ts's
+// best-effort wrapper and misreported as GENERIC_REPO every time. Project
+// Kernel detection never actually worked in production until that read-only
+// restriction was removed from readFile/listTree in githubExecutor.ts.
+describe('detectProjectKernel', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('detects KERNEL_AWARE against a real default branch ref (not an ai-dev-deck/* branch)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonFileResponse(JSON.stringify(MINIMAL_VALID_KERNEL_MANIFEST))));
+    const result = await detectProjectKernel(detectionEnv, 'sunpotflower4460-cpu/x', 'main');
+    expect(result.mode).toBe('KERNEL_AWARE');
+    expect(result.manifest?.paths).toEqual({ readme: 'README.md' });
+  });
+
+  it('falls back to GENERIC_REPO with inferredContract when no manifest exists', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/actions/runs?')) return new Response(JSON.stringify({ workflow_runs: [{ event: 'push' }] }), { status: 200 });
+      if (url.includes('/contents/package.json')) return jsonFileResponse(JSON.stringify({ scripts: { test: 'vitest run' } }));
+      return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await detectProjectKernel(detectionEnv, 'sunpotflower4460-cpu/x', 'main');
+    expect(result.mode).toBe('GENERIC_REPO');
+    expect(result.reason).toBe('not_found');
+    expect(result.manifest).toBeUndefined();
+    expect(result.inferredContract?.runtime).toEqual({ setup: 'npm install --no-package-lock', test: 'npm test' });
+  });
+
+  it('does not fall back to inference when a manifest exists but fails to parse (a real authoring error, not silently papered over)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonFileResponse(JSON.stringify({ schemaVersion: 2, kind: 'ai-project-kernel' }))));
+    const result = await detectProjectKernel(detectionEnv, 'sunpotflower4460-cpu/x', 'main');
+    expect(result.mode).toBe('GENERIC_REPO');
+    expect(result.reason).toBe('unsupported_schema');
+    expect(result.inferredContract).toBeUndefined();
   });
 });
 
