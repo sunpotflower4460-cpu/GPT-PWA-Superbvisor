@@ -19,7 +19,8 @@
 - 1・2はCloudflareアカウントでのWorker/Bridge deployが前提です。GitHub tokenは
   Guardian(GitHub連携)専用の別設定で、Coordinator/Chat Control Bridgeのどちらにも不要です。
 - 3のうち**3-1(PWAインストール)だけ**はWorker未設定でも確認できます。3-2(Push)・3-3(再接続)は
-  Worker設定が前提、3-4(複数端末)はさらに§1でAtomic Coordinatorが有効であることが前提です。
+  Worker設定が前提、3-4(複数端末)はさらに§1でAtomic Coordinatorが有効であること、かつ
+  3-4手順5の配送完了後チェックには§2でBridgeが接続済みであることが前提です。
 
 Chatだけで使っている場合は3-1のみ先に確認できますが、3-2以降・1・2はWorkerを設定してから
 着手してください。
@@ -152,12 +153,26 @@ curl -X POST https://<your-worker>.workers.dev/api/chat-commands \
   閉じた端末のPWAが起動していなくても指示が配送されることを確認する。
 - **再送の重複がないこと(通常配送)**: 配送成功後、同じ指示が2重に会話へ投稿されていないことを確認する。
 - **delivery receipt再同期(host送信成功・Worker ack失敗)**: 上の3つとは別の、より狭いシナリオ。
-  ChatGPTへ指示が実際に投稿された直後(会話に文字が表示された直後)、Bridgeが結果をWorkerへ
-  報告し終える前を狙って、ChatGPTを実行している端末を一瞬オフラインにする(機内モードON→数秒後OFF)。
-  Bridgeが再びオンラインになった時、**同じ指示がもう一度ChatGPTへ重複投稿されず**、
-  Worker側のcommand状態が正しく `delivered` 系へ収束することを確認する。
-  タイミングがシビアなため、1回で再現しなくても構わない(再現できた場合のみ合格として記録し、
-  再現できなかった場合は「未検証」と明記する)。
+  `bridgeApp.ts`は`sendFollowUpMessage()`が成功した直後、同じ処理の流れの中で間を置かず
+  結果報告(`/result`)を呼ぶ。会話に文字が表示されてから人間が反応してオフラインにしても、
+  その一瞬の間に結果報告はほぼ確実に完了済みであり、「投稿直後・報告完了前」の狭い窓を
+  反応時間で狙い撃つことは実質不可能——このシナリオを反応頼みで検証しようとすると、
+  ほぼ常に「たまたま普通に成功しただけ」を合格と誤認する。
+
+  ChatGPT Developer Mode(私的アプリ)をデスクトップブラウザで接続している場合は、
+  ブラウザのDevTools(Network タブ → Network request blocking)で
+  `*/api/chat-commands/*/result` のようなパターンを**指示を送る前にあらかじめblockしておく**。
+  1. 上記patternをblockした状態でChat Controlから指示を1件送る。
+  2. ChatGPT側に指示が投稿される(会話に文字が表示される)ことを確認する。
+  3. Bridge widgetが「結果同期待ち」の表示になり、結果報告が失敗し続けることを確認する。
+  4. DevTools側でblockを解除する。
+  5. Bridgeが自動的にreceiptを再送し、**同じ指示が重複投稿されないまま**Worker側の
+     command状態が`delivered`系へ収束することを確認する。
+
+  ChatGPTのネイティブアプリ(DevToolsが使えない環境)で確認する場合は、この手順は使えず、
+  機内モードのタイミングに頼るしかない。その場合は再現しなくても構わない(再現できた場合のみ
+  合格として記録し、再現できなかった場合は「未検証」と明記する)。デスクトップブラウザで
+  検証できる環境がある場合は、そちらでの確定的な確認を優先すること。
 
 ### 合格条件
 
@@ -223,7 +238,11 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
 2. オフラインのまま、**別の端末・別クライアント**から、その端末が確認できる既知の変化を
    1つ意図的に起こす(例: Chat Controlで指示を1件キューする、GuardianのあるCI失敗を
    再確認させる、など)。「たまたま何か進んでいたら確認する」のではなく、確認対象を
-   先に決めておく。
+   先に決めておく。ここで言う「別の端末」で別のPWAインストールを使う場合、その場で
+   同じ名前の案件を作り直しても別のproject IDになり、オフライン端末が見ている案件とは
+   別のCoordinatorへ向けてしまう(3-4で詳しく扱う制約と同じ)。案件を新たにUIで
+   作り直さず、2章と同様にオフライン端末側で確認済みのproject ID/chat URLへ直接
+   `curl`でキューする(または3-4のCloud Syncで同一project IDを共有した端末を使う)こと。
 3. オンラインに戻し、PWAを開き直す。
 4. **診断**を再実行し、Supervisor Workerが再度PASSになることを確認する。
 5. 手順2で起こした**その特定の変化**が、この端末にも正しく反映されていることを確認する
@@ -245,42 +264,56 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
 
 3. **Cloud State revision競合の確認**: 手動保存ボタン(「この端末 → Cloudへ保存」)の
    競合エラーはUI上ほぼ即座に消えてしまい(保存失敗直後に呼ばれる状態確認処理が
-   エラー表示を上書きするため)、この確認には使えない。代わりに**両端末でAuto Sync
-   (自動同期)をON**にすること。
+   エラー表示を上書きするため)、この確認には使えない。また両端末のAuto Sync
+   (`autoSyncOnce`、`src/DataBackupCenter.tsx`)は**保存の直前に毎回最新revisionを
+   取得し直す**設計のため、編集するタイミングを人間の感覚でどれだけ近づけても、
+   片方の自動同期が完了してからもう片方が始まるだけの単なる直列実行になりやすく、
+   revision競合そのものが起きないまま両方成功してしまうことが多い(45秒debounce+
+   別々のタイマーで動くため、真の同時実行にはならない)。そのため**Coordinatorの
+   atomic revision arbitrationそのものは、まずcurlで確定的に再現させる**。
 
-   マージ処理(`mergeNewestBackup`、`src/DataBackupCenter.tsx`)は案件を**project ID単位で
-   丸ごと**マージし、同じIDの案件が両端末にある場合は `lastActivityAt` が新しい方の
-   レコードを丸ごと採用する(フィールド単位のマージではない)。そのため**同じ案件の
-   別々のフィールドを両端末で変えても、両方は残らない**(新しい方の端末の変更だけが残るのが
-   正しい挙動になり、「両方残るべき」という期待値が成立しない)。データを失わずにマージ
-   できることを確認するには、**別々の案件(別のproject ID)**を使う必要がある。
+   `SUPERVISOR_STATE`の`/api/state-sync`は`data`が最小限のbackup envelope形式
+   (`schema`/`version`/`projects`等の必須フィールド)であることだけを検証するため、
+   実際の案件データを使わなくても検証できる。
+
+   ```bash
+   REVISION=$(curl -s https://<your-worker>.workers.dev/api/state-sync \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" | grep -o '"revision":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+   curl -s -X POST https://<your-worker>.workers.dev/api/state-sync \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d "{\"deviceId\":\"e2e-device-a\",\"baseRevision\":\"$REVISION\",\"data\":{\"schema\":\"gpt-pwa-supervisor.backup\",\"version\":1,\"data\":{\"projects\":[],\"operatingPlans\":{},\"handoffs\":[],\"notifications\":[],\"watchdog\":{}}}}" > /tmp/state-a.json &
+   curl -s -X POST https://<your-worker>.workers.dev/api/state-sync \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d "{\"deviceId\":\"e2e-device-b\",\"baseRevision\":\"$REVISION\",\"data\":{\"schema\":\"gpt-pwa-supervisor.backup\",\"version\":1,\"data\":{\"projects\":[],\"operatingPlans\":{},\"handoffs\":[],\"notifications\":[],\"watchdog\":{}}}}" > /tmp/state-b.json &
+   wait
+   cat /tmp/state-a.json /tmp/state-b.json
+   ```
+
+   同じ`baseRevision`から同時に送った2件のうち、片方が新しい`state`(200相当)を返し、
+   もう片方が`revision_conflict`エラー(409)を返すことを確認する。両方成功してしまう
+   場合、Coordinatorのatomicな compare-and-update自体が壊れている。
+   **この時点でCloud State本体のrevisionが書き換わっている**ので、後述のUI確認を
+   続けて行う場合は、この直後に両端末で実機のAuto SyncまたはCloud Syncを一度
+   動かして同期し直しておくこと。
+
+   上記でCoordinator自体の保証は確定的に確認できるが、**実機のAuto Syncが実際に
+   競合を検出してUIへ通知する**ところまで見たい場合は、参考として以下も試すとよい
+   (ただし前述の理由でタイミング次第では再現しないことがあり、その場合はここまでの
+   curlでの確認だけで合格として扱ってよい):
 
    両端末が一度同じrevisionまで自動同期された状態から、Auto Syncが次に同期する前に、
    端末Aは共有中の案件(1台目と同じproject ID)の**工程(automation level)ボタンを
    別の値に変更する**(案件名は作成時にしか設定できず、既存案件を開いた画面には
    rename機能がないため、実際にUIから編集できるこのフィールドを使う)。端末Bは
-   **それとは別の新しい案件をローカルで作成する**(端末Bだけのローカル案件でよく、
-   project IDが共有案件と違う限り新規作成で構わない)。
-   片方の自動同期が先に成功し、もう片方が「Cloud Sync: 競合を検出」という通知
-   (Supervisor Inboxに残る。自動上書きしない)を受け取ることを確認する。
-   タイミングが揃わず両方成功してしまった場合は、変更する間隔を詰めて再試行する。
-   両方が無条件に成功して片方の変更が黙って消えてしまう場合は不合格。
-
-   競合を確認したら、負けた側の端末で通知の案内どおり「設定 → データバックアップ →
-   Cloudから安全にマージ」を実行する。この操作(`mergeCloudIntoDevice`、
-   `src/DataBackupCenter.tsx`)は**マージ結果をこの端末のローカルにしか書き込まない**
-   (Cloudへの反映は次回のAuto Sync送信を待つ)ため、負けた側の端末だけを見て
-   「共有案件のautomation level変更と端末Bの別案件、両方が消えずに残っている」ことを
-   確認しただけでは不十分——Cloud本体や勝った側の端末に伝播したかどうかは別問題であり、
-   その後方の伝播経路が壊れていてもこの時点では気づけない。したがって:
-   - 負けた側の端末で上記マージ後の内容を確認したら、その端末のAuto Syncが次に
-     Cloudへ送信するまで待つ(または手動で「この端末 → Cloudへ保存」を実行する)。
-   - 勝った側の端末でも次のAuto Syncが実行されるのを待つ(または手動でCloudから取得する)。
-   - **勝った側の端末でも**、共有案件のautomation level変更と端末Bの別案件の両方が
-     消えずに反映されていることを確認する。
-   ここまで確認して初めて、両端末とCloud本体が矛盾なく収束したと言える。競合通知が
-   出た時点や負けた側の端末だけで確認を止めると、マージ処理自体やその後の伝播が
-   壊れていて片方の変更を黙って消していても見逃す。
+   **それとは別の新しい案件をローカルで作成する**(project IDが共有案件と違う限り
+   新規作成で構わない)。マージ処理(`mergeNewestBackup`)は案件をproject ID単位で
+   丸ごとマージするため、同じ案件の別々のフィールドを両端末で変えても両方は残らない
+   (新しい方の端末の変更だけが残るのが正しい挙動)。片方の自動同期が先に成功し、
+   もう片方が「Cloud Sync: 競合を検出」という通知を受け取れば、負けた側の端末で
+   「設定 → データバックアップ → Cloudから安全にマージ」を実行し、その後両端末が
+   Auto Syncするまで待って、**両端末とも**共有案件のautomation level変更と端末Bの
+   別案件の両方が残っていることを確認する。
 4. 一方の端末からChat Controlで指示をキューする。
 5. もう一方の端末で、その指示が実際にキューされたことを確認する。
    overviewは接続状態・件数・最新timestampなどの集約metadataしか持たないため、
@@ -362,26 +395,33 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
    2つの異なる `bridgeId` で `POST /api/chat-commands/claim` を直接、シェルの `&` で
    ほぼ同時に発火させる。
 
+   両方のレスポンスが同じ端末の同じ画面に混ざって出力されるため、出力順だけでどちらが
+   勝ったかを判断しない(shellのjob起動順は応答順を保証しない)。それぞれ別ファイルへ
+   redirectしておく。
+
    ```bash
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/claim \
      -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
-     -d '{"bridgeId":"e2e-bridge-a","projectId":"<project-id>"}' &
+     -d '{"bridgeId":"e2e-bridge-a","projectId":"<project-id>"}' > /tmp/claim-a.json &
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/claim \
      -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
-     -d '{"bridgeId":"e2e-bridge-b","projectId":"<project-id>"}' &
+     -d '{"bridgeId":"e2e-bridge-b","projectId":"<project-id>"}' > /tmp/claim-b.json &
    wait
+   cat /tmp/claim-a.json /tmp/claim-b.json
    ```
 
    片方だけが**手順で控えた`<race-command-id>`と同じ** `command.id` を受け取り、もう片方は
-   空(claimするcommandなし)を返すことを確認する。ここで`command.id`が
-   `<race-command-id>`と一致するかまで見るのは、事前確認をすり抜けた別のcommandを
-   誤って「片方だけが受け取った」と判定しないため。両方が同じcommandを受け取ってしまう
-   場合は不合格。
+   空(`{"command":null}`)を返すことを確認する。ここで`command.id`が`<race-command-id>`と
+   一致するかまで見るのは、事前確認をすり抜けた別のcommandを誤って「片方だけが受け取った」と
+   判定しないため。両方が同じcommandを受け取ってしまう場合は不合格。
 
-   確認できたら**必ず**、勝った側の `bridgeId` を使って、この`<race-command-id>`を
-   終端状態にしておく。claimしたまま結果報告しないと2分後にstale claimとして
-   再claim可能に戻り、後で実際のBridgeを再接続した際にこのテスト用プロンプトが
-   本物のChatGPT会話へ誤配送されてしまう。
+   確認できたら**必ず**、`command.id`を含んでいた方のファイルの `command.bridgeId`
+   (`e2e-bridge-a`か`e2e-bridge-b`のどちらか、実際にclaimした側のIDがレスポンスに
+   含まれている)を使って、この`<race-command-id>`を終端状態にしておく。**勝った方と
+   逆のbridgeIdを指定すると`claim_owner_mismatch`で失敗し、本来の勝者側のclaimは
+   未解決のまま残る**ので、必ずファイルの中身から実際の勝者を確認すること。claimした
+   まま結果報告しないと2分後にstale claimとして再claim可能に戻り、後で実際のBridgeを
+   再接続した際にこのテスト用プロンプトが本物のChatGPT会話へ誤配送されてしまう。
 
    ```bash
    curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/<race-command-id>/result \
