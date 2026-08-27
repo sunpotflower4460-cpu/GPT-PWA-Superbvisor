@@ -14,8 +14,14 @@
 `chatgpt-bridge/README.md`(Bridge deploy)の**手順そのもの**はこの文書では繰り返さず、
 「何を確認すれば閉じたと言えるか」だけをここにまとめます。設定コマンド自体は各READMEを参照してください。
 
-各セクションは独立しています。1と2は環境構築(Cloudflareアカウント・GitHub token等)が
-前提になるため、Chatだけで使っている場合は3から始めても構いません。
+セクション間の依存関係:
+
+- 1・2はCloudflareアカウント・GitHub token等の環境構築が前提です。
+- 3のうち**3-1(PWAインストール)だけ**はWorker未設定でも確認できます。3-2(Push)・3-3(再接続)は
+  Worker設定が前提、3-4(複数端末)はさらに§1でAtomic Coordinatorが有効であることが前提です。
+
+Chatだけで使っている場合は3-1のみ先に確認できますが、3-2以降・1・2はWorkerを設定してから
+着手してください。
 
 ---
 
@@ -115,8 +121,11 @@ window.openai.sendFollowUpMessage → 同じChatGPT会話` という実配送経
 
 - **Widget休止からの復帰**: ChatGPTアプリ/タブをバックグラウンドにして数分放置し、
   前面に戻す。復帰後にqueueされていた指示が配送されることを確認する。
-- **PWAを閉じた状態での配送**: PWAを閉じてから案件へ指示をキューし(または閉じる前にキューし)、
-  Bridge接続中のChatGPTだけで配送されることを確認する。
+- **PWAを閉じた状態での配送**: 検証対象の端末でPWAを完全に閉じたことを確認したうえで、
+  **別の端末・別ブラウザから**その案件へ指示をキューする。
+  (同じ端末で「キューしてから閉じる」順序だと、閉じる前に接続中のBridgeが即座にclaim・配送してしまう
+  可能性があり、「閉じた状態での配送」の検証にならない。)
+  閉じた端末のPWAが起動していなくても指示が配送されることを確認する。
 - **再送の重複がないこと**: 配送成功後、同じ指示が2重に会話へ投稿されていないことを確認する。
 
 ### 合格条件
@@ -144,15 +153,31 @@ window.openai.sendFollowUpMessage → 同じChatGPT会話` という実配送経
 ### 3-2. Web Push実機確認
 
 1. Worker側にVAPID設定済みであることを確認する(`worker/README.md` 「5. Web Push / VAPID」)。
-2. PWAの通知Inboxから通知を有効化する(内部的に `enablePushNotifications` を呼ぶ)。
+2. 検証対象の端末で、PWAの通知Inboxから通知を有効化する(内部的に `enablePushNotifications` を呼ぶ)。
    ブラウザの通知許可ダイアログで **許可** を選択する。
-3. 通知Inboxから **テストPush送信**(`sendTestPush`)を実行する。
-4. PWAを完全に閉じた状態(アプリ切り替えからも消す、またはOSのバックグラウンド制限を確認)で、
-   実機の通知センターにテスト通知が届くことを確認する。
-5. 通知をタップし、対象案件のSupervisor Inboxへ実際に遷移することを確認する。
+3. **診断** で `Web Push購読` がPASSになったら、検証対象の端末でPWAを完全に閉じる
+   (アプリ切り替えからも消す)。
+4. **閉じた端末以外から**テストPushを送る。`sendTestPush`(`/api/push/test`)はWorkerに
+   登録されている全端末へ配信するため、閉じた端末自身でボタンを押すと「閉じる前に送信済み」に
+   なってしまい検証にならない。次のどちらかを使う。
+   - 別の端末・別ブラウザでもPWAを開いており通知購読済みなら、そちらの通知Inboxから
+     **テストPush送信** を実行する。
+   - または直接APIを叩く。
+
+     ```bash
+     curl -X POST https://<your-worker>.workers.dev/api/push/test \
+       -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>"
+     ```
+
+5. 閉じておいた端末の実機通知センターにテスト通知が届くことを確認する。
+
+テストPush(`/api/push/test`)は `projectId` を持たないため、タップすると常に汎用の
+Supervisor Inbox(`?supervisor=inbox`)へ遷移する。案件別の遷移まで確認したい場合は、
+このテストPushではなくGuardian/Watchdogが実際に発行する案件紐付きの通知
+(例: `WAITING_USER`到達時のPush)を使うこと。
 
 合格条件: **診断** の `通知権限` と `Web Push購読` が両方PASSになり、
-テストPushが実機の通知センターに届く。
+PWAを閉じた状態でテストPushが実機の通知センターに届く。
 
 ### 3-3. 再接続(reconnect)確認
 
@@ -164,13 +189,38 @@ window.openai.sendFollowUpMessage → 同じChatGPT会話` という実配送経
 
 ### 3-4. 複数端末(multi-device)確認
 
-1. 同じWorker・同じ案件を、2台目の端末(または同一端末の別ブラウザプロファイル)からも
-   同じ `SUPERVISOR_CLIENT_TOKEN` で開く。
-2. 一方の端末からChat Controlで指示をキューする。
-3. もう一方の端末でも、その指示・状態が(overview経由で)確認できることを確認する。
-4. 可能であれば、ほぼ同時に両端末から同じ案件へ指示を送り、
-   `PROJECT_COORDINATOR` のdedupe/claim調停によって二重配送・競合が起きないことを確認する。
-   (§1でAtomic Coordinatorが有効になっていることが前提です。)
+**前提**: §1でAtomic Coordinatorが有効になっていること(KV fallbackのままではatomicな
+重複防止が保証されません)。
+
+1. 1台目の端末で案件を登録し、**データバックアップ画面の ☁ Cloud Sync** でこの端末のデータを
+   Cloudへ保存する。
+2. 2台目の端末(または同一端末の別ブラウザプロファイル)で同じ `SUPERVISOR_CLIENT_TOKEN` を設定し、
+   Cloud Syncで**1台目と同じデータ(同じproject ID)を取り込む**。
+
+   案件登録は端末ローカルのlocalStorageに保存され、新規作成のたびに新しいIDが割り当てられる。
+   2台目で「同じ名前の案件」を作り直すと別IDになり、Coordinator側は project ID でスコープされる
+   別々のcoordinatorを検証することになってしまうため、Cloud Syncで**同一IDのまま**共有すること。
+
+3. 一方の端末からChat Controlで指示をキューする。
+4. もう一方の端末でも、その指示・状態が(overview経由で)確認できることを確認する。
+5. **enqueue dedupeの確認**: PWAのUIは送信のたびに端末ローカルの乱数dedupe keyを生成するため、
+   2台から「同じ指示」を送ってもdedupe keyは別々になり検証にならない。同じdedupe keyを直接APIで
+   2回送って確認する。
+
+   ```bash
+   curl -X POST https://<your-worker>.workers.dev/api/chat-commands \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"dedupe test","dedupeKey":"e2e-dedupe-test-1"}'
+   ```
+
+   同じ `dedupeKey` でもう一度実行し、新しいcommandが作られず**同じcommand IDが返る**ことを確認する。
+
+6. **claim競合の確認**: 2台のBridge(2章で接続したChatGPT会話を2つ用意するか、Bridgeを2箇所へ
+   deployする)を同じprojectへ接続した状態で、上記5でキューした1件のcommandに対し、
+   片方のBridgeだけがclaimし、もう片方が同じcommandを二重配送しないことを確認する。
+   (2台の端末から**別々の**指示をほぼ同時に送る方法は、それぞれ独立したcommandになるため
+   claim競合の検証にはならない。)
 
 ### 合格条件(3全体)
 
