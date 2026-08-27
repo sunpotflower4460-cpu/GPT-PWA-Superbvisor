@@ -9,6 +9,7 @@ import {
 import { buildDevelopmentCheckpoint } from './developmentCheckpoint';
 import { buildCompletionCertificate } from './completionJudge';
 import { createCiExecutionFabric } from './executionFabric';
+import { getWorkflowRunJobs } from './githubExecutor';
 import {
   CreateGuardianRunBody,
   advanceGuardianRun,
@@ -119,9 +120,27 @@ export default {
       // executionFabric.ts's own note on why LOCAL_FAST/ISOLATED are not
       // faked here. `phases` isolates evidence by check name when the
       // target repo's own CI check names allow it (e.g. a job literally
-      // named "playwright" surfaces under `browser`); `logs` is the flat,
-      // unfiltered per-check view underneath that.
-      const fabric = createCiExecutionFabric(job.ciChecks, Boolean(job.ciChecks?.length));
+      // named "playwright" surfaces under `browser`).
+      //
+      // job.ciChecks is workflow-RUN-level (getBranchWorkflowRuns — one
+      // entry per GitHub Actions workflow, e.g. a single entry named "CI"),
+      // not per-job. That's the right granularity for assessCi()'s overall
+      // pass/fail/pending gating, but it is USELESS for phase isolation on
+      // a repo (like this one) that runs several jobs inside one workflow
+      // — every job.name would be the same generic workflow name and
+      // PHASE_KEYWORDS would never match anything but the aggregate
+      // fallback. Fetch the actual job-level names for each known run
+      // (same getWorkflowRunJobs used elsewhere for Kernel category
+      // matching) so `phases` reflects real per-job evidence; best-effort
+      // per run (a run whose jobs fail to fetch just falls out of the
+      // phase view, same pattern as the CI-failure reconciliation in
+      // developerAgent.ts), falling back to the workflow-run-level list
+      // only if no job-level data could be fetched at all.
+      const runs = job.ciChecks ?? [];
+      const jobLevelResults = await Promise.allSettled(runs.map((run) => getWorkflowRunJobs(env, job.repository, run.id)));
+      const jobLevelChecks = jobLevelResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
+      const checksForFabric = jobLevelChecks.length ? jobLevelChecks : runs;
+      const fabric = createCiExecutionFabric(checksForFabric, Boolean(runs.length));
       const [test, typecheck, build, browser, logs] = await Promise.all([
         fabric.runTest(),
         fabric.runTypecheck(),
