@@ -11,6 +11,7 @@ import {
 } from './githubExecutor';
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
+  AutopilotRouteState,
   CiCheckLike,
   applyDeclaredCategoryOverride,
   applyHumanApprovalOverride,
@@ -18,9 +19,12 @@ import {
   buildAutopilotRouteContinuationPrompt,
   buildChatGptHandoff,
   buildRecoveryPrompt,
+  extractAutopilotRouteStep,
   failureFingerprint,
   hasAutopilotRouteCompletionMarker,
   hasAutopilotRouteContract,
+  markAutopilotRouteCompleted,
+  recordAutopilotRouteCheckpoint,
 } from './orchestratorPolicy';
 import { PushEnv, sendSupervisorPush } from './push';
 import { enqueueChatCommand } from './chatCommandQueue';
@@ -114,6 +118,11 @@ export interface DeveloperJob {
   // fallback (missing/invalid keys, network errors, etc.) that needs a
   // human to actually fix something.
   orchestratorRateLimited?: boolean;
+  // Structured Autopilot Route progress, persisted independently of the
+  // chat's own conversational memory (docs/ARCHITECTURE.md §10 gap #4).
+  // Only ever set for a job whose prompt carries the route contract
+  // (hasAutopilotRouteContract) — absent for every ordinary job.
+  autopilotRoute?: AutopilotRouteState;
   chatUrl?: string;
   autoDispatch: boolean;
   lastQueuedHandoffFingerprint?: string;
@@ -409,6 +418,12 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   }
 
   if (hasAutopilotRouteContract(job.prompt) && !hasAutopilotRouteCompletionMarker(repo.headCommitMessage)) {
+    const autopilotRoute = recordAutopilotRouteCheckpoint(
+      job.autopilotRoute,
+      repo.headSha,
+      new Date().toISOString(),
+      extractAutopilotRouteStep(repo.headCommitMessage),
+    );
     const continuationPrompt = buildAutopilotRouteContinuationPrompt({
       repository: job.repository,
       branch: job.workspace.branch,
@@ -416,6 +431,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       originalTask: job.prompt,
       headSha: repo.headSha,
       checks,
+      routeState: autopilotRoute,
     });
     job = {
       ...job,
@@ -424,6 +440,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       error: undefined,
       handoffPrompt: continuationPrompt,
       outputText: '現在headのCIは成功しました。AUTOPILOT ROUTEの途中チェックポイントとして扱い、完了済み工程を飛ばさず次の未完了工程へ進むChatGPT指示を準備しました。',
+      autopilotRoute,
       updatedAt: new Date().toISOString(),
     };
     await saveJob(env, job);
@@ -453,6 +470,9 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     outputText: hasAutopilotRouteContract(job.prompt)
       ? 'AUTOPILOT ROUTE完了マーカーと現在headのCI成功を確認しました。全ルート終了後のレビュー可能状態です。'
       : '現在headのCI成功を確認しました。実装はChatGPTが行い、Workerは監督・CI確認・Draft PR準備のみを担当しました。',
+    autopilotRoute: hasAutopilotRouteContract(job.prompt)
+      ? markAutopilotRouteCompleted(job.autopilotRoute, new Date().toISOString())
+      : job.autopilotRoute,
     updatedAt: new Date().toISOString(),
   };
   await saveJob(env, job);
@@ -504,6 +524,7 @@ async function prepareRecovery(
     checks,
     previousSummary: job.outputText,
     declaredCategories,
+    routeState: job.autopilotRoute,
   });
   const decision = await runOrchestrationModel(env, {
     mode: 'RECOVER',

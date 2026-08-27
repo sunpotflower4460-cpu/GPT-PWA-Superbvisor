@@ -1,6 +1,6 @@
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 import { DevProject } from './core';
-import { DeveloperJobPhase } from './developerAgent';
+import { AutopilotRouteState, DeveloperJobPhase } from './developerAgent';
 
 export interface GuardianCiCheck {
   id?: number;
@@ -40,6 +40,7 @@ export interface GuardianRun {
   recoveryCount?: number;
   degradedOrchestration?: boolean;
   orchestratorRateLimited?: boolean;
+  autopilotRoute?: AutopilotRouteState;
   notifiedAt?: string;
 }
 

@@ -9,10 +9,13 @@ import {
   buildChatGptHandoff,
   buildGenericChatGptHandoff,
   buildRecoveryPrompt,
+  extractAutopilotRouteStep,
   failureFingerprint,
   hasAutopilotRouteCompletionMarker,
   hasAutopilotRouteContract,
   isRetryableProviderStatus,
+  markAutopilotRouteCompleted,
+  recordAutopilotRouteCheckpoint,
 } from './orchestratorPolicy';
 
 const base = {
@@ -353,5 +356,69 @@ describe('autopilot route contract', () => {
     });
     expect(prompt).toContain('完了済み工程を最初から再実行せず');
     expect(prompt).toContain('後続工程が残っている限り最終完了ではありません');
+  });
+
+  it('extracts a verbatim self-reported route step without interpreting it', () => {
+    expect(extractAutopilotRouteStep('feat: fix bug [AUTOPILOT_ROUTE_STEP: 3回デバッグ 2/3回目]')).toBe('3回デバッグ 2/3回目');
+    expect(extractAutopilotRouteStep('feat: fix bug')).toBeUndefined();
+    expect(extractAutopilotRouteStep(undefined)).toBeUndefined();
+    expect(extractAutopilotRouteStep('feat: fix [AUTOPILOT_ROUTE_STEP:   ]')).toBeUndefined();
+  });
+
+  it('records a checkpoint per distinct head, independent of any chat text', () => {
+    const first = recordAutopilotRouteCheckpoint(undefined, 'sha1', '2026-01-01T00:00:00Z', 'step 1');
+    expect(first.checkpoints).toEqual([{ headSha: 'sha1', reachedAt: '2026-01-01T00:00:00Z', step: 'step 1' }]);
+
+    const second = recordAutopilotRouteCheckpoint(first, 'sha2', '2026-01-01T01:00:00Z', undefined);
+    expect(second.checkpoints).toHaveLength(2);
+    expect(second.checkpoints[1]).toEqual({ headSha: 'sha2', reachedAt: '2026-01-01T01:00:00Z', step: undefined });
+  });
+
+  it('does not pad the checkpoint list when the same head is observed again', () => {
+    const first = recordAutopilotRouteCheckpoint(undefined, 'sha1', '2026-01-01T00:00:00Z', 'step 1');
+    const again = recordAutopilotRouteCheckpoint(first, 'sha1', '2026-01-01T00:05:00Z', 'step 1 (re-observed)');
+    expect(again).toBe(first);
+    expect(again.checkpoints).toHaveLength(1);
+  });
+
+  it('caps checkpoint history to the most recent 20 entries', () => {
+    let state = recordAutopilotRouteCheckpoint(undefined, 'sha0', '2026-01-01T00:00:00Z', undefined);
+    for (let i = 1; i <= 25; i += 1) {
+      state = recordAutopilotRouteCheckpoint(state, `sha${i}`, `2026-01-01T00:${i}:00Z`, undefined);
+    }
+    expect(state.checkpoints).toHaveLength(20);
+    expect(state.checkpoints[0].headSha).toBe('sha6');
+    expect(state.checkpoints[19].headSha).toBe('sha25');
+  });
+
+  it('marks a route completed once and keeps the first completion time on later calls', () => {
+    const withCheckpoints = recordAutopilotRouteCheckpoint(undefined, 'sha1', '2026-01-01T00:00:00Z', undefined);
+    const completed = markAutopilotRouteCompleted(withCheckpoints, '2026-01-02T00:00:00Z');
+    expect(completed.completedAt).toBe('2026-01-02T00:00:00Z');
+    expect(completed.checkpoints).toBe(withCheckpoints.checkpoints);
+
+    const stillCompleted = markAutopilotRouteCompleted(completed, '2026-01-03T00:00:00Z');
+    expect(stillCompleted.completedAt).toBe('2026-01-02T00:00:00Z');
+  });
+
+  it('threads persisted checkpoint history into the continuation and recovery prompts', () => {
+    const routeState = recordAutopilotRouteCheckpoint(undefined, 'sha1', '2026-01-01T00:00:00Z', '3回デバッグ 1/3回目');
+    const continuation = buildAutopilotRouteContinuationPrompt({
+      repository: 'owner/repo', branch: 'ai-dev-deck/task', goal: 'Finish route', originalTask: routeTask, headSha: 'sha2', checks: [base], routeState,
+    });
+    expect(continuation).toContain('過去に記録されたルートチェックポイント');
+    expect(continuation).toContain('3回デバッグ 1/3回目');
+
+    const recovery = buildRecoveryPrompt({
+      repository: 'owner/repo', branch: 'ai-dev-deck/task', goal: 'Finish route', originalTask: routeTask, headSha: 'sha2', checks: [{ ...base, conclusion: 'failure' }], routeState,
+    });
+    expect(recovery).toContain('3回デバッグ 1/3回目');
+  });
+
+  it('omits the checkpoint history section entirely when there is none yet', () => {
+    const continuation = buildAutopilotRouteContinuationPrompt({
+      repository: 'owner/repo', branch: 'ai-dev-deck/task', goal: 'Finish route', originalTask: routeTask, headSha: 'sha1', checks: [base],
+    });
+    expect(continuation).not.toContain('過去に記録されたルートチェックポイント');
   });
 });
