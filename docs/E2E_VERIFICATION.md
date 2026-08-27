@@ -33,7 +33,11 @@ Chatだけで使っている場合は3-1のみ先に確認できますが、3-2�
 - HTTPS / Secure Context: PASS であること(HTTPでない/localhostでない環境ではPush/PWAインストールが機能しない)
 - Service Worker: PASS であること(WARNの場合はページ再読み込みで解消するか確認)
 
-ここがFAILのままだと以降のPush/Bridge検証が正しく行えないため、先に解消してください。
+Service Workerの状態が影響するのは3-1(PWAインストール)と3-2(Push)だけです。
+Setup Doctor自身もService Workerを `requiredForChat: false` としており、
+Coordinator(§1)やChat Control Bridge(§2)は通常のWorker宛てfetchのみで動作し、
+PWA自身のService Workerを経由しません。Service WorkerがFAIL/WARNのままでも
+§1・§2は問題なく進められます。3-1・3-2に着手する前にだけ解消してください。
 
 ---
 
@@ -224,17 +228,29 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
    競合エラーはUI上ほぼ即座に消えてしまい(保存失敗直後に呼ばれる状態確認処理が
    エラー表示を上書きするため)、この確認には使えない。代わりに**両端末でAuto Sync
    (自動同期)をON**にすること。両端末が一度同じrevisionまで自動同期された状態から、
-   Auto Syncが次に同期する前に両端末でそれぞれ別々の変更を行う(例: 進捗メモを変える)。
+   Auto Syncが次に同期する前に両端末でそれぞれ**別々のフィールドを**変更する
+   (例: 端末Aは案件の名前を変える、端末Bは同じ案件の進捗メモを変える。同じフィールドを
+   両方が変えると、後段のマージで片方が上書きされるのが正しい挙動になり、「両方残るべき」
+   という期待値が成立しない)。
    片方の自動同期が先に成功し、もう片方が「Cloud Sync: 競合を検出」という通知
    (Supervisor Inboxに残る。自動上書きしない)を受け取ることを確認する。
    タイミングが揃わず両方成功してしまった場合は、変更する間隔を詰めて再試行する。
    両方が無条件に成功して片方の変更が黙って消えてしまう場合は不合格。
+   競合を確認したら、負けた側の端末で通知の案内どおり「設定 → データバックアップ →
+   Cloudから安全にマージ」を実行し、**両端末で行った2つの変更(名前の変更と進捗メモの変更の
+   両方)が消えずに残っている**ことを確認する。競合通知が出るだけで、実際のマージ結果を
+   確認しない場合、マージ処理自体が壊れていて片方の変更を黙って捨てていても見逃す。
 4. 一方の端末からChat Controlで指示をキューする。
 5. もう一方の端末で、その指示が実際にキューされたことを確認する。
    overviewは接続状態・件数・最新timestampなどの集約metadataしか持たないため、
    overview上の状態だけでは「その指示」を確認したことにならない。対象案件を開き、
    コマンド一覧(または `GET /api/projects/<project-id>/chat-commands`)で、
    実際に送った指示の本文・IDと一致する項目があることまで確認する。
+   さらに、2章で接続したBridgeがこの指示を実際に配送し終えるまで待ち、配送完了後に
+   **両端末**でその同じcommand IDのstatusを再確認する。片方の端末だけ`delivered`系に
+   進み、もう片方が古い`queued`のまま止まっている場合(片方のPWAのpolling/refreshが
+   壊れている可能性)は不合格。「キュー時点で両方から見えた」だけでなく、
+   「配送完了後も両端末が同じ終端状態に収束する」ことまで確認する。
 6. **enqueue dedupeの確認**: PWAのUIは送信のたびに端末ローカルの乱数dedupe keyを生成するため、
    2台から「同じ指示」を送ってもdedupe keyは別々になり検証にならない。同じdedupe keyを直接APIで
    2回送って確認する。
@@ -246,14 +262,47 @@ PWAを閉じた状態でテストPushが実機の通知センターに届く。
      -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"dedupe test","dedupeKey":"e2e-dedupe-test-1"}'
    ```
 
-   同じ `dedupeKey` でもう一度実行し、新しいcommandが作られず**同じcommand IDが返る**ことを確認する。
+   これを2回、間を空けて順番に実行しても「通常の再送」しか確認できない(KV fallbackや
+   read-then-writeレースのある実装でも同じ結果になり得る)。Coordinatorが宣言している
+   **atomicな同時enqueue集約**まで確認するには、シェルの `&` で同じリクエストを
+   ほぼ同時に2回発火させる。
+
+   ```bash
+   curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"dedupe test","dedupeKey":"e2e-dedupe-test-2"}' &
+   curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"projectId":"<project-id>","chatUrl":"<chat-url>","prompt":"dedupe test","dedupeKey":"e2e-dedupe-test-2"}' &
+   wait
+   ```
+
+   両方のレスポンスが**同じcommand ID**を指していることを確認する(順番に送った1回目の
+   確認と合わせて、通常の再送・同時実行の両方を見たことになる)。
 
 7. **claim競合の確認**: まず2台のBridge(2章で接続したChatGPT会話を2つ用意するか、Bridgeを
    2箇所へdeployする)を**両方とも先に**同じprojectへ接続してからcommandをキューする。
    (2章のBridgeが接続されたままだと、先にcommandをキューしてから2台目のBridgeを準備する
    順序では、2台目が揃う前に1台目が即座にclaim・配送してしまい、claim競合の検証にならない。)
-   両方のBridgeが揃った状態で1件だけcommandをキューし、片方のBridgeだけがclaimし、
-   もう片方が同じcommandを二重配送しないことを確認する。
+   両方のBridgeが揃った状態で1件だけcommandをキューする。
+
+   Bridge同士のpollingは間隔があり、片方が先にclaimしてから2台目がpollするだけでも
+   「二重配送なし」に見えてしまう(claimが本当に競合したのか、単に片方が先に処理した
+   だけなのか区別できない)。実際に競合させて確認するには、2つの異なる `bridgeId` で
+   `POST /api/chat-commands/claim` を直接、シェルの `&` でほぼ同時に発火させる。
+
+   ```bash
+   curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/claim \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"bridgeId":"e2e-bridge-a","projectId":"<project-id>"}' &
+   curl -s -X POST https://<your-worker>.workers.dev/api/chat-commands/claim \
+     -H "Authorization: Bearer <SUPERVISOR_CLIENT_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"bridgeId":"e2e-bridge-b","projectId":"<project-id>"}' &
+   wait
+   ```
+
+   片方だけが実際のcommandを受け取り、もう片方は空(claimするcommandなし)を返すことを
+   確認する。両方が同じcommandを受け取ってしまう場合は不合格。
    (2台の端末から**別々の**指示をほぼ同時に送る方法は、それぞれ独立したcommandになるため
    claim競合の検証にはならない。)
 
