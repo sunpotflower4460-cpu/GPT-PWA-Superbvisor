@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { parseRoutePlanInput, resolveCurrentRouteNode, resolveRouteDispatchChatUrl } from './routePlan';
+import {
+  advanceRoutePhaseIndex,
+  extractRoutePhaseIndex,
+  parseRoutePlanInput,
+  resolveCurrentRouteNode,
+  resolveRouteDispatchChatUrl,
+  routePhaseIdInstruction,
+} from './routePlan';
 
 describe('parseRoutePlanInput', () => {
   it('returns undefined for non-array input', () => {
@@ -76,18 +83,88 @@ describe('resolveCurrentRouteNode', () => {
     expect(resolveCurrentRouteNode([], 5)).toBeUndefined();
   });
 
-  it('maps verified checkpoint count directly onto the phase index', () => {
+  it('maps the phase index directly onto the declared plan', () => {
     expect(resolveCurrentRouteNode(plan, 0)).toEqual(plan[0]);
     expect(resolveCurrentRouteNode(plan, 1)).toEqual(plan[1]);
     expect(resolveCurrentRouteNode(plan, 2)).toEqual(plan[2]);
   });
 
-  it('caps at the last declared phase once checkpoints exceed the plan length', () => {
+  it('caps at the last declared phase for an out-of-range index', () => {
     expect(resolveCurrentRouteNode(plan, 10)).toEqual(plan[2]);
   });
 
-  it('never goes negative for a malformed negative count', () => {
+  it('never goes negative for a malformed negative index', () => {
     expect(resolveCurrentRouteNode(plan, -5)).toEqual(plan[0]);
+  });
+});
+
+describe('extractRoutePhaseIndex', () => {
+  const plan = [
+    { id: 'inspect', label: '現状確認' },
+    { id: 'implement', label: '実装' },
+    { id: 'test', label: 'テスト' },
+  ];
+
+  it('returns undefined with no declared route', () => {
+    expect(extractRoutePhaseIndex(undefined, '[ROUTE_PHASE_ID: implement]')).toBeUndefined();
+    expect(extractRoutePhaseIndex([], '[ROUTE_PHASE_ID: implement]')).toBeUndefined();
+  });
+
+  it('returns undefined with no commit message', () => {
+    expect(extractRoutePhaseIndex(plan, undefined)).toBeUndefined();
+  });
+
+  it('returns undefined when the commit message has no marker', () => {
+    expect(extractRoutePhaseIndex(plan, 'fix: adjust the widget')).toBeUndefined();
+  });
+
+  it('matches an exact known id and returns its index', () => {
+    expect(extractRoutePhaseIndex(plan, 'work in progress\n\n[ROUTE_PHASE_ID: implement]')).toBe(1);
+    expect(extractRoutePhaseIndex(plan, '[ROUTE_PHASE_ID: test]')).toBe(2);
+  });
+
+  it('is a closed-set exact match, not free-text interpretation — an unknown id yields undefined', () => {
+    expect(extractRoutePhaseIndex(plan, '[ROUTE_PHASE_ID: hallucinated-phase]')).toBeUndefined();
+  });
+
+  it('does not match on the phase LABEL, only the id', () => {
+    expect(extractRoutePhaseIndex(plan, '[ROUTE_PHASE_ID: 実装]')).toBeUndefined();
+  });
+});
+
+describe('advanceRoutePhaseIndex', () => {
+  it('stays put when nothing was reported', () => {
+    expect(advanceRoutePhaseIndex(1, undefined)).toBe(1);
+  });
+
+  it('advances forward when a later phase is reported', () => {
+    expect(advanceRoutePhaseIndex(0, 2)).toBe(2);
+  });
+
+  it('never regresses on a stale/out-of-order earlier-phase report', () => {
+    expect(advanceRoutePhaseIndex(2, 0)).toBe(2);
+  });
+
+  it('stays put when the same phase is reported again', () => {
+    expect(advanceRoutePhaseIndex(1, 1)).toBe(1);
+  });
+});
+
+describe('routePhaseIdInstruction', () => {
+  it('is empty for a job with no declared route', () => {
+    expect(routePhaseIdInstruction(undefined)).toBe('');
+    expect(routePhaseIdInstruction([])).toBe('');
+  });
+
+  it('lists every declared id/label pair and asks for the ROUTE_PHASE_ID marker', () => {
+    const plan = [
+      { id: 'inspect', label: '現状確認' },
+      { id: 'implement', label: '実装' },
+    ];
+    const instruction = routePhaseIdInstruction(plan);
+    expect(instruction).toContain('ROUTE_PHASE_ID');
+    expect(instruction).toContain('inspect: 現状確認');
+    expect(instruction).toContain('implement: 実装');
   });
 });
 

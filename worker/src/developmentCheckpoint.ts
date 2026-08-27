@@ -35,8 +35,8 @@ export interface DevelopmentCheckpoint {
   route: string[];
   routeNode?: string;
   // Multi Chat / Specialist Chat: the chat the NEXT auto-dispatch would
-  // actually target — the current declared phase's bound chatUrl (Worker-
-  // derived from verified checkpoint count, see routePlan.ts's
+  // actually target — the current declared phase's bound chatUrl (job's
+  // Worker-owned routePhaseIndex, see routePlan.ts's
   // resolveRouteDispatchChatUrl) if one exists, otherwise the job's default
   // chatUrl. undefined means there is nowhere to dispatch to at all.
   dispatchChatUrl?: string;
@@ -119,7 +119,7 @@ export function buildDevelopmentCheckpoint(job: DeveloperJob): DevelopmentCheckp
     routeId,
     route,
     routeNode,
-    dispatchChatUrl: resolveRouteDispatchChatUrl(job.routePlan, progress?.checkpoints.length ?? 0, job.chatUrl),
+    dispatchChatUrl: resolveRouteDispatchChatUrl(job.routePlan, job.routePhaseIndex ?? 0, job.chatUrl),
     task: job.prompt,
     repository: job.repository,
     branch: job.workspace.branch,
