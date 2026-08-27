@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ChatCommandConflictError,
   INVALID_CHAT_COMMAND_ERROR,
+  INVALID_CLAIM_CHAT_URL_ERROR,
   cancelChatCommand,
   claimNextChatCommand,
   enqueueChatCommand,
@@ -247,6 +248,22 @@ describe('chat command claim chatUrl scoping (Multi Chat / Specialist Chat)', ()
     await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-a');
     const claimedForOtherChat = await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-b');
     expect(claimedForOtherChat).toBeNull();
+  });
+
+  it('rejects a malformed chatUrl instead of silently falling back to the unscoped project-wide pool', async () => {
+    // Regression guard: an earlier version coerced a non-empty-but-invalid
+    // chatUrl straight to undefined (same as "not given at all"), which
+    // would have silently reopened the exact cross-chat misdelivery race
+    // this scoping exists to close whenever the user mistyped a chatUrl at
+    // Bridge-connect time (e.g. missing "https://").
+    const { env } = fakeEnv();
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+    await expect(claimNextChatCommand(env, 'bridge-b', 'project-1', 'chatgpt.com/c/chat-b'))
+      .rejects.toThrow(INVALID_CLAIM_CHAT_URL_ERROR);
   });
 });
 

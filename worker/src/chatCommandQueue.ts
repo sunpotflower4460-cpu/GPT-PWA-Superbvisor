@@ -31,6 +31,7 @@ export class ChatCommandConflictError extends Error {
 }
 
 export const INVALID_CHAT_COMMAND_ERROR = 'projectId, valid ChatGPT chatUrl and prompt are required';
+export const INVALID_CLAIM_CHAT_URL_ERROR = 'chatUrl, when provided, must be a valid ChatGPT chatUrl';
 
 const COMMAND_TTL = 60 * 60 * 24 * 14;
 const MIN_KV_EXPIRATION_TTL = 60;
@@ -187,11 +188,18 @@ export async function getProjectChatCommandOverview(env: ChatCommandEnv, project
 // claim (and thus receive, in its OWN conversation) a command meant for a
 // different chat entirely. Absent chatUrl preserves the original
 // project-wide claim pool exactly — the correct behavior for the common
-// case of one chat per project.
+// case of one chat per project. A NON-EMPTY chatUrl that fails validation
+// throws rather than silently degrading to "absent" (indistinguishable
+// from "no chatUrl given at all") — chatUrl is a value the user/ChatGPT
+// hand-typed at Bridge-connect time, never auto-discovered, so a plausible
+// typo (e.g. missing "https://") must not silently reopen the exact
+// cross-chat misdelivery race this scoping exists to close.
 export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string, projectId?: string, chatUrl?: string) {
   const normalizedBridgeId = bridgeId.trim().slice(0, 200) || 'unknown-bridge';
   const normalizedProjectId = projectId?.trim().slice(0, 200) || '';
-  const normalizedChatUrl = chatUrl ? normalizeChatUrl(chatUrl) ?? undefined : undefined;
+  const trimmedChatUrl = chatUrl?.trim();
+  if (trimmedChatUrl && !normalizeChatUrl(trimmedChatUrl)) throw new Error(INVALID_CLAIM_CHAT_URL_ERROR);
+  const normalizedChatUrl = trimmedChatUrl ? normalizeChatUrl(trimmedChatUrl) ?? undefined : undefined;
 
   if (hasAtomicCoordinator(env) && normalizedProjectId) {
     await ensureCoordinatorCommandsMigrated(env, normalizedProjectId);
