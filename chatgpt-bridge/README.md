@@ -199,4 +199,6 @@ wrangler.jsonc     lightweight Worker deployment config
 - reconnect / suspended-widget UX validation
 - host境界を跨ぐdelivery receipt recoveryの実機確認
 
-上位4項目の検証手順は [`../docs/E2E_VERIFICATION.md`](../docs/E2E_VERIFICATION.md) を参照してください。
+このうち **real E2E・real-device E2E・reconnect/suspended-widget検証・delivery receipt recovery**
+(4項目)の検証手順は [`../docs/E2E_VERIFICATION.md`](../docs/E2E_VERIFICATION.md) を参照してください。
+**public distribution時のOAuthはこの手順書の対象外**で、別途対応が必要です。
