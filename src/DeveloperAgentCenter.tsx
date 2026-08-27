@@ -69,14 +69,19 @@ export default function DeveloperAgentCenter() {
     setBusy('start');
     setMessage('');
     try {
-      const task = prompt.trim() || buildActionPrompt(selected, defaultAction);
+      const customTask = prompt.trim();
+      const task = customTask || buildActionPrompt(selected, defaultAction);
       const connection = loadWorkerConnection();
       // Route (Goal/Route/Task separation): the same arrow-separated
       // workflow this project's saved Operating Plan already displays,
       // parsed into a declared plan and sent alongside the job/run — see
       // operatingPlan.ts's parseRoutePlan for why this is a delimiter
-      // extraction, not free-text interpretation.
-      const routePlan = parseRoutePlan(getOperatingPlan(selected.id).workflow);
+      // extraction, not free-text interpretation. Only attached when `task`
+      // actually IS that saved plan (the user left the prompt box empty) —
+      // a typed custom one-off task has no relationship to the saved
+      // workflow, so declaring that unrelated plan alongside it would have
+      // the checkpoint misreport what route this specific dispatch follows.
+      const routePlan = customTask ? undefined : parseRoutePlan(getOperatingPlan(selected.id).workflow);
       if (mode === 'guardian') {
         const next = await startGuardianRun(selected, task, { maxCycles, maxToolTurns: 10, maxMinutes }, connection, routePlan);
         setGuardian(next);

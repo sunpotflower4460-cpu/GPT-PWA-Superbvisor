@@ -513,12 +513,25 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
       checks,
       routeState: autopilotRoute,
     });
+    // A long-running Autopilot route can drive contextPressure to HIGH
+    // purely through route checkpoints (no CI failures at all — see
+    // deriveContextPressure) — prepareRecovery() below is not the only
+    // place pressure needs to act on. Same enforcement pattern as there:
+    // force-append the handoff hint onto the outgoing prompt rather than
+    // relying on it being requested elsewhere.
+    const routePressure = deriveContextPressure({
+      recoveryCount: job.recoveryCount,
+      routeCheckpointCount: autopilotRoute.checkpoints.length,
+    });
+    const finalContinuationPrompt = routePressure === 'HIGH'
+      ? `${continuationPrompt}\n\n${recoveryStrategyPromptHint('CREATE_HANDOFF')}`
+      : continuationPrompt;
     job = {
       ...job,
       status: 'running',
       phase: 'handoff_ready',
       error: undefined,
-      handoffPrompt: continuationPrompt,
+      handoffPrompt: finalContinuationPrompt,
       outputText: '現在headのCIは成功しました。AUTOPILOT ROUTEの途中チェックポイントとして扱い、完了済み工程を飛ばさず次の未完了工程へ進むChatGPT指示を準備しました。',
       autopilotRoute,
       trace: routeAdvanced ? appendTrace(job, 'ROUTE_CHECKPOINT', extractAutopilotRouteStep(repo.headCommitMessage)) : job.trace,

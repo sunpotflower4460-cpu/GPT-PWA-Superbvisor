@@ -171,6 +171,27 @@ describe('CiExecutionFabric', () => {
     expect(result.command).toContain('aggregate');
     expect(result.status).toBe('failed');
   });
+
+  it('never matches "spec" as a prefix of an unrelated word like "specification"', async () => {
+    const specificationJob: CiCheckLike = { ...passingCheck, id: 3, name: 'specification-lint', conclusion: 'success' };
+    const genericCiJob: CiCheckLike = { ...passingCheck, id: 4, name: 'ci', conclusion: 'failure' };
+    const fabric = new CiExecutionFabric([specificationJob, genericCiJob], true);
+
+    // Only "spec" as a whole word/plural/gerund should match — "specification"
+    // is a different word entirely, so this must fall back to the (failing)
+    // aggregate rather than reporting the test phase as a false pass.
+    const result = await fabric.runTest();
+    expect(result.command).toContain('aggregate');
+    expect(result.status).toBe('failed');
+  });
+
+  it('still matches a gerund like "testing"', async () => {
+    const testingJob: CiCheckLike = { ...passingCheck, id: 3, name: 'testing-suite', conclusion: 'failure' };
+    const fabric = new CiExecutionFabric([testingJob], true);
+    const result = await fabric.runTest();
+    expect(result.command).toContain('testing-suite');
+    expect(result.status).toBe('failed');
+  });
 });
 
 describe('createCiExecutionFabric', () => {
