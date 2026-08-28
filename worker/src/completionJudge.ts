@@ -123,6 +123,37 @@ export function buildCompletionCertificate(job: DeveloperJob): CompletionCertifi
   };
 }
 
+// The async counterpart buildCompletionCertificate's own comment above
+// said would "belong alongside whatever first implements" a real
+// SemanticJudge (see semanticJudge.ts's createSemanticJudge). Reuses
+// every deterministic-side field from the sync certificate unchanged and
+// only replaces semanticReview + re-derives state/goal from the real
+// verdict instead of the permanent PENDING stub. A FAIL verdict here is
+// real negative evidence exactly like a deterministic contradiction is —
+// it downgrades an otherwise-passing deterministic result to REJECTED
+// rather than leaving it stuck at COMPLETION_CANDIDATE forever.
+export async function buildCompletionCertificateAsync(job: DeveloperJob, judge: SemanticJudge): Promise<CompletionCertificate> {
+  const deterministic = evaluateDeterministicCompletion(job);
+  const base = buildCompletionCertificate(job);
+  if (base.state !== 'COMPLETION_CANDIDATE') return base;
+
+  const semantic = await judge.evaluate(job, deterministic);
+  const state: CompletionState = semantic.verdict === 'PASS'
+    ? 'CERTIFIED'
+    : semantic.verdict === 'FAIL'
+      ? 'REJECTED'
+      : 'COMPLETION_CANDIDATE';
+
+  return {
+    ...base,
+    goal: semantic.verdict,
+    semanticReview: semantic.verdict,
+    blockingIssues: base.blockingIssues + (semantic.verdict === 'FAIL' ? 1 : 0),
+    knownLimitations: [...base.knownLimitations, ...semantic.notes],
+    state,
+  };
+}
+
 function ciCertificateStatus(job: DeveloperJob): 'PASS' | 'FAIL' | 'PENDING' {
   if (job.phase === 'review_ready') return 'PASS';
   if (job.phase === 'recovery_ready' || job.phase === 'human_required') return 'FAIL';

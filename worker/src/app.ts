@@ -7,7 +7,8 @@ import {
   getLatestDeveloperJob,
 } from './developerAgent';
 import { buildDevelopmentCheckpoint } from './developmentCheckpoint';
-import { buildCompletionCertificate } from './completionJudge';
+import { buildCompletionCertificateAsync } from './completionJudge';
+import { createSemanticJudge } from './semanticJudge';
 import { createCiExecutionFabric } from './executionFabric';
 import { getWorkflowRunJobs } from './githubExecutor';
 import {
@@ -109,7 +110,8 @@ export default {
     if (developerCompletion && request.method === 'GET') {
       const job = await getDeveloperJob(env, decodeURIComponent(developerCompletion[1]));
       if (!job) return json({ error: 'developer_job_not_found' }, 404, env, request);
-      return json({ completion: buildCompletionCertificate(job) }, 200, env, request);
+      const completion = await buildCompletionCertificateAsync(job, createSemanticJudge(env));
+      return json({ completion }, 200, env, request);
     }
 
     const developerExecutionLogs = url.pathname.match(/^\/api\/developer-jobs\/([^/]+)\/execution\/logs$/);
