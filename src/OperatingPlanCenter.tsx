@@ -309,6 +309,7 @@ export default function OperatingPlanCenter() {
                       return (
                         <div className="plan-field plan-specialist-chats">
                           <span>工程ごとのSpecialist Chat <small>任意・空欄は既定のChatGPT URLへ</small></span>
+                          <small className="plan-specialist-chat-caution">標準手順の途中に工程を挿入/削除すると、下の割り当てが別の工程にずれることがあります。編集後は割り当てを見直してください。</small>
                           {phases.map((phase) => (
                             <label key={phase.id} className="plan-specialist-chat-row">
                               <small>{phase.label}</small>
