@@ -14,6 +14,7 @@ import {
   effectiveWorkflow,
   formatOperatingPlanPrompt,
   getOperatingPlan,
+  isAutopilotRouteWorkflow,
   isValidChatUrl,
   parseRoutePlan,
   saveOperatingPlan,
@@ -304,8 +305,30 @@ export default function OperatingPlanCenter() {
                     </label>
 
                     {(() => {
-                      const phases = parseRoutePlan(effectiveWorkflow(plan));
+                      const workflow = effectiveWorkflow(plan);
+                      const phases = parseRoutePlan(workflow);
                       if (phases.length < 2) return null;
+                      // The Worker only redispatches to a later phase's
+                      // bound chat when the workflow is a recognized
+                      // AUTOPILOT ROUTE (repeat-count/conditional-branch
+                      // language — see isAutopilotRouteWorkflow and
+                      // worker/src/developerAgent.ts's
+                      // hasAutopilotRouteContract gate on job.prompt). An
+                      // ordinary sequential workflow is dispatched once
+                      // and completes on the first green CI — there is no
+                      // "phase 2's dispatch" for the Worker to ever send,
+                      // so a binding on phase 2+ would silently never be
+                      // used. Only offer bindings when they can actually
+                      // take effect; otherwise explain why not, since the
+                      // phases are still visibly listed just above.
+                      if (!isAutopilotRouteWorkflow(workflow)) {
+                        return (
+                          <div className="plan-field plan-specialist-chats">
+                            <span>工程ごとのSpecialist Chat</span>
+                            <small className="plan-specialist-chat-caution">この標準手順は自動運転ルート(回数指定や条件分岐を含む手順)として認識されていないため、工程ごとのChat割り当ては使えません。手順は1回のChatGPT実行内でまとめて実行されるため、既定のChatGPT URLのみが使われます。</small>
+                          </div>
+                        );
+                      }
                       return (
                         <div className="plan-field plan-specialist-chats">
                           <span>工程ごとのSpecialist Chat <small>任意・空欄は既定のChatGPT URLへ</small></span>
