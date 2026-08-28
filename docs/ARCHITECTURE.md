@@ -450,6 +450,11 @@ Implemented foundation:
 20. Guardian Cron/manual advance execution lease + lease regression tests
 21. structured Autopilot Route progress (checkpoints + self-reported step marker) persisted chat-text-independently, surfaced in the Handoff packet
 22. Completion Judgeが実際に取得したopen issue件数を完成判定へ反映(従来は表示のみで判定には未使用だった`testsPassing`/`unresolvedTodos`の未使用フィールドは削除)
+23. Goal/Route/Task分離 + phase単位のCI evidence routing + context pressure + trace
+24. Multi Chat / Specialist Chat: 宣言的なphase単位chatUrlバインディング(`routePlan.ts`)、Worker側dispatch routing/claim-time scoping/per-chat bridge可視化、Operating Plan UIでの割り当て編集
+25. GPT-template連携: 実project-kernel.jsonに対するlive drift検知(週次スケジュール、PR CIはブロックしない)、新規プロジェクト作成時のGPT-template導線
+26. Semantic Judge(`semanticJudge.ts`)の実装: LLMによる完了判定レビュー、KERNEL_AWAREプロジェクトのHANDOFF.md自己監査文書を証拠として評価(prompt injection対策のnonce区切り込み)、`refreshDeveloperJob`/`guardianRunner.ts`の実際の完了フローへの配線(Developer/Guardian両方のpush通知に反映、`GET .../completion`は再計算せず永続化済みcertificateを優先)
+27. `scripts/local-ci.mjs`: GitHub Actionsが利用できない状況向けのローカルフォールバックCI(ci.ymlと同じジョブ構成)
 
 Next high-priority gaps:
 
