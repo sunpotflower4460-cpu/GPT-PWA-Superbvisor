@@ -11,19 +11,48 @@ export type OperatingPlanTarget = 'IMPLEMENTED' | 'CI_GREEN' | 'REVIEW_READY' | 
 // convention this UI already establishes and displays. A workflow with no
 // arrow at all produces a single-node plan (the whole text, verbatim) —
 // never a fabricated multi-step breakdown.
+// chatUrl is optional Multi Chat / Specialist Chat groundwork: a phase MAY
+// declare which of the user's OWN already-open ChatGPT chats should
+// receive that phase's handoff (see worker/src/routePlan.ts's own comment
+// on why this is a declared mapping, never inferred). Populated here from
+// OperatingPlan.phaseChatUrls, keyed by this node's own id — never from
+// interpreting the workflow text itself.
 export interface RouteNode {
   id: string;
   label: string;
+  chatUrl?: string;
 }
 
 const ROUTE_SEPARATOR = /\s*(?:→|➡|->)\s*/;
 
-export function parseRoutePlan(workflow: string): RouteNode[] {
+// Client-side sanity check only — the Worker's own normalizeChatUrl
+// (worker/src/chatUrl.ts) is the actual authority and silently drops
+// anything that fails there too; this just gives the user immediate
+// feedback instead of a value that would go on to be silently ignored.
+export function isValidChatUrl(value: string): boolean {
+  try {
+    const url = new URL(value.trim());
+    const host = url.hostname.toLowerCase();
+    return url.protocol === 'https:' && (host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'chat.openai.com');
+  } catch {
+    return false;
+  }
+}
+
+export function parseRoutePlan(workflow: string, phaseChatUrls?: Record<string, string>): RouteNode[] {
   const segments = workflow
     .split(ROUTE_SEPARATOR)
     .map((segment) => segment.trim())
     .filter(Boolean);
-  return segments.map((label, index) => ({ id: `node-${index + 1}`, label: label.slice(0, 200) }));
+  return segments.map((label, index) => {
+    const id = `node-${index + 1}`;
+    const chatUrl = phaseChatUrls?.[id]?.trim();
+    return {
+      id,
+      label: label.slice(0, 200),
+      ...(chatUrl && isValidChatUrl(chatUrl) ? { chatUrl } : {}),
+    };
+  });
 }
 
 export interface OperatingPlan {
@@ -37,6 +66,11 @@ export interface OperatingPlan {
   selfReview: boolean;
   finalReport: boolean;
   customInstructions: string;
+  // Multi Chat / Specialist Chat: keyed by the RouteNode id parseRoutePlan
+  // would assign that phase (e.g. "node-2") — see parseRoutePlan's own
+  // comment. Never keyed by label text, which can change every time the
+  // user edits `workflow`.
+  phaseChatUrls: Record<string, string>;
   updatedAt: string;
 }
 
@@ -62,6 +96,7 @@ export function defaultOperatingPlan(): OperatingPlan {
     selfReview: true,
     finalReport: true,
     customInstructions: '',
+    phaseChatUrls: {},
     updatedAt: new Date(0).toISOString(),
   };
 }
@@ -156,6 +191,17 @@ function normalizeOperatingPlan(input?: Partial<OperatingPlan> | null): Operatin
     selfReview: typeof input?.selfReview === 'boolean' ? input.selfReview : fallback.selfReview,
     finalReport: typeof input?.finalReport === 'boolean' ? input.finalReport : fallback.finalReport,
     customInstructions: typeof input?.customInstructions === 'string' ? input.customInstructions : fallback.customInstructions,
+    phaseChatUrls: sanitizePhaseChatUrls(input?.phaseChatUrls),
     updatedAt: typeof input?.updatedAt === 'string' ? input.updatedAt : fallback.updatedAt,
   };
+}
+
+function sanitizePhaseChatUrls(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result: Record<string, string> = {};
+  for (const [id, url] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof id !== 'string' || !id.trim() || typeof url !== 'string' || !url.trim()) continue;
+    result[id.trim().slice(0, 64)] = url.trim().slice(0, 2000);
+  }
+  return result;
 }

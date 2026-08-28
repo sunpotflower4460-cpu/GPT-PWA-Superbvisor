@@ -81,7 +81,8 @@ export default function DeveloperAgentCenter() {
       // a typed custom one-off task has no relationship to the saved
       // workflow, so declaring that unrelated plan alongside it would have
       // the checkpoint misreport what route this specific dispatch follows.
-      const routePlan = customTask ? undefined : parseRoutePlan(effectiveWorkflow(getOperatingPlan(selected.id)));
+      const dispatchPlan = customTask ? undefined : getOperatingPlan(selected.id);
+      const routePlan = dispatchPlan ? parseRoutePlan(effectiveWorkflow(dispatchPlan), dispatchPlan.phaseChatUrls) : undefined;
       if (mode === 'guardian') {
         const next = await startGuardianRun(selected, task, { maxCycles, maxToolTurns: 10, maxMinutes }, connection, routePlan);
         setGuardian(next);
