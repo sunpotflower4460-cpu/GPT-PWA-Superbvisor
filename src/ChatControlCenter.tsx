@@ -306,7 +306,7 @@ export default function ChatControlCenter() {
 
   return (
     <>
-      <button className="chat-control-fab" onClick={() => openCenter()} aria-label="Multi Chat Control">💬</button>
+      <button className="chat-control-fab" onClick={() => openCenter()} aria-label="Chat操作">💬</button>
       {open && (
         <div className="chat-control-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="chat-control-sheet">

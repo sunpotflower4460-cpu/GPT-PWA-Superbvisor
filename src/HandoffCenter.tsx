@@ -77,7 +77,7 @@ export default function HandoffCenter() {
 
   return (
     <>
-      <button className="handoff-fab" onClick={() => openCenter()} aria-label="Chat handoff center">↗</button>
+      <button className="handoff-fab" onClick={() => openCenter()} aria-label="引き継ぎ">↗</button>
       {open && (
         <div className="handoff-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="handoff-sheet">

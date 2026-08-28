@@ -101,7 +101,7 @@ export default function SmartActionCenter() {
 
   return (
     <>
-      <button className="smart-fab" onClick={openCenter} aria-label="Smart reply center">
+      <button className="smart-fab" onClick={openCenter} aria-label="返信案">
         ✦{attentionCount > 0 && <span>{attentionCount}</span>}
       </button>
 

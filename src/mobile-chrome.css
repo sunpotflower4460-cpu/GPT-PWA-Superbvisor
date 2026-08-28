@@ -1,19 +1,90 @@
-/* Coordinated mobile bottom chrome: tab bar + FAB dock + content clearance.
-   Independent position:fixed FABs previously shared the same bottom band and
-   stacked on the empty-state CTA. Keep desktop positions; only re-grid <700px. */
+/* Mobile bottom chrome: tab bar stays; the 8 center FABs fold into a
+   collapsed 「ツール」 toggle so empty-state + 追加 remain the hero.
+   Desktop (≥700px) keeps the existing less-intrusive FAB positions. */
 
 @media (max-width: 699px) {
   :root {
-    --fab-inline-pad: max(14px, env(safe-area-inset-left, 0px));
-    --fab-inline-pad-end: max(14px, env(safe-area-inset-right, 0px));
-    --fab-track: calc(100vw - var(--fab-inline-pad) - var(--fab-inline-pad-end) - var(--fab-slot));
-    --fab-col-1: var(--fab-inline-pad);
-    --fab-col-2: calc(var(--fab-inline-pad) + var(--fab-track) / 3);
-    --fab-col-3: calc(var(--fab-inline-pad) + var(--fab-track) * 2 / 3);
-    --fab-col-4: calc(100vw - var(--fab-inline-pad-end) - var(--fab-slot));
-    --fab-row-1: calc(var(--bottom-nav-offset) + var(--bottom-nav-height) + 12px + var(--safe-bottom));
-    --fab-row-2: calc(var(--fab-row-1) + var(--fab-slot) + var(--fab-gap));
-    --app-bottom-clearance: calc(var(--fab-row-2) + var(--fab-slot) + 16px);
+    --tool-toggle-h: 32px;
+    --tool-toggle-bottom: calc(var(--bottom-nav-offset) + var(--bottom-nav-height) + 8px + var(--safe-bottom));
+    --tool-sheet-bottom: calc(var(--tool-toggle-bottom) + var(--tool-toggle-h) + 8px);
+    --tool-sheet-pad: 8px;
+    --tool-sheet-gap: 6px;
+    --tool-cell-h: 54px;
+    --tool-sheet-h: calc(var(--tool-sheet-pad) * 2 + var(--tool-cell-h) * 2 + var(--tool-sheet-gap));
+    --tool-sheet-left: max(12px, env(safe-area-inset-left, 0px));
+    --tool-sheet-right: max(12px, env(safe-area-inset-right, 0px));
+    --tool-sheet-width: calc(100vw - var(--tool-sheet-left) - var(--tool-sheet-right));
+    --tool-cell-w: calc((var(--tool-sheet-width) - var(--tool-sheet-pad) * 2 - var(--tool-sheet-gap) * 3) / 4);
+    --app-bottom-clearance: calc(var(--tool-toggle-bottom) + var(--tool-toggle-h) + 16px);
+  }
+
+  .tool-dock-toggle {
+    position: fixed;
+    z-index: 20;
+    left: 50%;
+    bottom: var(--tool-toggle-bottom);
+    transform: translateX(-50%);
+    appearance: none;
+    min-width: 76px;
+    min-height: var(--tool-toggle-h);
+    padding: 0 14px;
+    border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 999px;
+    background: rgba(17, 25, 43, .94);
+    color: #d5def3;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .06em;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .28);
+    backdrop-filter: blur(18px);
+    cursor: pointer;
+  }
+
+  html:not(.tool-dock-open):has(.notification-fab span) .tool-dock-toggle::before,
+  html:not(.tool-dock-open):has(.smart-fab > span) .tool-dock-toggle::before {
+    content: '';
+    position: absolute;
+    top: -3px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ff6f84;
+    box-shadow: 0 0 0 2px rgba(17, 25, 43, .94);
+  }
+
+  .tool-dock-scrim {
+    position: fixed;
+    z-index: 15;
+    inset: 0 0 calc(var(--bottom-nav-offset) + var(--bottom-nav-height) + var(--safe-bottom)) 0;
+    border: 0;
+    padding: 0;
+    background: rgba(0, 0, 0, .42);
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+  }
+
+  .tool-dock-panel {
+    display: none;
+    position: fixed;
+    z-index: 16;
+    left: var(--tool-sheet-left);
+    width: var(--tool-sheet-width);
+    bottom: var(--tool-sheet-bottom);
+    height: var(--tool-sheet-h);
+    border: 1px solid rgba(255, 255, 255, .1);
+    border-radius: 18px;
+    background: rgba(12, 18, 32, .96);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, .38);
+    backdrop-filter: blur(18px);
+  }
+
+  html.tool-dock-open .tool-dock-panel { display: block; }
+  html.tool-dock-open .bottom-nav { z-index: 21; }
+  html.tool-dock-open .tool-dock-toggle { background: rgba(124, 156, 255, .16); color: #e8edff; }
+
+  .release-update-banner {
+    bottom: calc(var(--tool-toggle-bottom) + var(--tool-toggle-h) + 10px);
   }
 
   .smart-fab,
@@ -24,35 +95,98 @@
   .developer-fab,
   .plan-fab,
   .chat-control-fab {
+    visibility: hidden;
+    pointer-events: none;
     right: auto;
-    left: var(--fab-col-1);
-    bottom: var(--fab-row-1);
+    left: var(--tool-sheet-left);
+    bottom: var(--tool-sheet-bottom);
+    width: var(--tool-cell-w);
+    height: var(--tool-cell-h);
     transform: none;
+    box-shadow: none;
   }
 
-  .smart-fab { left: var(--fab-col-1); }
-  .notification-fab { left: var(--fab-col-2); }
-  .handoff-fab { left: var(--fab-col-3); }
-  .evidence-fab { left: var(--fab-col-4); }
-
-  .plan-fab,
-  .developer-fab,
-  .worker-fab,
-  .chat-control-fab {
-    bottom: var(--fab-row-2);
+  html.tool-dock-open .smart-fab,
+  html.tool-dock-open .notification-fab,
+  html.tool-dock-open .handoff-fab,
+  html.tool-dock-open .evidence-fab,
+  html.tool-dock-open .worker-fab,
+  html.tool-dock-open .developer-fab,
+  html.tool-dock-open .plan-fab,
+  html.tool-dock-open .chat-control-fab {
+    visibility: visible;
+    pointer-events: auto;
+    z-index: 18;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border: 0;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, .03);
+    font-size: 16px;
+    font-weight: 800;
+    cursor: pointer;
   }
 
-  .plan-fab { left: var(--fab-col-1); }
-  .developer-fab { left: var(--fab-col-2); }
-  .worker-fab { left: var(--fab-col-3); }
-  .chat-control-fab {
-    left: var(--fab-col-4);
-    width: var(--fab-size);
-    height: var(--fab-size);
+  html.tool-dock-open .plan-fab::after { content: '進め方'; }
+  html.tool-dock-open .developer-fab::after { content: '開発'; }
+  html.tool-dock-open .worker-fab::after { content: '裏方'; }
+  html.tool-dock-open .chat-control-fab::after { content: 'Chat操作'; }
+  html.tool-dock-open .smart-fab::after { content: '返信案'; }
+  html.tool-dock-open .notification-fab::after { content: '通知'; }
+  html.tool-dock-open .handoff-fab::after { content: '引き継ぎ'; }
+  html.tool-dock-open .evidence-fab::after { content: '証拠'; }
+
+  html.tool-dock-open .plan-fab::after,
+  html.tool-dock-open .developer-fab::after,
+  html.tool-dock-open .worker-fab::after,
+  html.tool-dock-open .chat-control-fab::after,
+  html.tool-dock-open .smart-fab::after,
+  html.tool-dock-open .notification-fab::after,
+  html.tool-dock-open .handoff-fab::after,
+  html.tool-dock-open .evidence-fab::after {
+    color: #d7deef;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  html.tool-dock-open .plan-fab,
+  html.tool-dock-open .developer-fab,
+  html.tool-dock-open .worker-fab,
+  html.tool-dock-open .chat-control-fab {
+    bottom: calc(var(--tool-sheet-bottom) + var(--tool-sheet-pad) + var(--tool-cell-h) + var(--tool-sheet-gap));
+  }
+
+  html.tool-dock-open .smart-fab,
+  html.tool-dock-open .notification-fab,
+  html.tool-dock-open .handoff-fab,
+  html.tool-dock-open .evidence-fab {
+    bottom: calc(var(--tool-sheet-bottom) + var(--tool-sheet-pad));
+  }
+
+  html.tool-dock-open .plan-fab,
+  html.tool-dock-open .smart-fab { left: calc(var(--tool-sheet-left) + var(--tool-sheet-pad)); }
+  html.tool-dock-open .developer-fab,
+  html.tool-dock-open .notification-fab { left: calc(var(--tool-sheet-left) + var(--tool-sheet-pad) + var(--tool-cell-w) + var(--tool-sheet-gap)); }
+  html.tool-dock-open .worker-fab,
+  html.tool-dock-open .handoff-fab { left: calc(var(--tool-sheet-left) + var(--tool-sheet-pad) + (var(--tool-cell-w) + var(--tool-sheet-gap)) * 2); }
+  html.tool-dock-open .chat-control-fab,
+  html.tool-dock-open .evidence-fab { left: calc(var(--tool-sheet-left) + var(--tool-sheet-pad) + (var(--tool-cell-w) + var(--tool-sheet-gap)) * 3); }
+
+  html.tool-dock-open .notification-fab span,
+  html.tool-dock-open .smart-fab > span {
+    top: 2px;
+    right: 4px;
   }
 }
 
 @media (min-width: 700px) {
+  .tool-dock { display: none; }
   .notification-fab {
     left: max(74px, calc((100vw - 760px) / 2 + 74px));
   }

@@ -250,7 +250,7 @@ export default function OperatingPlanCenter() {
 
   return (
     <>
-      <button className="plan-fab" onClick={() => openCenter()} aria-label="Operating Plan">☷</button>
+      <button className="plan-fab" onClick={() => openCenter()} aria-label="進め方">☷</button>
       {open && (
         <div className="plan-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="plan-sheet">
