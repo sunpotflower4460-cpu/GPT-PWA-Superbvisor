@@ -51,3 +51,15 @@
     height: var(--fab-size);
   }
 }
+
+@media (min-width: 700px) {
+  .notification-fab {
+    left: max(74px, calc((100vw - 760px) / 2 + 74px));
+  }
+  .evidence-fab {
+    right: max(22px, calc((100vw - 760px) / 2 + 22px));
+  }
+  .handoff-fab {
+    right: max(74px, calc((100vw - 760px) / 2 + 74px));
+  }
+}

@@ -16,7 +16,7 @@
   --human: #c7a6ff;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --bottom-nav-offset: 10px;
-  --bottom-nav-height: 60px;
+  --bottom-nav-height: 62px;
   --fab-size: 46px;
   --fab-slot: 50px;
   --fab-gap: 10px;
