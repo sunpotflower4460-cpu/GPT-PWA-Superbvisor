@@ -108,6 +108,22 @@ describe('createSemanticJudge', () => {
     const result = await judge.evaluate(job, evaluateDeterministicCompletion(job));
     expect(result.verdict).toBe('PENDING');
   });
+
+  // Regression guard: JSON.parse succeeds (without throwing) on any valid
+  // JSON value, not just objects — a degenerate provider response of the
+  // literal `null`, a bare number, or a bare string must degrade to
+  // PENDING like every other malformed-response case, not throw an
+  // uncaught TypeError from reading `.verdict` off a non-object.
+  it.each(['null', '42', '"just a string"', '[]'])('falls back to PENDING without throwing when the provider response is the JSON value %s', async (value) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      output: [{ content: [{ type: 'output_text', text: value }] }],
+    }), { status: 200 })));
+    const judge = createSemanticJudge({ OPENAI_API_KEY: 'test-key' });
+    const job = baseJob();
+    await expect(judge.evaluate(job, evaluateDeterministicCompletion(job))).resolves.toEqual(
+      expect.objectContaining({ verdict: 'PENDING' }),
+    );
+  });
 });
 
 describe('buildCompletionCertificateAsync', () => {

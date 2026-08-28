@@ -16,11 +16,28 @@ import { OrchestrationEnv, requestOrchestrationText } from './orchestrationModel
 // note that it has no filesystem/exec access) — job.changedFiles is only
 // ever a per-file stat summary (filename/status/+lines/-lines), the same
 // summary already rendered into recovery/handoff prompts elsewhere in
-// developerAgent.ts. So this judge is a scope-drift / self-report
-// plausibility check against goal + definitionOfDone + that file-level
-// shape + ChatGPT's own outputText, NOT a real code review — the prompt
-// below says so explicitly and instructs PENDING over a confident PASS
-// whenever the available evidence can't actually support one.
+// developerAgent.ts. So this judge is a scope-drift plausibility check
+// against goal + definitionOfDone + that file-level shape, NOT a real
+// code review — the prompt below says so explicitly and instructs
+// PENDING over a confident PASS whenever the available evidence can't
+// actually support one.
+//
+// job.outputText/handoffPrompt are NOT ChatGPT's actual words: this
+// Worker has no readback of real chat content at all (see
+// docs/ARCHITECTURE.md's own "next gaps" §10 item 5 — deeper ChatGPT
+// response readback is explicitly future/unofficial work). outputText is
+// always either the orchestration model's own generated summary or one
+// of a handful of fixed Worker status sentences — see
+// developerAgent.ts's job.status === 'completed'/phase 'review_ready'
+// transition, which is the ONLY point this judge actually runs
+// (deterministic.pass requires it) and unconditionally overwrites
+// outputText with a constant sentence carrying no information about
+// what was actually done. handoffPrompt is worse: it is always the
+// OUTGOING instruction sent TO ChatGPT for its next turn, never anything
+// ChatGPT sent back. Passed to the prompt below anyway (labeled for what
+// it really is) since it costs nothing and may occasionally carry a
+// little real signal via decision.summary, but the system prompt
+// instructs the model not to treat it as meaningful evidence.
 const MAX_FILES_IN_PROMPT = 40;
 
 export function createSemanticJudge(env: OrchestrationEnv): SemanticJudge {
@@ -57,14 +74,13 @@ export function createSemanticJudge(env: OrchestrationEnv): SemanticJudge {
 
 const SYSTEM_PROMPT = `あなたはAI DEV DECKのオーケストレーション専用「完了判定レビューAI」です。実装・コード編集・GitHub操作は一切行いません。実作業の実行主体はユーザーのChatGPTチャットです。
 
-あなたに渡されるのは目標・完了の定義・変更されたファイルの一覧(ファイル名と増減行数のみ、実際のdiff本文は渡されません)・ChatGPT自身の自己申告テキストだけです。実際のコード内容は読めません。
+あなたに渡されるのは目標・完了の定義・変更されたファイルの一覧(ファイル名と増減行数のみ、実際のdiff本文は渡されません)だけです。実際のコード内容は読めません。「Worker記録メモ」として渡される文章は、ChatGPTが実際に発言した内容ではなく、Workerが自動生成した定型ステータス文であることがほとんどです。意味のある自己申告として扱わないでください — 矛盾の材料にはなり得ますが、その不在や一般的な内容を根拠にPASS方向へ倒さないでください。
 
-役割は「CIが緑になった」という事実だけでは検出できない、次のような問題がないかを自己申告と変化の形から推測することです:
+役割は「CIが緑になった」という事実だけでは検出できない、次のような問題がないかをファイル変更の形から推測することです:
 - 変更されたファイルの範囲が目標や完了の定義と明らかに無関係(スコープドリフト)
-- 自己申告の内容がファイル変更の規模・範囲と整合していない
-- 完了の定義に列挙された項目のうち、自己申告からは満たされたと判断できないものがある
+- 完了の定義に列挙された項目のうち、変更されたファイルの範囲からは満たされたと判断できないものがある
 
-証拠が不十分な場合は絶対にPASSを断定しないでください。実際のコードを読んでいない以上、「アーキテクチャが健全」であることを断定的に保証することはできません — 明らかな矛盾や範囲外の変更が見当たらない、というだけの消極的な確認にとどめてください。判断できない・情報が不足している場合は必ずPENDINGを返してください。FAILは、自己申告とファイル変更の間に実際に矛盾がある、または完了の定義の一部が明らかに未達と読み取れる場合のみ使ってください。
+証拠が不十分な場合は絶対にPASSを断定しないでください。実際のコードを読んでいない以上、「アーキテクチャが健全」であることを断定的に保証することはできません — 明らかな矛盾や範囲外の変更が見当たらない、というだけの消極的な確認にとどめてください。判断できない・情報が不足している場合は必ずPENDINGを返してください。FAILは、ファイル変更と完了の定義の間に実際に矛盾がある、または完了の定義の一部が変更されたファイルの範囲から明らかに未達と読み取れる場合のみ使ってください。
 
 JSONのみを返してください。形式: {"verdict":"PASS"|"FAIL"|"PENDING","notes":["理由や懸念事項を短く"]}`;
 
@@ -83,17 +99,26 @@ function buildUserPrompt(job: DeveloperJob): string {
     ? 'このリポジトリはproject-kernel.jsonを持つ管理対象プロジェクトです。'
     : '';
 
-  return `GOAL: ${job.goal}\n\n完了の定義:\n${definitionOfDone}\n\n変更されたファイル:\n${files}${extraFilesNote}\n\nChatGPT自身の自己申告(最終出力):\n${(job.outputText || job.handoffPrompt || '').trim().slice(0, 4000) || '(自己申告なし)'}\n\n${kernelNote}`.trim();
+  return `GOAL: ${job.goal}\n\n完了の定義:\n${definitionOfDone}\n\n変更されたファイル:\n${files}${extraFilesNote}\n\nWorker記録メモ(ChatGPTの実際の発言ではなく、Workerが生成した定型文であることが多い。参考程度に扱うこと):\n${(job.outputText || job.handoffPrompt || '').trim().slice(0, 4000) || '(記録なし)'}\n\n${kernelNote}`.trim();
 }
 
 function parseVerdict(text: string): SemanticJudgeResult {
   const candidate = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  let parsed: Record<string, unknown>;
+  let raw: unknown;
   try {
-    parsed = JSON.parse(candidate) as Record<string, unknown>;
+    raw = JSON.parse(candidate);
   } catch {
     return { verdict: 'PENDING', notes: ['Semantic Judgeの応答をJSONとして解釈できませんでした。'] };
   }
+  // JSON.parse succeeds on any valid JSON value, not just objects — a
+  // degenerate provider response of `null`, `42`, or `"text"` parses
+  // without throwing, so parsed must still be object-checked before any
+  // property read below or this would throw an uncaught TypeError instead
+  // of degrading to PENDING like every other malformed-response case here.
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { verdict: 'PENDING', notes: ['Semantic Judgeの応答がオブジェクト形式ではありませんでした。'] };
+  }
+  const parsed = raw as Record<string, unknown>;
 
   const allowed: SemanticJudgeResult['verdict'][] = ['PASS', 'FAIL', 'PENDING'];
   const verdict = typeof parsed.verdict === 'string' && allowed.includes(parsed.verdict as SemanticJudgeResult['verdict'])

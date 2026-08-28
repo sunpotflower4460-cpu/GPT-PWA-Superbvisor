@@ -133,11 +133,13 @@ export function buildCompletionCertificate(job: DeveloperJob): CompletionCertifi
 // it downgrades an otherwise-passing deterministic result to REJECTED
 // rather than leaving it stuck at COMPLETION_CANDIDATE forever.
 export async function buildCompletionCertificateAsync(job: DeveloperJob, judge: SemanticJudge): Promise<CompletionCertificate> {
-  const deterministic = evaluateDeterministicCompletion(job);
   const base = buildCompletionCertificate(job);
   if (base.state !== 'COMPLETION_CANDIDATE') return base;
 
-  const semantic = await judge.evaluate(job, deterministic);
+  // Safe to recompute rather than thread through from buildCompletionCertificate:
+  // base.state === 'COMPLETION_CANDIDATE' already means deterministic.pass was
+  // true (see buildCompletionCertificate above), so this is pure and cheap.
+  const semantic = await judge.evaluate(job, evaluateDeterministicCompletion(job));
   const state: CompletionState = semantic.verdict === 'PASS'
     ? 'CERTIFIED'
     : semantic.verdict === 'FAIL'
