@@ -49,6 +49,8 @@ import {
   resolveRouteDispatchChatUrl,
 } from './routePlan';
 import { deriveContextPressure } from './contextPressure';
+import { CompletionCertificate, buildCompletionCertificateAsync, firstNonEmpty } from './completionJudge';
+import { createSemanticJudge } from './semanticJudge';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
   SUPERVISOR_STATE: KVNamespace;
@@ -174,6 +176,14 @@ export interface DeveloperJob {
   lastQueuedHandoffFingerprint?: string;
   lastQueuedCommandId?: string;
   lastDispatchError?: string;
+  // Computed once, right here at the review_ready transition (see
+  // refreshDeveloperJob below), not on every later read — completionJudge.ts's
+  // Semantic Judge is an LLM call, so recomputing it on every GET would be
+  // wasteful and could report a different verdict across reads of the same
+  // immutable head. This is the actual fix for the Semantic Judge (PR #47,
+  // #49) otherwise never running in ordinary usage: nothing in this app
+  // called GET /api/developer-jobs/:id/completion before this field existed.
+  completionCertificate?: CompletionCertificate;
 }
 
 export interface TraceEntry {
@@ -595,10 +605,21 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
     trace: appendTrace(job, 'COMPLETED', pullRequest ? `PR #${pullRequest.number}` : undefined),
     updatedAt: new Date().toISOString(),
   };
+  // Computed exactly once here, not on every later GET (see
+  // DeveloperJob.completionCertificate's own comment) — this transition
+  // only ever fires once per job (refreshDeveloperJob returns early for a
+  // job already 'completed', line ~329), so this is a bounded, one-time
+  // cost, not a per-refresh one. Job completion itself stays governed by
+  // CI evidence alone, same as before this existed — a semantic FAIL/
+  // PENDING never blocks or reverts status/phase here, it's an additional
+  // advisory layer surfaced alongside, not a gate.
+  job = { ...job, completionCertificate: await buildCompletionCertificateAsync(job, createSemanticJudge(env)) };
   await saveJob(env, job);
   await safePush(env, {
     title: `${job.projectName || job.repository}: CI確認完了`,
-    body: pullRequest ? `CI成功。Draft PR #${pullRequest.number} を確認できます。` : 'CI成功を確認しました。',
+    body: job.completionCertificate?.state === 'REJECTED'
+      ? `CI成功しましたが、完了判定レビューが要確認と報告しています: ${firstNonEmpty(job.completionCertificate.knownLimitations) || job.completionCertificate.semanticReview}`
+      : pullRequest ? `CI成功。Draft PR #${pullRequest.number} を確認できます。` : 'CI成功を確認しました。',
     tag: `developer-${job.id}`,
     projectId: job.projectId,
     kind: 'complete',

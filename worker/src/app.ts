@@ -110,7 +110,13 @@ export default {
     if (developerCompletion && request.method === 'GET') {
       const job = await getDeveloperJob(env, decodeURIComponent(developerCompletion[1]));
       if (!job) return json({ error: 'developer_job_not_found' }, 404, env, request);
-      const completion = await buildCompletionCertificateAsync(job, createSemanticJudge(env));
+      // Prefer the certificate refreshDeveloperJob already computed and
+      // persisted once, right at the review_ready transition — re-running
+      // the Semantic Judge's LLM call on every GET would be wasteful and
+      // could report a different verdict across reads of the same
+      // immutable head. Only compute fresh here as a fallback for a job
+      // that reached review_ready before this field existed.
+      const completion = job.completionCertificate ?? await buildCompletionCertificateAsync(job, createSemanticJudge(env));
       return json({ completion }, 200, env, request);
     }
 

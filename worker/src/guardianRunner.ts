@@ -5,6 +5,7 @@ import {
   getDeveloperJob,
   refreshDeveloperJob,
 } from './developerAgent';
+import { CompletionCertificate, firstNonEmpty } from './completionJudge';
 import { GitHubEnv } from './githubExecutor';
 import { OrchestrationEnv } from './orchestrationModel';
 import { AutopilotRouteState } from './orchestratorPolicy';
@@ -70,6 +71,11 @@ export interface GuardianRun {
   autopilotRoute?: AutopilotRouteState;
   routePlan?: RouteNode[];
   notifiedAt?: string;
+  // Mirrors DeveloperJob.completionCertificate (see developerAgent.ts's own
+  // comment) — copied over on the same refresh that observes
+  // job.status === 'completed', so a Guardian-run consumer sees the same
+  // Semantic Judge verdict a plain Developer job would.
+  completionCertificate?: CompletionCertificate;
 }
 
 const RUN_TTL = 60 * 60 * 24 * 14;
@@ -223,13 +229,27 @@ async function advanceGuardianRunUnlocked(
     orchestratorRateLimited: job.orchestratorRateLimited,
     autopilotRoute: job.autopilotRoute,
     routePlan: job.routePlan,
+    completionCertificate: job.completionCertificate,
     transientErrorCount: 0,
     error: job.error,
     updatedAt: new Date().toISOString(),
   };
 
   if (job.status === 'completed') {
-    return finalize(env, run, 'completed', '現在headのCI成功を確認しました。実装はChatGPT、Workerは監督のみで完了しています。');
+    // Must reflect the Semantic Judge's verdict here, not a hardcoded
+    // success line: this finalize() call sends Guardian's OWN push
+    // (tag `guardian-${run.id}`, separate from developerAgent.ts's own
+    // `developer-${job.id}` push for the same completion). A job.status
+    // === 'completed' with completionCertificate.state === 'REJECTED'
+    // still means real evidence contradicts completion — reporting plain
+    // "CI success, all done" here would directly contradict the correct
+    // push refreshDeveloperJob already sent moments earlier, for every
+    // Guardian user (this app's primary/heavily-used path).
+    const rejected = job.completionCertificate?.state === 'REJECTED';
+    const message = rejected
+      ? `CI成功しましたが、完了判定レビューが要確認と報告しています: ${firstNonEmpty(job.completionCertificate?.knownLimitations) || job.completionCertificate?.semanticReview}`
+      : '現在headのCI成功を確認しました。実装はChatGPT、Workerは監督のみで完了しています。';
+    return finalize(env, run, 'completed', message);
   }
 
   if (job.phase === 'human_required') {
