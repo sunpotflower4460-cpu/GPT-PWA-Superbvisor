@@ -50,11 +50,14 @@ export function evaluateDeterministicCompletion(job: DeveloperJob): Deterministi
 // Deliberately an interface with no default "yes" implementation, per the
 // design's own instruction: implement the state machine and the extension
 // point first, and do not hand a fake semantic judgment to an external
-// coding agent to fill in later. A real implementation (an LLM asked "does
-// this diff actually satisfy the goal, is scope drift present, is the
-// architecture sound") is future work that plugs in here; until one exists,
-// pendingSemanticJudge below always reports PENDING rather than fabricating
-// a PASS.
+// coding agent to fill in later. semanticJudge.ts's createSemanticJudge is
+// the real implementation (an LLM asked "does this diff actually satisfy
+// the goal, is scope drift present"), wired into production via
+// worker/src/app.ts's completion endpoint and developerAgent.ts's
+// refreshDeveloperJob. pendingSemanticJudge below is the null-object
+// default this interface's contract is built around — still legitimately
+// used as a test fixture (see completionJudge.test.ts) proving the
+// baseline "no judge configured" behavior never fabricates a PASS.
 export interface SemanticJudgeResult {
   verdict: 'PASS' | 'FAIL' | 'PENDING';
   notes: string[];
@@ -92,10 +95,13 @@ export function firstNonEmpty(items: string[] | undefined): string | undefined {
 }
 
 // Synchronous by design: only runs the Deterministic Judge and treats the
-// Semantic Judge as always-PENDING (no SemanticJudge is wired in yet — see
-// pendingSemanticJudge above). A future async variant that actually invokes
-// a configured SemanticJudge belongs alongside whatever first implements
-// one; adding an unused async seam here now would be speculative.
+// Semantic Judge as always-PENDING. This stays the cheap, no-provider-call
+// baseline even now that a real SemanticJudge exists (semanticJudge.ts) —
+// buildCompletionCertificateAsync below is the actual async variant that
+// invokes a configured judge; this function is what it calls first and
+// falls back to whenever the deterministic side alone already rules out
+// completion (see the early return there), so a real LLM call is never
+// spent on a job that isn't even a completion candidate.
 export function buildCompletionCertificate(job: DeveloperJob): CompletionCertificate {
   const deterministic = evaluateDeterministicCompletion(job);
   const state: CompletionState = job.status !== 'completed' && job.phase !== 'review_ready'
@@ -109,8 +115,9 @@ export function buildCompletionCertificate(job: DeveloperJob): CompletionCertifi
     // deterministic check contradicts completion" (CI green, route
     // complete, no outstanding approval) — it says nothing about whether
     // job.definitionOfDone was actually satisfied, which only a real
-    // Semantic Judge could confirm, and none exists yet (pendingSemanticJudge
-    // above always reports PENDING). Claiming 'PASS' here from deterministic
+    // Semantic Judge could confirm, and this synchronous function never
+    // consults one (see buildCompletionCertificateAsync below for the
+    // variant that does). Claiming 'PASS' here from deterministic
     // evidence alone would be exactly the "AI says done -> treat as done"
     // shortcut this whole module exists to prevent. 'FAIL' is still
     // warranted once REJECTED: a deterministic check actively contradicting

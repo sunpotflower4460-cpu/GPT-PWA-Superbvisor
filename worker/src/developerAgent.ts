@@ -149,9 +149,10 @@ export interface DeveloperJob {
   // human to actually fix something.
   orchestratorRateLimited?: boolean;
   // Structured Autopilot Route progress, persisted independently of the
-  // chat's own conversational memory (docs/ARCHITECTURE.md §10 gap #4).
-  // Only ever set for a job whose prompt carries the route contract
-  // (hasAutopilotRouteContract) — absent for every ordinary job.
+  // chat's own conversational memory (docs/ARCHITECTURE.md §10
+  // "Implemented foundation" item 21). Only ever set for a job whose
+  // prompt carries the route contract (hasAutopilotRouteContract) —
+  // absent for every ordinary job.
   autopilotRoute?: AutopilotRouteState;
   // The declared Route plan (see routePlan.ts's own comment on why this is
   // kept separate from autopilotRoute's self-reported progress). Absent

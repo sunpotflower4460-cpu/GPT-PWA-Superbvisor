@@ -254,6 +254,7 @@ Guardianは外部AI開発者ではなく、**ChatGPT作業を監督するハー�
 - action_required → あなた待ち
 - 一時GitHub/API障害 → 非終端で再監視
 - CI成功 → Draft PR導線
+- CI成功はそれだけで「完了」扱いにしない → Completion Judge(deterministic checks + Semantic Judge)がGOAL/TASK/変更ファイル範囲・KERNEL_AWAREプロジェクトなら実在するHANDOFF.mdも参照して完了証明書(certificate)を発行し、要確認と判定された場合は完了通知の文面にそのまま反映する(Developer/Guardian双方の通知経路)
 - Cron/manual refresh競合 → Coordinatorの`guardian-advance` leaseで通常の二重advanceを抑止
 - 自動mergeなし
 - production deployなし
