@@ -94,6 +94,22 @@ export function firstNonEmpty(items: string[] | undefined): string | undefined {
   return items?.find((item) => item.trim());
 }
 
+// Both refreshDeveloperJob's own completion push (developerAgent.ts) and
+// Guardian's separate finalize() push (guardianRunner.ts) need the exact
+// same REJECTED-aware message logic. Sharing this one implementation is
+// what makes it directly unit-testable in isolation from either caller's
+// much larger, KV/GitHub-API-heavy environment — see completionJudge.test.ts.
+// A REJECTED certificate is real evidence against completion even though CI
+// passed, so it must always win over whatever "happy path" message the
+// caller would otherwise send: PR #51 shipped exactly one caller
+// (guardianRunner.ts) independently hardcoding a success message that
+// silently ignored this, while the other caller (developerAgent.ts) already
+// had it right.
+export function describeCompletionOutcome(certificate: CompletionCertificate | undefined, fallbackMessage: string): string {
+  if (certificate?.state !== 'REJECTED') return fallbackMessage;
+  return `CI成功しましたが、完了判定レビューが要確認と報告しています: ${firstNonEmpty(certificate.knownLimitations) || certificate.semanticReview}`;
+}
+
 // Synchronous by design: only runs the Deterministic Judge and treats the
 // Semantic Judge as always-PENDING. This stays the cheap, no-provider-call
 // baseline even now that a real SemanticJudge exists (semanticJudge.ts) —
