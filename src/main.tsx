@@ -31,6 +31,7 @@ import './release-update.css';
 import './data-backup.css';
 import './chat-control.css';
 import './chat-bridge.css';
+import './mobile-chrome.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

@@ -1,0 +1,53 @@
+/* Coordinated mobile bottom chrome: tab bar + FAB dock + content clearance.
+   Independent position:fixed FABs previously shared the same bottom band and
+   stacked on the empty-state CTA. Keep desktop positions; only re-grid <700px. */
+
+@media (max-width: 699px) {
+  :root {
+    --fab-inline-pad: max(14px, env(safe-area-inset-left, 0px));
+    --fab-inline-pad-end: max(14px, env(safe-area-inset-right, 0px));
+    --fab-track: calc(100vw - var(--fab-inline-pad) - var(--fab-inline-pad-end) - var(--fab-slot));
+    --fab-col-1: var(--fab-inline-pad);
+    --fab-col-2: calc(var(--fab-inline-pad) + var(--fab-track) / 3);
+    --fab-col-3: calc(var(--fab-inline-pad) + var(--fab-track) * 2 / 3);
+    --fab-col-4: calc(100vw - var(--fab-inline-pad-end) - var(--fab-slot));
+    --fab-row-1: calc(var(--bottom-nav-offset) + var(--bottom-nav-height) + 12px + var(--safe-bottom));
+    --fab-row-2: calc(var(--fab-row-1) + var(--fab-slot) + var(--fab-gap));
+    --app-bottom-clearance: calc(var(--fab-row-2) + var(--fab-slot) + 16px);
+  }
+
+  .smart-fab,
+  .notification-fab,
+  .handoff-fab,
+  .evidence-fab,
+  .worker-fab,
+  .developer-fab,
+  .plan-fab,
+  .chat-control-fab {
+    right: auto;
+    left: var(--fab-col-1);
+    bottom: var(--fab-row-1);
+    transform: none;
+  }
+
+  .smart-fab { left: var(--fab-col-1); }
+  .notification-fab { left: var(--fab-col-2); }
+  .handoff-fab { left: var(--fab-col-3); }
+  .evidence-fab { left: var(--fab-col-4); }
+
+  .plan-fab,
+  .developer-fab,
+  .worker-fab,
+  .chat-control-fab {
+    bottom: var(--fab-row-2);
+  }
+
+  .plan-fab { left: var(--fab-col-1); }
+  .developer-fab { left: var(--fab-col-2); }
+  .worker-fab { left: var(--fab-col-3); }
+  .chat-control-fab {
+    left: var(--fab-col-4);
+    width: var(--fab-size);
+    height: var(--fab-size);
+  }
+}

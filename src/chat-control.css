@@ -1,7 +1,7 @@
 .chat-control-fab {
   position: fixed;
   right: 18px;
-  bottom: 156px;
+  bottom: calc(156px + env(safe-area-inset-bottom, 0px));
   z-index: 55;
   width: 50px;
   height: 50px;
@@ -316,5 +316,5 @@
   .chat-control-main { overflow: visible; padding-bottom: 70px; }
   .chat-control-layout { overflow-y: auto; }
   .chat-control-quick { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .chat-control-fab { right: 14px; bottom: 146px; }
+  .chat-control-fab { right: 14px; bottom: calc(146px + env(safe-area-inset-bottom, 0px)); }
 }
