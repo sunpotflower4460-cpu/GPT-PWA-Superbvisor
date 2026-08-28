@@ -281,6 +281,26 @@ describe('chat command claim chatUrl scoping (Multi Chat / Specialist Chat)', ()
     await expect(claimNextChatCommand(env, 'bridge-b', 'project-1', 'chatgpt.com/c/chat-b'))
       .rejects.toThrow(INVALID_CLAIM_CHAT_URL_ERROR);
   });
+
+  it('still matches a command persisted before normalizeChatUrl started stripping fragments/trailing slashes', async () => {
+    // Regression guard: a command written under an OLDER normalizeChatUrl
+    // (kept the fragment/trailing slash) must not become permanently
+    // unclaimable via chatUrl-scoped claims just because a later deploy
+    // changed what "normalized" means — the STORED value is re-normalized
+    // at comparison time too, not just the incoming filter.
+    const { env, store } = fakeEnv();
+    const legacyFormat: ChatCommand = {
+      ...baseCommand,
+      id: 'legacy-command',
+      chatUrl: 'https://chatgpt.com/c/chat-a/',
+      prompt: 'work for chat A, stored in the old URL format',
+    };
+    store.set(`chat-command:${legacyFormat.id}`, JSON.stringify(legacyFormat));
+    store.set(`chat-project:project-1:${'0'.repeat(17)}:${legacyFormat.id}`, legacyFormat.id);
+
+    const claimed = await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-a');
+    expect(claimed?.id).toBe(legacyFormat.id);
+  });
 });
 
 describe('chat command claim recovery', () => {

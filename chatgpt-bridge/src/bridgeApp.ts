@@ -431,6 +431,10 @@ function bridgeWidgetHtml() {
     return 'ai-dev-deck-delivery-receipt:' + (projectId() || 'unknown') + ':' + bridgeId();
   }
 
+  function legacyReceiptKey() {
+    return 'ai-dev-deck-delivery-receipt:' + (projectId() || 'unknown');
+  }
+
   function readReceipt() {
     const pid = projectId() || 'unknown';
     if (cachedDeliveryReceipt) {
@@ -445,6 +449,26 @@ function bridgeWidgetHtml() {
           cachedDeliveryReceipt = { ...parsed, projectId: parsed.projectId || pid };
           return cachedDeliveryReceipt;
         }
+      } catch {}
+    }
+    // Migration for a receipt saved by a widget version from before
+    // receiptKey() was bridgeId-scoped: it sits under the old project-only
+    // key. Without this, a delivery that succeeded but hadn't yet reported
+    // its result at the exact moment this version rolled out would become
+    // permanently invisible to THIS tab, so stale-claim recovery could
+    // later resend a prompt that was already posted. Adopt it only if it's
+    // actually this tab's own receipt (its own bridgeId field matches),
+    // then move it to the new key so a different tab won't also adopt it.
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try {
+        const raw = storage.getItem(legacyReceiptKey());
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        if (parsed.bridgeId !== bridgeId()) continue;
+        cachedDeliveryReceipt = { ...parsed, projectId: parsed.projectId || pid };
+        saveReceipt(cachedDeliveryReceipt);
+        try { storage.removeItem(legacyReceiptKey()); } catch {}
+        return cachedDeliveryReceipt;
       } catch {}
     }
     return null;

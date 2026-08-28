@@ -11,6 +11,9 @@ import {
   isCoordinatorCommandClaimable,
   summarizeCoordinatorCommands,
 } from './projectCoordinator';
+import { normalizeChatUrl } from './chatUrl';
+
+export { normalizeChatUrl } from './chatUrl';
 
 export type ChatCommandStatus = CoordinatorChatCommandStatus;
 export type ChatCommandKind = CoordinatorChatCommandKind;
@@ -42,29 +45,6 @@ const KV_LIST_PAGE_SIZE = 1000;
 const KV_MIGRATION_PAGE_SIZE = 200;
 const COORDINATOR_IMPORT_BATCH_SIZE = 20;
 const migratedProjects = new Set<string>();
-
-export function normalizeChatUrl(value: string) {
-  try {
-    const url = new URL(value.trim());
-    const host = url.hostname.toLowerCase();
-    if (url.protocol !== 'https:') return null;
-    if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com') return null;
-    // A fragment is never sent to the server and can't identify a
-    // different conversation resource; a trailing slash is likewise
-    // insignificant here. Both are discarded so two spellings of the SAME
-    // conversation (e.g. copied from different UI surfaces, or with/without
-    // a "#section" ChatGPT sometimes appends) compare equal — this value is
-    // used as an exact-match identity key for Multi Chat / Specialist Chat
-    // claim scoping (see claimNextChatCommand), and a meaningless spelling
-    // difference there means a correctly-connected Bridge polls forever
-    // while its own commands sit queued, unmatched.
-    url.hash = '';
-    const path = url.pathname.replace(/\/+$/, '') || '/';
-    return `${url.origin}${path}${url.search}`;
-  } catch {
-    return null;
-  }
-}
 
 export function sanitizePrompt(value: string) {
   return value.trim().slice(0, 24_000);
@@ -455,7 +435,12 @@ async function findProjectClaimCandidateKv(
 
     for (const command of commands) {
       if (!command) continue;
-      if (chatUrl && command.chatUrl !== chatUrl) continue;
+      // Re-normalize the STORED value too, not just the incoming filter —
+      // a command persisted before normalizeChatUrl started stripping
+      // fragments/trailing slashes must still match today's normalized
+      // form, or it becomes permanently unclaimable via a chatUrl-scoped
+      // claim until it expires.
+      if (chatUrl && normalizeChatUrl(command.chatUrl) !== chatUrl) continue;
       const isOwnedFreshClaim = command.status === 'claimed'
         && command.bridgeId === bridgeId
         && Boolean(command.claimedAt)
@@ -476,7 +461,9 @@ async function findProjectClaimCandidateKv(
 }
 
 function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: number, chatUrl?: string) {
-  const scoped = chatUrl ? commands.filter((command) => command.chatUrl === chatUrl) : commands;
+  // See findProjectClaimCandidateKv's own comment on why the stored value
+  // is re-normalized here too, not just the incoming filter.
+  const scoped = chatUrl ? commands.filter((command) => normalizeChatUrl(command.chatUrl) === chatUrl) : commands;
   const existingOwnedClaim = scoped
     .filter((command) => command.status === 'claimed'
       && command.bridgeId === bridgeId

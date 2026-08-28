@@ -279,6 +279,26 @@ describe('ProjectCoordinator command atomicity', () => {
     expect((await claim.json() as { command: unknown }).command).toBeNull();
   });
 
+  it('still matches a command persisted before normalizeChatUrl started stripping fragments/trailing slashes', async () => {
+    // Regression guard: see the same-named test in chatCommandQueue.test.ts
+    // for the KV path — this is the Durable Object path.
+    const { coordinator, values } = createCoordinatorHarness();
+    const now = new Date().toISOString();
+    values.set('command:legacy-command', {
+      id: 'legacy-command',
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a/',
+      prompt: 'work for chat A, stored in the old URL format',
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const claim = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a', chatUrl: 'https://chatgpt.com/c/chat-a' });
+    const claimed = (await claim.json() as { command: { id: string } | null }).command;
+    expect(claimed?.id).toBe('legacy-command');
+  });
+
   it('lets only one bridge own a simultaneous claim', async () => {
     const coordinator = createCoordinator();
     await post(coordinator, '/commands/enqueue', {

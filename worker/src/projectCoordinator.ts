@@ -1,3 +1,5 @@
+import { normalizeChatUrl } from './chatUrl';
+
 export type CoordinatorChatCommandStatus = 'queued' | 'claimed' | 'delivered' | 'failed' | 'cancelled';
 
 // NEXT (the default, absent for every command enqueued before this field
@@ -467,7 +469,12 @@ export class ProjectCoordinator {
     await this.forEachCommandPage((page) => {
       for (const command of page.values()) {
         if (!isStoredCommand(command) || isExpiredCommand(command)) continue;
-        if (chatUrl && command.chatUrl !== chatUrl) continue;
+        // Re-normalize the STORED value too, not just the incoming filter —
+        // see chatCommandQueue.ts's findProjectClaimCandidateKv for why (a
+        // record persisted before normalizeChatUrl started stripping
+        // fragments/trailing slashes must still match today's normalized
+        // form).
+        if (chatUrl && normalizeChatUrl(command.chatUrl) !== chatUrl) continue;
         if (isFreshClaimOwnedByBridge(command, bridgeId, nowMs)
           && (!existingOwnedClaim || (command.claimedAt || '') < (existingOwnedClaim.claimedAt || ''))) {
           existingOwnedClaim = command;
