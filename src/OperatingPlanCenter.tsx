@@ -14,6 +14,7 @@ import {
   effectiveWorkflow,
   formatOperatingPlanPrompt,
   getOperatingPlan,
+  isAutopilotRouteWorkflow,
   isValidChatUrl,
   parseRoutePlan,
   saveOperatingPlan,
@@ -304,25 +305,55 @@ export default function OperatingPlanCenter() {
                     </label>
 
                     {(() => {
-                      const phases = parseRoutePlan(effectiveWorkflow(plan));
+                      const workflow = effectiveWorkflow(plan);
+                      const phases = parseRoutePlan(workflow);
                       if (phases.length < 2) return null;
+                      // The Worker only redispatches to a LATER phase's
+                      // bound chat when the workflow is a recognized
+                      // AUTOPILOT ROUTE (repeat-count/conditional-branch
+                      // language — see isAutopilotRouteWorkflow and
+                      // worker/src/developerAgent.ts's
+                      // hasAutopilotRouteContract gate on job.prompt) —
+                      // routePhaseIndex only ever advances past 0 inside
+                      // that branch. But phase 1's own binding is NOT in
+                      // the same boat: resolveRouteDispatchChatUrl
+                      // (routePlan.ts) resolves routePlan[0].chatUrl for
+                      // EVERY dispatch at phase index 0 — the initial
+                      // handoff and every CI-failure recovery — for any
+                      // workflow, autopilot or not (a single-shot
+                      // workflow's one-and-only dispatch IS phase 1's
+                      // dispatch). So phase 1 must stay visible/editable
+                      // always; only phase 2+ is ever actually inert for
+                      // a non-autopilot workflow, and even then the row
+                      // stays visible+editable (not hidden, not
+                      // disabled) so an existing stale binding from
+                      // before the workflow text changed can still be
+                      // seen and cleared, not just silently stranded.
+                      const autopilot = isAutopilotRouteWorkflow(workflow);
                       return (
                         <div className="plan-field plan-specialist-chats">
                           <span>工程ごとのSpecialist Chat <small>任意・空欄は既定のChatGPT URLへ</small></span>
-                          <small className="plan-specialist-chat-caution">標準手順の途中に工程を挿入/削除すると、下の割り当てが別の工程にずれることがあります。編集後は割り当てを見直してください。</small>
-                          {phases.map((phase) => (
-                            <label key={phase.id} className="plan-specialist-chat-row">
-                              <small>{phase.label}</small>
-                              <input
-                                value={plan.phaseChatUrls[phase.id] || ''}
-                                onChange={(event) => patchPhaseChatUrl(phase.id, event.target.value)}
-                                placeholder="https://chatgpt.com/c/..."
-                              />
-                              {plan.phaseChatUrls[phase.id] && !isValidChatUrl(plan.phaseChatUrls[phase.id]) && (
-                                <small className="plan-specialist-chat-warning">有効なChatGPT URLではありません(https://chatgpt.com/... など)</small>
-                              )}
-                            </label>
-                          ))}
+                          <small className="plan-specialist-chat-caution">
+                            {autopilot
+                              ? '標準手順の途中に工程を挿入/削除すると、下の割り当てが別の工程にずれることがあります。編集後は割り当てを見直してください。'
+                              : 'この標準手順は自動運転ルート(回数指定や条件分岐を含む手順)として認識されていないため、1つ目の工程の割り当てのみ実際に使われます。2つ目以降は保存はされますが使われません(不要なら空欄にしてください)。'}
+                          </small>
+                          {phases.map((phase, index) => {
+                            const inert = !autopilot && index > 0;
+                            return (
+                              <label key={phase.id} className="plan-specialist-chat-row">
+                                <small>{phase.label}{inert ? ' (未使用)' : ''}</small>
+                                <input
+                                  value={plan.phaseChatUrls[phase.id] || ''}
+                                  onChange={(event) => patchPhaseChatUrl(phase.id, event.target.value)}
+                                  placeholder="https://chatgpt.com/c/..."
+                                />
+                                {plan.phaseChatUrls[phase.id] && !isValidChatUrl(plan.phaseChatUrls[phase.id]) && (
+                                  <small className="plan-specialist-chat-warning">有効なChatGPT URLではありません(https://chatgpt.com/... など)</small>
+                                )}
+                              </label>
+                            );
+                          })}
                         </div>
                       );
                     })()}
