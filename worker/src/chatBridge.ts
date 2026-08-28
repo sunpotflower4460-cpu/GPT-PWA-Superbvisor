@@ -15,7 +15,11 @@ export interface ChatBridgeEnv {
 const BRIDGE_PREFIX = 'chat-bridge-project:';
 const BRIDGE_TTL = 60 * 10;
 const CONNECTED_WINDOW_MS = 90_000;
-const MAX_BRIDGES_PER_PROJECT = 50;
+const KV_LIST_PAGE_SIZE = 1000;
+// A sanity backstop (100k bridge keys), not a realistic ceiling — exists so
+// a malformed/malicious response can't spin listProjectBridges into an
+// infinite loop, same pattern as githubExecutor.ts's MAX_JOB_PAGES.
+const MAX_BRIDGE_LIST_PAGES = 100;
 
 interface StoredBridge {
   projectId?: string;
@@ -74,13 +78,31 @@ export async function getChatBridgeStatus(env: ChatBridgeEnv, projectId: string,
   return bridgeStatus(mostRecentlySeen(bridges));
 }
 
+// Paginates rather than trusting a single capped list() call: KV's list()
+// returns keys in LEXICOGRAPHIC order by key name, not by recency, and
+// bridgeId (a random per-tab/session suffix, see bridgeApp.ts's
+// createBridgeId) has no relationship to lastSeenAt. A single-page cap
+// would return an arbitrary lexicographic slice once a project accumulates
+// more bridge keys than the cap — the actually-most-recent, actually-
+// connected bridge for a requested chatUrl could simply never be fetched,
+// silently reporting it disconnected. Same cursor-loop pattern
+// chatCommandQueue.ts already uses for the identical risk elsewhere.
 async function listProjectBridges(env: ChatBridgeEnv, projectId: string): Promise<StoredBridge[]> {
-  const listed = await env.SUPERVISOR_STATE.list({ prefix: `${BRIDGE_PREFIX}${projectId}:bridge:`, limit: MAX_BRIDGES_PER_PROJECT });
-  const values = await Promise.all(listed.keys.map(({ name }) => env.SUPERVISOR_STATE.get(name)));
   const bridges: StoredBridge[] = [];
-  for (const raw of values) {
-    if (!raw) continue;
-    try { bridges.push(JSON.parse(raw) as StoredBridge); } catch { /* skip malformed */ }
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_BRIDGE_LIST_PAGES; page += 1) {
+    const listed = await env.SUPERVISOR_STATE.list({
+      prefix: `${BRIDGE_PREFIX}${projectId}:bridge:`,
+      limit: KV_LIST_PAGE_SIZE,
+      ...(cursor ? { cursor } : {}),
+    });
+    const values = await Promise.all(listed.keys.map(({ name }) => env.SUPERVISOR_STATE.get(name)));
+    for (const raw of values) {
+      if (!raw) continue;
+      try { bridges.push(JSON.parse(raw) as StoredBridge); } catch { /* skip malformed */ }
+    }
+    if (listed.list_complete) break;
+    cursor = listed.cursor;
   }
   return bridges;
 }

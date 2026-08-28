@@ -8,9 +8,26 @@ function fakeEnv() {
       get: async (key: string) => store.get(key) ?? null,
       put: async (key: string, value: string) => { store.set(key, value); },
       delete: async (key: string) => { store.delete(key); },
-      list: async ({ prefix = '', limit = 1000 }: { prefix?: string; limit?: number }) => {
-        const matching = [...store.keys()].filter((key) => key.startsWith(prefix)).sort().slice(0, limit);
-        return { keys: matching.map((name) => ({ name })), list_complete: true, cacheStatus: null };
+      list: async ({
+        prefix = '',
+        limit = 1000,
+        cursor,
+      }: {
+        prefix?: string;
+        limit?: number;
+        cursor?: string;
+      }) => {
+        const matching = [...store.keys()].filter((key) => key.startsWith(prefix)).sort();
+        const offset = cursor ? Number.parseInt(cursor, 10) || 0 : 0;
+        const page = matching.slice(offset, offset + limit);
+        const nextOffset = offset + page.length;
+        const listComplete = nextOffset >= matching.length;
+        return {
+          keys: page.map((name) => ({ name })),
+          list_complete: listComplete,
+          ...(listComplete ? {} : { cursor: String(nextOffset) }),
+          cacheStatus: null,
+        };
       },
     },
   } as unknown as ChatBridgeEnv;
@@ -65,5 +82,38 @@ describe('chat bridge heartbeat (Multi Chat / Specialist Chat)', () => {
 
     const status = await getChatBridgeStatus(env, 'project-1', 'https://chatgpt.com/c/chat-a#section');
     expect(status.connected).toBe(true);
+  });
+
+  it('paginates past 1000 bridge keys instead of returning an arbitrary lexicographic slice', async () => {
+    // Regression guard: KV's list() sorts by key name, not by recency, and
+    // bridgeId is a random per-tab suffix unrelated to lastSeenAt. A
+    // single-page-capped list() call could return only lexicographically-
+    // early keys and never see the actually-connected target bridge just
+    // because its random id happens to sort late. Bridge ids below are
+    // deliberately early-sorting ("a...") except the real target, whose id
+    // ("zzz-target") deliberately sorts after all of them.
+    const { env, store } = fakeEnv();
+    const now = new Date().toISOString();
+    for (let index = 0; index < 1001; index += 1) {
+      const bridgeId = `a-${String(index).padStart(4, '0')}`;
+      store.set(`chat-bridge-project:project-1:bridge:${bridgeId}`, JSON.stringify({
+        projectId: 'project-1',
+        bridgeId,
+        chatUrl: 'https://chatgpt.com/c/unrelated',
+        lastSeenAt: now,
+        capabilities: [],
+      }));
+    }
+    store.set('chat-bridge-project:project-1:bridge:zzz-target', JSON.stringify({
+      projectId: 'project-1',
+      bridgeId: 'zzz-target',
+      chatUrl: 'https://chatgpt.com/c/target',
+      lastSeenAt: now,
+      capabilities: [],
+    }));
+
+    const status = await getChatBridgeStatus(env, 'project-1', 'https://chatgpt.com/c/target');
+    expect(status.connected).toBe(true);
+    expect(status.bridgeId).toBe('zzz-target');
   });
 });
