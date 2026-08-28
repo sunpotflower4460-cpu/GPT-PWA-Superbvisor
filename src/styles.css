@@ -121,6 +121,8 @@ h2 { margin-bottom: 8px; font-size: 18px; letter-spacing: -.02em; }
 .modal label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .modal input, .modal textarea { width: 100%; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.055); color: #fff; padding: 12px; resize: vertical; }
 .modal input::placeholder, .modal textarea::placeholder { color: #66718b; }
+.field-hint { margin: -4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.field-hint a { color: #9dccff; }
 .settings-list { display: grid; gap: 0; }
 .settings-list div { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .settings-list div:last-child { border-bottom: 0; }
