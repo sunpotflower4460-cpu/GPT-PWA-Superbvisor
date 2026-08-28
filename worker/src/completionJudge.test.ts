@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { buildCompletionCertificate, evaluateDeterministicCompletion, firstNonEmpty, pendingSemanticJudge } from './completionJudge';
+import { CompletionCertificate, buildCompletionCertificate, describeCompletionOutcome, evaluateDeterministicCompletion, firstNonEmpty, pendingSemanticJudge } from './completionJudge';
 import { DeveloperJob } from './developerAgent';
+
+function baseCertificate(overrides: Partial<CompletionCertificate> = {}): CompletionCertificate {
+  return {
+    goal: 'PENDING',
+    ci: 'PASS',
+    guard: 'PASS',
+    semanticReview: 'PENDING',
+    blockingIssues: 0,
+    knownLimitations: [],
+    state: 'COMPLETION_CANDIDATE',
+    ...overrides,
+  };
+}
 
 function baseJob(overrides: Partial<DeveloperJob> = {}): DeveloperJob {
   return {
@@ -159,5 +172,40 @@ describe('firstNonEmpty', () => {
     expect(firstNonEmpty(['', '   '])).toBeUndefined();
     expect(firstNonEmpty([])).toBeUndefined();
     expect(firstNonEmpty(undefined)).toBeUndefined();
+  });
+});
+
+describe('describeCompletionOutcome', () => {
+  // This is the shared implementation both developerAgent.ts's completion
+  // push and guardianRunner.ts's finalize() push call — PR #51 shipped a
+  // Guardian message that ignored completionCertificate entirely and always
+  // reported success, contradicting the correct message the other caller
+  // already sent for the exact same job moments earlier.
+  it('returns the fallback message for a CERTIFIED certificate', () => {
+    const certificate = baseCertificate({ state: 'CERTIFIED', semanticReview: 'PASS', goal: 'PASS' });
+    expect(describeCompletionOutcome(certificate, 'fallback')).toBe('fallback');
+  });
+
+  it('returns the fallback message when no certificate is present yet', () => {
+    expect(describeCompletionOutcome(undefined, 'fallback')).toBe('fallback');
+  });
+
+  it('reports the first known limitation for a REJECTED certificate, ignoring the fallback', () => {
+    const certificate = baseCertificate({
+      state: 'REJECTED',
+      semanticReview: 'FAIL',
+      goal: 'FAIL',
+      knownLimitations: ['スコープ外の変更が含まれています'],
+    });
+    expect(describeCompletionOutcome(certificate, 'fallback')).toBe(
+      'CI成功しましたが、完了判定レビューが要確認と報告しています: スコープ外の変更が含まれています',
+    );
+  });
+
+  it('falls back to the raw semanticReview verdict when REJECTED but knownLimitations is all-blank', () => {
+    const certificate = baseCertificate({ state: 'REJECTED', semanticReview: 'FAIL', knownLimitations: ['', '  '] });
+    expect(describeCompletionOutcome(certificate, 'fallback')).toBe(
+      'CI成功しましたが、完了判定レビューが要確認と報告しています: FAIL',
+    );
   });
 });

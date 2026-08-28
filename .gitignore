@@ -7,3 +7,6 @@ dist/
 !.env.example
 worker/wrangler.jsonc
 worker/.wrangler/
+worker/dist-ci/
+chatgpt-bridge/.wrangler-dry-run/
+tsconfig.tsbuildinfo

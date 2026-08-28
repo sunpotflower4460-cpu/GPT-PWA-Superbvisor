@@ -5,7 +5,7 @@ import {
   getDeveloperJob,
   refreshDeveloperJob,
 } from './developerAgent';
-import { CompletionCertificate, firstNonEmpty } from './completionJudge';
+import { CompletionCertificate, describeCompletionOutcome } from './completionJudge';
 import { GitHubEnv } from './githubExecutor';
 import { OrchestrationEnv } from './orchestrationModel';
 import { AutopilotRouteState } from './orchestratorPolicy';
@@ -245,10 +245,10 @@ async function advanceGuardianRunUnlocked(
     // "CI success, all done" here would directly contradict the correct
     // push refreshDeveloperJob already sent moments earlier, for every
     // Guardian user (this app's primary/heavily-used path).
-    const rejected = job.completionCertificate?.state === 'REJECTED';
-    const message = rejected
-      ? `CI成功しましたが、完了判定レビューが要確認と報告しています: ${firstNonEmpty(job.completionCertificate?.knownLimitations) || job.completionCertificate?.semanticReview}`
-      : '現在headのCI成功を確認しました。実装はChatGPT、Workerは監督のみで完了しています。';
+    const message = describeCompletionOutcome(
+      job.completionCertificate,
+      '現在headのCI成功を確認しました。実装はChatGPT、Workerは監督のみで完了しています。',
+    );
     return finalize(env, run, 'completed', message);
   }
 
