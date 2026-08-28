@@ -49,7 +49,7 @@ import {
   resolveRouteDispatchChatUrl,
 } from './routePlan';
 import { deriveContextPressure } from './contextPressure';
-import { CompletionCertificate, buildCompletionCertificateAsync } from './completionJudge';
+import { CompletionCertificate, buildCompletionCertificateAsync, firstNonEmpty } from './completionJudge';
 import { createSemanticJudge } from './semanticJudge';
 
 interface AgentEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
@@ -618,7 +618,7 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   await safePush(env, {
     title: `${job.projectName || job.repository}: CI確認完了`,
     body: job.completionCertificate?.state === 'REJECTED'
-      ? `CI成功しましたが、完了判定レビューが要確認と報告しています: ${job.completionCertificate.knownLimitations[0] || job.completionCertificate.semanticReview}`
+      ? `CI成功しましたが、完了判定レビューが要確認と報告しています: ${firstNonEmpty(job.completionCertificate.knownLimitations) || job.completionCertificate.semanticReview}`
       : pullRequest ? `CI成功。Draft PR #${pullRequest.number} を確認できます。` : 'CI成功を確認しました。',
     tag: `developer-${job.id}`,
     projectId: job.projectId,

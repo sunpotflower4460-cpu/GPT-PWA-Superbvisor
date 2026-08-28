@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCompletionCertificate, evaluateDeterministicCompletion, pendingSemanticJudge } from './completionJudge';
+import { buildCompletionCertificate, evaluateDeterministicCompletion, firstNonEmpty, pendingSemanticJudge } from './completionJudge';
 import { DeveloperJob } from './developerAgent';
 
 function baseJob(overrides: Partial<DeveloperJob> = {}): DeveloperJob {
@@ -143,5 +143,21 @@ describe('pendingSemanticJudge', () => {
   it('reports PENDING rather than fabricating a PASS', async () => {
     const result = await pendingSemanticJudge.evaluate(baseJob(), evaluateDeterministicCompletion(baseJob()));
     expect(result.verdict).toBe('PENDING');
+  });
+});
+
+describe('firstNonEmpty', () => {
+  it('returns the first genuinely non-blank entry', () => {
+    expect(firstNonEmpty(['first', 'second'])).toBe('first');
+  });
+
+  it('skips a leading empty or whitespace-only entry rather than returning it', () => {
+    expect(firstNonEmpty(['', '  ', 'real reason'])).toBe('real reason');
+  });
+
+  it('returns undefined for an all-blank or empty list, or undefined input', () => {
+    expect(firstNonEmpty(['', '   '])).toBeUndefined();
+    expect(firstNonEmpty([])).toBeUndefined();
+    expect(firstNonEmpty(undefined)).toBeUndefined();
   });
 });

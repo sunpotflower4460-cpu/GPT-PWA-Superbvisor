@@ -81,6 +81,16 @@ export interface CompletionCertificate {
   state: CompletionState;
 }
 
+// For a human-facing summary line (e.g. a completion push notification)
+// that needs ONE concrete reason, not the full list. knownLimitations can
+// contain an empty string (parseVerdict's notes filter accepts any string,
+// including ''), so a plain `knownLimitations[0]` fallback can surface an
+// empty reason and fall through to whatever the caller substitutes next —
+// this finds the first entry that's actually non-blank instead.
+export function firstNonEmpty(items: string[] | undefined): string | undefined {
+  return items?.find((item) => item.trim());
+}
+
 // Synchronous by design: only runs the Deterministic Judge and treats the
 // Semantic Judge as always-PENDING (no SemanticJudge is wired in yet — see
 // pendingSemanticJudge above). A future async variant that actually invokes
