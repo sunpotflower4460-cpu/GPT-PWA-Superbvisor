@@ -14,6 +14,7 @@ import {
   effectiveWorkflow,
   formatOperatingPlanPrompt,
   getOperatingPlan,
+  isValidChatUrl,
   parseRoutePlan,
   saveOperatingPlan,
   targetLabels,
@@ -85,6 +86,19 @@ export default function OperatingPlanCenter() {
 
   function patch(patchValue: Partial<OperatingPlan>) {
     setPlan((current) => ({ ...current, ...patchValue }));
+    setMessage('');
+  }
+
+  // Multi Chat / Specialist Chat: binds one declared phase to a specific
+  // already-open ChatGPT chat. An empty value clears the binding for that
+  // phase (falls back to the project's default chatUrl — see
+  // routePlan.ts's resolveRouteDispatchChatUrl on the Worker side).
+  function patchPhaseChatUrl(nodeId: string, chatUrl: string) {
+    setPlan((current) => {
+      const next = { ...current.phaseChatUrls };
+      if (chatUrl.trim()) next[nodeId] = chatUrl; else delete next[nodeId];
+      return { ...current, phaseChatUrls: next };
+    });
     setMessage('');
   }
 
@@ -193,7 +207,8 @@ export default function OperatingPlanCenter() {
     setMessage('');
     try {
       const prompt = buildActionPrompt(selected, runAction);
-      const routePlan = parseRoutePlan(effectiveWorkflow(getOperatingPlan(selected.id)));
+      const guardianPlan = getOperatingPlan(selected.id);
+      const routePlan = parseRoutePlan(effectiveWorkflow(guardianPlan), guardianPlan.phaseChatUrls);
       const run = await startGuardianRun(selected, prompt, { maxCycles: 3, maxToolTurns: 10, maxMinutes: 180 }, loadWorkerConnection(), routePlan);
       setGuardian(run);
       setBackground(null);
@@ -287,6 +302,30 @@ export default function OperatingPlanCenter() {
                     <label className="plan-field">標準手順
                       <textarea rows={4} value={plan.workflow} onChange={(event) => patch({ workflow: event.target.value })} placeholder="現状確認 → 実装 → テスト → レビュー..." />
                     </label>
+
+                    {(() => {
+                      const phases = parseRoutePlan(effectiveWorkflow(plan));
+                      if (phases.length < 2) return null;
+                      return (
+                        <div className="plan-field plan-specialist-chats">
+                          <span>工程ごとのSpecialist Chat <small>任意・空欄は既定のChatGPT URLへ</small></span>
+                          <small className="plan-specialist-chat-caution">標準手順の途中に工程を挿入/削除すると、下の割り当てが別の工程にずれることがあります。編集後は割り当てを見直してください。</small>
+                          {phases.map((phase) => (
+                            <label key={phase.id} className="plan-specialist-chat-row">
+                              <small>{phase.label}</small>
+                              <input
+                                value={plan.phaseChatUrls[phase.id] || ''}
+                                onChange={(event) => patchPhaseChatUrl(phase.id, event.target.value)}
+                                placeholder="https://chatgpt.com/c/..."
+                              />
+                              {plan.phaseChatUrls[phase.id] && !isValidChatUrl(plan.phaseChatUrls[phase.id]) && (
+                                <small className="plan-specialist-chat-warning">有効なChatGPT URLではありません(https://chatgpt.com/... など)</small>
+                              )}
+                            </label>
+                          ))}
+                        </div>
+                      );
+                    })()}
 
                     <div className="plan-rules">
                       <PlanToggle checked={plan.inspectBeforeWork} onChange={(value) => patch({ inspectBeforeWork: value })} title="最初に現状確認" detail="既完了を確認して重複を避ける" />
