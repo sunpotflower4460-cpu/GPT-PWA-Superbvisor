@@ -16,6 +16,18 @@ import { enqueueProjectChatCommand } from './chatControl';
 
 type Tab = 'projects' | 'human' | 'activity' | 'settings';
 
+// A pure link into GitHub's own "create repository from template" flow
+// — never an API-driven repo-creation call from this Worker. Keeps the
+// "new project" scaffolding suggestion entirely declarative and
+// reversible: the user creates the repo themselves on GitHub's own
+// site, then pastes its URL back in here, same as any other GitHub URL
+// they'd type in manually. Uses the documented `/generate` path suffix
+// (github.com/{owner}/{repo}/generate), not the `/new?template_owner=`
+// query-string form — the query-string form was unverified against
+// GitHub's own docs when this was written, so `/generate` was chosen
+// as the guaranteed-stable, documented mechanism instead.
+const GPT_TEMPLATE_URL = 'https://github.com/sunpotflower4460-cpu/GPT-template/generate';
+
 const statusTone: Record<ProjectStatus, string> = {
   RUNNING: 'running',
   WAITING_AI: 'neutral',
@@ -389,6 +401,13 @@ function CreateProjectModal({ onClose, onCreate }: { onClose: () => void; onCrea
         <label>最終目標<textarea value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="例：本人しかできない外部設定だけの状態まで仕上げる" rows={4} /></label>
         <label>ChatGPT URL<input value={chatUrl} onChange={(e) => setChatUrl(e.target.value)} placeholder="https://chatgpt.com/c/..." /></label>
         <label>GitHub URL<input value={githubUrl} onChange={(e) => setGithubUrl(e.target.value)} placeholder="https://github.com/owner/repo" /></label>
+        {!githubUrl.trim() && (
+          <p className="field-hint">
+            新しいリポジトリが必要な場合は、
+            <a href={GPT_TEMPLATE_URL} target="_blank" rel="noopener noreferrer">GPT-template</a>
+            から作成すると、CI・レビュー承認などのガードレールが最初から入った状態で始められます。作成後、そのリポジトリのURLを上に貼り付けてください(必須ではありません)。
+          </p>
+        )}
         <button className="primary-action" type="submit">登録する</button>
       </form>
     </div>
