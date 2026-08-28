@@ -147,6 +147,11 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       inputSchema: {
         projectId: z.string().min(1).max(200),
         bridgeId: z.string().min(1).max(200),
+        // Multi Chat / Specialist Chat: reported so the Chat Control
+        // overview can tell THIS chat's connection status apart from any
+        // other chat connected to the same project — see
+        // connect_ai_dev_deck_bridge's own comment.
+        chatUrl: z.string().max(2000).optional(),
       },
       annotations: {
         readOnlyHint: false,
@@ -155,13 +160,14 @@ export function createBridgeServer(configInput: BridgeRuntimeConfig) {
       },
       _meta: { ui: { visibility: ['app'] } },
     },
-    async ({ projectId, bridgeId }) => {
+    async ({ projectId, bridgeId, chatUrl }) => {
       assertAllowedProject(projectId);
       const status = await supervisorFetch<Record<string, unknown>>('/api/chat-bridge/heartbeat', {
         method: 'POST',
         body: JSON.stringify({
           projectId,
           bridgeId,
+          chatUrl: chatUrl || undefined,
           capabilities: ['claim-command', 'send-follow-up-message', 'report-result', 'retry-command', 'delivery-receipt', `project:${projectId}`],
         }),
       });
@@ -511,7 +517,7 @@ function bridgeWidgetHtml() {
     if (!projectId()) return;
     const now = Date.now();
     if (!force && now - lastHeartbeat < 25_000) return;
-    await callTool('ai_dev_deck_bridge_heartbeat', { projectId: projectId(), bridgeId: bridgeId() });
+    await callTool('ai_dev_deck_bridge_heartbeat', { projectId: projectId(), bridgeId: bridgeId(), chatUrl: chatUrl() });
     lastHeartbeat = now;
     heartbeatEl.textContent = 'heartbeat ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
   }

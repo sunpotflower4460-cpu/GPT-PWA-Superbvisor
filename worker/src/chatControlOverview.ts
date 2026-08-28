@@ -40,10 +40,13 @@ const RECENT_DELIVERY_MS = 90_000;
 export async function getChatControlOverview(env: ChatControlOverviewEnv, projectIds: string[]) {
   return Promise.all(projectIds.map(async (projectId): Promise<ChatProjectOverview> => {
     try {
-      const [commandOverview, bridge] = await Promise.all([
-        getProjectChatCommandOverview(env, projectId),
-        getChatBridgeStatus(env, projectId),
-      ]);
+      // Fetch the command overview FIRST: the bridge lookup needs to know
+      // which chat the current unresolved command actually targets (Multi
+      // Chat / Specialist Chat) — with none unresolved, fall back to the
+      // project-wide aggregate bridge status (see getChatBridgeStatus's own
+      // comment).
+      const commandOverview = await getProjectChatCommandOverview(env, projectId);
+      const bridge = await getChatBridgeStatus(env, projectId, commandOverview.unresolved?.chatUrl);
       return deriveChatProjectOverview(projectId, commandOverview, bridge, Date.now());
     } catch (error) {
       return {
