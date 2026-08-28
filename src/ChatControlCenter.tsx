@@ -231,7 +231,12 @@ export default function ChatControlCenter() {
     }
     popup.opener = null;
 
-    const instruction = `この開発チャットをAI DEV DECKから遠隔操作できるように、接続済みのAI DEV DECK ChatGPT Bridgeアプリを使ってBridgeを接続してください。\n\nprojectId: ${project.id}\nprojectName: ${project.name}\n\n利用するtool: connect_ai_dev_deck_bridge\nこのチャット自体を実装・デバッグ・GitHub編集の実行主体として維持し、BridgeはPWAから届く次ターン指示の中継だけに使ってください。`;
+    // chatUrl scopes this Bridge's claim to commands destined for THIS
+    // conversation (see worker/src/chatCommandQueue.ts's claimNextChatCommand)
+    // instead of leaving it in the unscoped project-wide pool, where it
+    // could otherwise claim a Multi Chat / Specialist Chat phase's command
+    // meant for a different chat entirely.
+    const instruction = `この開発チャットをAI DEV DECKから遠隔操作できるように、接続済みのAI DEV DECK ChatGPT Bridgeアプリを使ってBridgeを接続してください。\n\nprojectId: ${project.id}\nprojectName: ${project.name}\nchatUrl: ${chatUrl}\n\n利用するtool: connect_ai_dev_deck_bridge\nこのチャット自体を実装・デバッグ・GitHub編集の実行主体として維持し、BridgeはPWAから届く次ターン指示の中継だけに使ってください。`;
     try {
       await navigator.clipboard.writeText(instruction);
       setMessage('Bridge接続指示をコピーしました。開いたChatGPTへ一度だけ貼り付けて送信してください。接続後はPWA側から指示できます。');

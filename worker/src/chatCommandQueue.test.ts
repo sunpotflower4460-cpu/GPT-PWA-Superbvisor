@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ChatCommandConflictError,
   INVALID_CHAT_COMMAND_ERROR,
+  INVALID_CLAIM_CHAT_URL_ERROR,
   cancelChatCommand,
   claimNextChatCommand,
   enqueueChatCommand,
@@ -72,6 +73,22 @@ describe('chat command validation', () => {
     expect(normalizeChatUrl('https://example.com/c/abc')).toBeNull();
     expect(normalizeChatUrl('http://chatgpt.com/c/abc')).toBeNull();
     expect(normalizeChatUrl('javascript:alert(1)')).toBeNull();
+  });
+
+  it('discards a fragment and a trailing slash so equivalent spellings of the same conversation compare equal', () => {
+    // Multi Chat / Specialist Chat claim scoping (claimNextChatCommand)
+    // compares normalized chatUrl strings for exact equality — a fragment
+    // (never sent to the server) or a trailing slash must not make two
+    // spellings of the SAME conversation look like different chats, or a
+    // correctly-connected Bridge would poll forever while its own commands
+    // sit queued, unmatched.
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123#section')).toBe('https://chatgpt.com/c/abc123');
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123/')).toBe('https://chatgpt.com/c/abc123');
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123')).toBe(normalizeChatUrl('https://chatgpt.com/c/abc123#section'));
+  });
+
+  it('still distinguishes genuinely different conversations', () => {
+    expect(normalizeChatUrl('https://chatgpt.com/c/abc123')).not.toBe(normalizeChatUrl('https://chatgpt.com/c/xyz789'));
   });
 
   it('trims prompts and caps payload size', () => {
@@ -183,6 +200,106 @@ describe('chat command NEXT/STEER priority (KV fallback path)', () => {
     const claimed = await claimNextChatCommand(env, 'bridge-a', 'project-1');
     expect(claimed?.id).toBe(steer.id);
     expect(claimed?.kind).toBe('STEER');
+  });
+});
+
+describe('chat command claim chatUrl scoping (Multi Chat / Specialist Chat)', () => {
+  it('only claims a command destined for the calling bridge\'s own chatUrl when one is given', async () => {
+    const { env } = fakeEnv();
+    const forChatA = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-b',
+      prompt: 'work for chat B',
+    });
+
+    // A bridge polling from chat B must never receive chat A's command, even
+    // though chat A's command is older/would otherwise win the claim race.
+    const claimedByB = await claimNextChatCommand(env, 'bridge-b', 'project-1', 'https://chatgpt.com/c/chat-b');
+    expect(claimedByB?.chatUrl).toBe('https://chatgpt.com/c/chat-b');
+
+    const claimedByA = await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-a');
+    expect(claimedByA?.id).toBe(forChatA.id);
+  });
+
+  it('returns null for a chat with nothing queued for it, even while other chats in the same project have work', async () => {
+    const { env } = fakeEnv();
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+
+    const claimed = await claimNextChatCommand(env, 'bridge-c', 'project-1', 'https://chatgpt.com/c/chat-c');
+    expect(claimed).toBeNull();
+  });
+
+  it('falls back to the project-wide pool when no chatUrl is given, unchanged from before this existed', async () => {
+    const { env } = fakeEnv();
+    const command = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+
+    const claimed = await claimNextChatCommand(env, 'bridge-legacy', 'project-1');
+    expect(claimed?.id).toBe(command.id);
+  });
+
+  it('only recovers a stale owned claim if it was for the same chatUrl', async () => {
+    const { env } = fakeEnv();
+    const command = await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+    // bridge-a claims it, then a stale-claim scenario is simulated by a
+    // second call from the SAME bridgeId but scoped to a DIFFERENT chatUrl
+    // (e.g. a reused bridgeId after the tab navigated to another chat) —
+    // it must not recover chat A's claim into a chat-B-scoped call.
+    await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-a');
+    const claimedForOtherChat = await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-b');
+    expect(claimedForOtherChat).toBeNull();
+  });
+
+  it('rejects a malformed chatUrl instead of silently falling back to the unscoped project-wide pool', async () => {
+    // Regression guard: an earlier version coerced a non-empty-but-invalid
+    // chatUrl straight to undefined (same as "not given at all"), which
+    // would have silently reopened the exact cross-chat misdelivery race
+    // this scoping exists to close whenever the user mistyped a chatUrl at
+    // Bridge-connect time (e.g. missing "https://").
+    const { env } = fakeEnv();
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+    await expect(claimNextChatCommand(env, 'bridge-b', 'project-1', 'chatgpt.com/c/chat-b'))
+      .rejects.toThrow(INVALID_CLAIM_CHAT_URL_ERROR);
+  });
+
+  it('still matches a command persisted before normalizeChatUrl started stripping fragments/trailing slashes', async () => {
+    // Regression guard: a command written under an OLDER normalizeChatUrl
+    // (kept the fragment/trailing slash) must not become permanently
+    // unclaimable via chatUrl-scoped claims just because a later deploy
+    // changed what "normalized" means — the STORED value is re-normalized
+    // at comparison time too, not just the incoming filter.
+    const { env, store } = fakeEnv();
+    const legacyFormat: ChatCommand = {
+      ...baseCommand,
+      id: 'legacy-command',
+      chatUrl: 'https://chatgpt.com/c/chat-a/',
+      prompt: 'work for chat A, stored in the old URL format',
+    };
+    store.set(`chat-command:${legacyFormat.id}`, JSON.stringify(legacyFormat));
+    store.set(`chat-project:project-1:${'0'.repeat(17)}:${legacyFormat.id}`, legacyFormat.id);
+
+    const claimed = await claimNextChatCommand(env, 'bridge-a', 'project-1', 'https://chatgpt.com/c/chat-a');
+    expect(claimed?.id).toBe(legacyFormat.id);
   });
 });
 

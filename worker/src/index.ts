@@ -4,6 +4,7 @@ import { buildGenericChatGptHandoff } from './orchestratorPolicy';
 import {
   ChatCommandConflictError,
   INVALID_CHAT_COMMAND_ERROR,
+  INVALID_CLAIM_CHAT_URL_ERROR,
   cancelChatCommand,
   claimNextChatCommand,
   enqueueChatCommand,
@@ -280,13 +281,18 @@ async function createChatCommand(request: Request, env: Env): Promise<Response> 
 }
 
 async function claimChatCommand(request: Request, env: Env): Promise<Response> {
-  const body = await readJson<{ bridgeId?: string; projectId?: string }>(request);
+  const body = await readJson<{ bridgeId?: string; projectId?: string; chatUrl?: string }>(request);
   if (!body?.bridgeId?.trim() || !body.projectId?.trim()) return json({ error: 'bridgeId and projectId are required' }, 400, env, request);
   try {
-    const command = await claimNextChatCommand(env, body.bridgeId, body.projectId.trim());
+    // chatUrl is optional — an older Bridge build that never sends it still
+    // claims from the project-wide pool exactly as before (see
+    // claimNextChatCommand's own comment for why a specific chat's own
+    // conversation should otherwise scope which commands it can claim).
+    const command = await claimNextChatCommand(env, body.bridgeId, body.projectId.trim(), body.chatUrl?.trim() || undefined);
     return json({ command }, 200, env, request);
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : 'chat_command_claim_failed' }, 503, env, request);
+    const message = error instanceof Error ? error.message : 'chat_command_claim_failed';
+    return json({ error: message }, message === INVALID_CLAIM_CHAT_URL_ERROR ? 400 : 503, env, request);
   }
 }
 

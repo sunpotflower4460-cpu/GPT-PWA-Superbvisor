@@ -11,6 +11,9 @@ import {
   isCoordinatorCommandClaimable,
   summarizeCoordinatorCommands,
 } from './projectCoordinator';
+import { normalizeChatUrl } from './chatUrl';
+
+export { normalizeChatUrl } from './chatUrl';
 
 export type ChatCommandStatus = CoordinatorChatCommandStatus;
 export type ChatCommandKind = CoordinatorChatCommandKind;
@@ -31,6 +34,7 @@ export class ChatCommandConflictError extends Error {
 }
 
 export const INVALID_CHAT_COMMAND_ERROR = 'projectId, valid ChatGPT chatUrl and prompt are required';
+export const INVALID_CLAIM_CHAT_URL_ERROR = 'chatUrl, when provided, must be a valid ChatGPT chatUrl';
 
 const COMMAND_TTL = 60 * 60 * 24 * 14;
 const MIN_KV_EXPIRATION_TTL = 60;
@@ -41,18 +45,6 @@ const KV_LIST_PAGE_SIZE = 1000;
 const KV_MIGRATION_PAGE_SIZE = 200;
 const COORDINATOR_IMPORT_BATCH_SIZE = 20;
 const migratedProjects = new Set<string>();
-
-export function normalizeChatUrl(value: string) {
-  try {
-    const url = new URL(value.trim());
-    const host = url.hostname.toLowerCase();
-    if (url.protocol !== 'https:') return null;
-    if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com') return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
 
 export function sanitizePrompt(value: string) {
   return value.trim().slice(0, 24_000);
@@ -177,9 +169,28 @@ export async function getProjectChatCommandOverview(env: ChatCommandEnv, project
   return { ...summarizeCoordinatorCommands(commands), approximate: commands.length >= 100 };
 }
 
-export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string, projectId?: string) {
+// chatUrl is the calling Bridge's OWN current conversation (e.g.
+// window.location.href from the ChatGPT tab it's running in), optional for
+// backward compatibility with an older Bridge build that never sends it.
+// When present, only a command destined for that EXACT chat is eligible —
+// see Multi Chat / Specialist Chat: without this, a project dispatching to
+// several distinct chats has all their commands sitting in one shared
+// project-wide pool, and whichever Bridge tab happens to poll first can
+// claim (and thus receive, in its OWN conversation) a command meant for a
+// different chat entirely. Absent chatUrl preserves the original
+// project-wide claim pool exactly — the correct behavior for the common
+// case of one chat per project. A NON-EMPTY chatUrl that fails validation
+// throws rather than silently degrading to "absent" (indistinguishable
+// from "no chatUrl given at all") — chatUrl is a value the user/ChatGPT
+// hand-typed at Bridge-connect time, never auto-discovered, so a plausible
+// typo (e.g. missing "https://") must not silently reopen the exact
+// cross-chat misdelivery race this scoping exists to close.
+export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string, projectId?: string, chatUrl?: string) {
   const normalizedBridgeId = bridgeId.trim().slice(0, 200) || 'unknown-bridge';
   const normalizedProjectId = projectId?.trim().slice(0, 200) || '';
+  const trimmedChatUrl = chatUrl?.trim();
+  if (trimmedChatUrl && !normalizeChatUrl(trimmedChatUrl)) throw new Error(INVALID_CLAIM_CHAT_URL_ERROR);
+  const normalizedChatUrl = trimmedChatUrl ? normalizeChatUrl(trimmedChatUrl) ?? undefined : undefined;
 
   if (hasAtomicCoordinator(env) && normalizedProjectId) {
     await ensureCoordinatorCommandsMigrated(env, normalizedProjectId);
@@ -187,7 +198,7 @@ export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string
       env,
       chatScope(normalizedProjectId),
       '/commands/claim',
-      { method: 'POST', body: JSON.stringify({ bridgeId: normalizedBridgeId }) },
+      { method: 'POST', body: JSON.stringify({ bridgeId: normalizedBridgeId, chatUrl: normalizedChatUrl }) },
     );
     if (!result.ok) throw new Error(result.data.error || `atomic_claim_failed_${result.status}`);
     if (result.data.command) await mirrorCommand(env, result.data.command);
@@ -196,8 +207,8 @@ export async function claimNextChatCommand(env: ChatCommandEnv, bridgeId: string
 
   const nowMs = Date.now();
   const candidate = normalizedProjectId
-    ? await findProjectClaimCandidateKv(env, normalizedProjectId, normalizedBridgeId, nowMs)
-    : findClaimCandidate(await listQueuedCommandsKv(env, 100), normalizedBridgeId, nowMs);
+    ? await findProjectClaimCandidateKv(env, normalizedProjectId, normalizedBridgeId, nowMs, normalizedChatUrl)
+    : findClaimCandidate(await listQueuedCommandsKv(env, 100), normalizedBridgeId, nowMs, normalizedChatUrl);
   if (!candidate) return null;
   if (candidate.status === 'claimed'
     && candidate.bridgeId === normalizedBridgeId
@@ -405,6 +416,7 @@ async function findProjectClaimCandidateKv(
   projectId: string,
   bridgeId: string,
   nowMs: number,
+  chatUrl?: string,
 ) {
   let cursor: string | undefined;
   let existingOwnedClaim: ChatCommand | undefined;
@@ -423,6 +435,12 @@ async function findProjectClaimCandidateKv(
 
     for (const command of commands) {
       if (!command) continue;
+      // Re-normalize the STORED value too, not just the incoming filter —
+      // a command persisted before normalizeChatUrl started stripping
+      // fragments/trailing slashes must still match today's normalized
+      // form, or it becomes permanently unclaimable via a chatUrl-scoped
+      // claim until it expires.
+      if (chatUrl && normalizeChatUrl(command.chatUrl) !== chatUrl) continue;
       const isOwnedFreshClaim = command.status === 'claimed'
         && command.bridgeId === bridgeId
         && Boolean(command.claimedAt)
@@ -442,8 +460,11 @@ async function findProjectClaimCandidateKv(
   return existingOwnedClaim ?? nextClaimable ?? null;
 }
 
-function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: number) {
-  const existingOwnedClaim = commands
+function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: number, chatUrl?: string) {
+  // See findProjectClaimCandidateKv's own comment on why the stored value
+  // is re-normalized here too, not just the incoming filter.
+  const scoped = chatUrl ? commands.filter((command) => normalizeChatUrl(command.chatUrl) === chatUrl) : commands;
+  const existingOwnedClaim = scoped
     .filter((command) => command.status === 'claimed'
       && command.bridgeId === bridgeId
       && Boolean(command.claimedAt)
@@ -451,7 +472,7 @@ function findClaimCandidate(commands: ChatCommand[], bridgeId: string, nowMs: nu
     .sort((a, b) => (a.claimedAt || '').localeCompare(b.claimedAt || ''))[0];
   if (existingOwnedClaim) return existingOwnedClaim;
 
-  return commands
+  return scoped
     .filter((command) => isClaimableCommand(command, nowMs))
     .reduce<ChatCommand | undefined>((best, command) => (isBetterClaimCandidate(command, best) ? command : best), undefined) ?? null;
 }

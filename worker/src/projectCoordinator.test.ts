@@ -243,6 +243,62 @@ describe('ProjectCoordinator command atomicity', () => {
     expect(claimed.kind).toBe('STEER');
   });
 
+  it('only claims a command destined for the calling bridge\'s own chatUrl when one is given (Multi Chat / Specialist Chat)', async () => {
+    const coordinator = createCoordinator();
+    const forChatA = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+    const chatACommand = (await forChatA.json() as { command: { id: string } }).command;
+    await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-b',
+      prompt: 'work for chat B',
+    });
+
+    // A bridge polling from chat B must never receive chat A's older command.
+    const claimByB = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-b', chatUrl: 'https://chatgpt.com/c/chat-b' });
+    const claimedByB = (await claimByB.json() as { command: { chatUrl: string } }).command;
+    expect(claimedByB.chatUrl).toBe('https://chatgpt.com/c/chat-b');
+
+    const claimByA = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a', chatUrl: 'https://chatgpt.com/c/chat-a' });
+    const claimedByA = (await claimByA.json() as { command: { id: string } }).command;
+    expect(claimedByA.id).toBe(chatACommand.id);
+  });
+
+  it('returns null for a chat with nothing queued for it, even while other chats in the same project have work', async () => {
+    const coordinator = createCoordinator();
+    await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a',
+      prompt: 'work for chat A',
+    });
+
+    const claim = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-c', chatUrl: 'https://chatgpt.com/c/chat-c' });
+    expect((await claim.json() as { command: unknown }).command).toBeNull();
+  });
+
+  it('still matches a command persisted before normalizeChatUrl started stripping fragments/trailing slashes', async () => {
+    // Regression guard: see the same-named test in chatCommandQueue.test.ts
+    // for the KV path — this is the Durable Object path.
+    const { coordinator, values } = createCoordinatorHarness();
+    const now = new Date().toISOString();
+    values.set('command:legacy-command', {
+      id: 'legacy-command',
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/chat-a/',
+      prompt: 'work for chat A, stored in the old URL format',
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const claim = await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a', chatUrl: 'https://chatgpt.com/c/chat-a' });
+    const claimed = (await claim.json() as { command: { id: string } | null }).command;
+    expect(claimed?.id).toBe('legacy-command');
+  });
+
   it('lets only one bridge own a simultaneous claim', async () => {
     const coordinator = createCoordinator();
     await post(coordinator, '/commands/enqueue', {
