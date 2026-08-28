@@ -175,7 +175,7 @@ export default function NotificationCenter() {
   function clearRead() { clearReadNotifications(); setItems(loadNotifications()); }
 
   return <>
-    <button className="notification-fab" onClick={() => openCenter()} aria-label="Notification inbox">🔔{unread > 0 && <span>{unread > 99 ? '99+' : unread}</span>}</button>
+    <button className="notification-fab" onClick={() => openCenter()} aria-label="通知">🔔{unread > 0 && <span>{unread > 99 ? '99+' : unread}</span>}</button>
     {open && <div className="notice-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}><section className="notice-sheet">
       <header className="notice-header"><div><p className="eyebrow">SUPERVISOR INBOX</p><h2>通知</h2></div><button className="icon-button" onClick={() => setOpen(false)}>×</button></header>
       <div className="push-card"><div><b>📲 Supervisor Push</b><small>{!pushState.supported ? 'この環境では未対応' : pushState.subscribed ? '有効・PWAを閉じても受信' : `未登録・権限 ${pushState.permission}`}</small></div><div className="push-actions">{!pushState.subscribed ? <button onClick={enablePush} disabled={pushBusy === 'enable' || !pushState.supported}>{pushBusy === 'enable' ? '設定中…' : 'Pushを有効化'}</button> : <><button onClick={testPush} disabled={pushBusy === 'test'}>{pushBusy === 'test' ? '送信中…' : 'テスト'}</button><button onClick={disablePush} disabled={pushBusy === 'disable'}>{pushBusy === 'disable' ? '解除中…' : '解除'}</button></>}</div></div>

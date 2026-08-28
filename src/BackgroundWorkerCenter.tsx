@@ -98,7 +98,7 @@ export default function BackgroundWorkerCenter() {
 
   return (
     <>
-      <button className="worker-fab" onClick={openCenter} aria-label="Supervisor worker center">⚡</button>
+      <button className="worker-fab" onClick={openCenter} aria-label="裏方">⚡</button>
 
       {open && (
         <div className="worker-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>

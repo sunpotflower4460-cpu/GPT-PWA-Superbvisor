@@ -14,6 +14,7 @@ import ReleaseUpdateCenter from './ReleaseUpdateCenter';
 import RuntimeProjectSync from './RuntimeProjectSync';
 import SetupDoctorCenter from './SetupDoctorCenter';
 import SmartActionCenter from './SmartActionCenter';
+import MobileToolDock from './MobileToolDock';
 import WatchdogRuntime from './WatchdogRuntime';
 import './styles.css';
 import './evidence.css';
@@ -50,6 +51,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <SetupDoctorCenter />
     <DataBackupCenter />
     <ReleaseUpdateCenter />
+    <MobileToolDock />
   </React.StrictMode>,
 );
 

@@ -54,7 +54,7 @@ export default function EvidenceCenter() {
 
   return (
     <>
-      <button className="evidence-fab" onClick={openCenter} aria-label="GitHub evidence center">
+      <button className="evidence-fab" onClick={openCenter} aria-label="証拠">
         ◈
       </button>
 
