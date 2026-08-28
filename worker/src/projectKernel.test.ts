@@ -354,11 +354,11 @@ describe('requiresDraftPrFirst', () => {
 // is exactly how the bug it guards against — this file's own fixture using
 // literal paths in contextRouting while GPT-template's real manifest used
 // paths keys — was caught. It does NOT catch GPT-template changing its
-// manifest shape tomorrow without a corresponding update here; nothing
-// currently fetches GPT-template's live manifest at test time. Closing
-// that gap for real needs either a shared JSON Schema both repos validate
-// against, or a CI job that pulls GPT-template's current manifest and
-// re-runs this parser against it.
+// manifest shape tomorrow without a corresponding update here — for that,
+// see projectKernelLiveDrift.test.ts, which re-runs these same assertions
+// against GPT-template's live manifest on a separate scheduled workflow
+// (.github/workflows/gpt-template-kernel-drift.yml), deliberately kept out
+// of this file/this offline suite so a network fetch never gates a PR.
 const GPT_TEMPLATE_REAL_MANIFEST = `{
   "schemaVersion": 1,
   "kind": "ai-project-kernel",

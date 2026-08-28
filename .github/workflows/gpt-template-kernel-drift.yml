@@ -1,0 +1,37 @@
+name: GPT-template kernel drift check
+
+# Runs the live cross-repo contract test in
+# worker/src/projectKernelLiveDrift.test.ts on its own cadence, separate
+# from the PR-blocking CI workflow (ci.yml) — see that file's own header
+# comment for why a live network fetch has no place gating unrelated PRs.
+# A red run here means GPT-template's real project-kernel.json has drifted
+# from what this Worker's parser/Route dispatch logic assumes; GitHub
+# notifies the repo's watchers on a scheduled-workflow failure by default.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Monday 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm install
+      - name: Run live GPT-template kernel drift check
+        working-directory: worker
+        env:
+          GPT_TEMPLATE_LIVE_DRIFT_CHECK: '1'
+        run: npx vitest run --config vitest.config.ts src/projectKernelLiveDrift.test.ts
