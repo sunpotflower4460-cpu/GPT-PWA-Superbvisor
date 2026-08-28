@@ -17,13 +17,16 @@ import { enqueueProjectChatCommand } from './chatControl';
 type Tab = 'projects' | 'human' | 'activity' | 'settings';
 
 // A pure link into GitHub's own "create repository from template" flow
-// (the same URL its green "Use this template" button on the template
-// repo itself generates) — never an API-driven repo-creation call from
-// this Worker. Keeps the "new project" scaffolding suggestion entirely
-// declarative and reversible: the user creates the repo themselves on
-// GitHub's own site, then pastes its URL back in here, same as any
-// other GitHub URL they'd type in manually.
-const GPT_TEMPLATE_URL = 'https://github.com/new?template_owner=sunpotflower4460-cpu&template_name=GPT-template';
+// — never an API-driven repo-creation call from this Worker. Keeps the
+// "new project" scaffolding suggestion entirely declarative and
+// reversible: the user creates the repo themselves on GitHub's own
+// site, then pastes its URL back in here, same as any other GitHub URL
+// they'd type in manually. Uses the documented `/generate` path suffix
+// (github.com/{owner}/{repo}/generate), not the `/new?template_owner=`
+// query-string form — the query-string form was unverified against
+// GitHub's own docs when this was written, so `/generate` was chosen
+// as the guaranteed-stable, documented mechanism instead.
+const GPT_TEMPLATE_URL = 'https://github.com/sunpotflower4460-cpu/GPT-template/generate';
 
 const statusTone: Record<ProjectStatus, string> = {
   RUNNING: 'running',
