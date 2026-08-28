@@ -142,15 +142,17 @@ export default {
     if (url.pathname === '/api/chat-bridge/status' && request.method === 'GET') {
       const projectId = url.searchParams.get('projectId')?.trim() || '';
       if (!projectId) return json({ error: 'projectId is required' }, 400, env, request);
-      return json(await getChatBridgeStatus(env, projectId), 200, env, request);
+      const chatUrl = url.searchParams.get('chatUrl')?.trim() || undefined;
+      return json(await getChatBridgeStatus(env, projectId, chatUrl), 200, env, request);
     }
 
     if (url.pathname === '/api/chat-bridge/heartbeat' && request.method === 'POST') {
-      const body = await readJson<{ projectId?: string; bridgeId?: string; capabilities?: string[] }>(request);
+      const body = await readJson<{ projectId?: string; bridgeId?: string; chatUrl?: string; capabilities?: string[] }>(request);
       try {
         const status = await recordChatBridgeHeartbeat(env, {
           projectId: body?.projectId || '',
           bridgeId: body?.bridgeId || '',
+          chatUrl: body?.chatUrl || undefined,
           capabilities: body?.capabilities,
         });
         return json(status, 200, env, request);

@@ -36,6 +36,11 @@ export interface CoordinatorChatCommand {
 export interface CoordinatorCommandActivity {
   id: string;
   status: CoordinatorChatCommandStatus;
+  // The chat this specific command targets — see chatBridge.ts's
+  // getChatBridgeStatus for why the overview needs this to answer "is the
+  // chat THIS command needs actually connected", not just "is any chat for
+  // this project connected".
+  chatUrl?: string;
   createdAt: string;
   updatedAt: string;
   deliveredAt?: string;
@@ -654,6 +659,7 @@ function commandActivity(command: CoordinatorChatCommand): CoordinatorCommandAct
   return {
     id: command.id,
     status: command.status,
+    chatUrl: command.chatUrl,
     createdAt: command.createdAt,
     updatedAt: command.updatedAt,
     deliveredAt: command.deliveredAt,

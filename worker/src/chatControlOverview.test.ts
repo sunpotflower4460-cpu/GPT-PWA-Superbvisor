@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { deriveChatProjectOverview, getChatControlOverview } from './chatControlOverview';
+import { recordChatBridgeHeartbeat } from './chatBridge';
 import type { ChatBridgeStatus } from './chatBridge';
+import { enqueueChatCommand } from './chatCommandQueue';
 import type { ChatCommandEnv, ChatCommandOverviewSnapshot } from './chatCommandQueue';
 import type { CoordinatorCommandActivity } from './projectCoordinator';
 
@@ -96,6 +98,36 @@ describe('multi-chat overview activity', () => {
     }), bridgeOn, now);
     expect(recent.activity).toBe('DELIVERED');
     expect(old.activity).toBe('CONNECTED_IDLE');
+  });
+
+  it('reports WAITING_BRIDGE for a queued command targeting an offline specialist chat, even while the project\'s default chat is connected', async () => {
+    // End-to-end regression guard for the exact scenario Codex flagged:
+    // deriveChatProjectOverview's own bridge.connected input must actually
+    // reflect the SPECIFIC chat the unresolved command targets, not merely
+    // "is anything for this project connected".
+    const store = new Map<string, string>();
+    const env = {
+      SUPERVISOR_STATE: {
+        get: async (key: string) => store.get(key) ?? null,
+        put: async (key: string, value: string) => { store.set(key, value); },
+        delete: async (key: string) => { store.delete(key); },
+        list: async ({ prefix = '', limit = 1000 }: { prefix?: string; limit?: number }) => {
+          const matching = [...store.keys()].filter((key) => key.startsWith(prefix)).sort().slice(0, limit);
+          return { keys: matching.map((name) => ({ name })), list_complete: true, cacheStatus: null };
+        },
+      },
+    } as unknown as ChatCommandEnv;
+
+    await recordChatBridgeHeartbeat(env, { projectId: 'project-1', bridgeId: 'bridge-default', chatUrl: 'https://chatgpt.com/c/default' });
+    await enqueueChatCommand(env, {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/specialist',
+      prompt: 'work for the specialist chat, which has no connected Bridge',
+    });
+
+    const [overview] = await getChatControlOverview(env, ['project-1']);
+    expect(overview.activity).toBe('WAITING_BRIDGE');
+    expect(overview.bridgeConnected).toBe(false);
   });
 
   it('does not mislabel an overview transport failure as an offline Bridge', async () => {
