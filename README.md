@@ -405,6 +405,18 @@ CIではConcept Guardを最初に実行し、通過した場合だけ次の3系�
 - worker typecheck + regression tests + SQLite Durable Object dry-run
 - ChatGPT bridge typecheck + Cloudflare dry-run
 
+### ローカルCI(GitHub Actionsが使えない場合)
+
+`.github/workflows/ci.yml` と同じジョブ・同じ依存関係(`concept-guard`が通った場合だけ他を実行)をローカルで再現するスクリプトです。GitHub Actionsが利用できない・順番待ちになる状況(privateリポジトリでActions分数が無い、一時的な障害など)でも、同等の検証結果をこの端末上で得られます。
+
+```bash
+npm run ci:local          # 全ジョブ
+node scripts/local-ci.mjs --job=worker-check   # 1ジョブだけ(依存するジョブも自動実行)
+node scripts/local-ci.mjs --fresh              # node_modulesがあっても常にnpm installし直す(クリーンチェックアウト相当)
+```
+
+結果は `.local-ci/latest.json`(gitignore対象)にも書き出されます。ただしこれはこのセッション/実行者自身が動かした結果であり、GitHub Actionsのような第三者実行の証拠ではありません — Actionsが実際に使える状況では、そちらのgreenを優先してください。
+
 ## セキュリティ
 
 - LLM API keyをPWAへ保存しない
