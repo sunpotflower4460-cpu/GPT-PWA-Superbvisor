@@ -201,7 +201,8 @@ export function extractAutopilotRouteStep(commitMessage?: string): string | unde
 }
 
 // The persisted, chat-text-independent half of route progress (docs/
-// ARCHITECTURE.md §10 gap #4). Each CI-green-but-route-not-complete
+// ARCHITECTURE.md §10 "Implemented foundation" item 21). Each
+// CI-green-but-route-not-complete
 // checkpoint the Worker's own gating logic (see developerAgent.ts)
 // observes is a real, Worker-witnessed fact — this head, at this time,
 // route not yet marked complete — not something reconstructed from git
