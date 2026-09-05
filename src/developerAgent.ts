@@ -48,6 +48,17 @@ export function pullRequestStatusLabel(pr: PullRequestRef): { label: string; not
   return { label: `${pr.draft ? 'Draft ' : ''}PR #${pr.number} を開く ↗` };
 }
 
+// A shorter "Draft PR #N" / "マージ済み PR #N" fragment for call sites that
+// compose it into their own sentence (NotificationCenter.tsx,
+// RuntimeProjectSync.tsx) rather than rendering a standalone button —
+// same underlying staleness this file's own pullRequestStatusLabel exists
+// to fix, just without a note (these are compact one-liners, no room for
+// a secondary explanation).
+export function pullRequestPhrase(pr: PullRequestRef): string {
+  if (pr.merged) return `マージ済み PR #${pr.number}`;
+  return `${pr.draft ? 'Draft ' : ''}PR #${pr.number}`;
+}
+
 export interface DeveloperJob {
   id: string;
   projectId?: string;

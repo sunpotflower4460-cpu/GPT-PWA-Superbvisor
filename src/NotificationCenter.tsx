@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { loadProjects } from './core';
 import { getLatestBackgroundJob, loadWorkerConnection } from './backgroundWorker';
-import { DeveloperJob, getLatestDeveloperJob } from './developerAgent';
+import { DeveloperJob, getLatestDeveloperJob, pullRequestPhrase } from './developerAgent';
 import { GuardianRun, getLatestGuardianRun } from './guardianRunner';
 import {
   SupervisorNotification,
@@ -190,14 +190,14 @@ export default function NotificationCenter() {
 
 function persist(input: NotificationInput) { const created = addNotification(input); if (!created) return 0; showSystemNotification(created); return 1; }
 function persistGuardian(projectId: string, projectName: string, run: GuardianRun) {
-  if (run.status === 'review_ready') return persist({ dedupeKey: `guardian:${run.id}:review_ready:${run.cycle}`, projectId, projectName, kind: 'human', title: `${projectName}: Guardianレビュー待ち`, detail: run.message || run.finalSummary || 'コード作業は終了しましたが、CIを確認できないためレビューが必要です。', ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${run.pullRequest.number} を開く`, actionUrl: run.pullRequest.url } : {}) });
-  if (run.status === 'completed') return persist({ dedupeKey: `guardian:${run.id}:completed`, projectId, projectName, kind: run.pullRequest ? 'human' : 'complete', title: run.pullRequest ? `${projectName}: CI成功・最終レビュー待ち` : `${projectName}: Guardian完了`, detail: run.message || run.finalSummary || 'Guardianが設定した工程を完了しました。', ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${run.pullRequest.number} を開く`, actionUrl: run.pullRequest.url } : {}) });
-  if (run.status === 'failed' || run.status === 'expired') return persist({ dedupeKey: `guardian:${run.id}:${run.status}:${run.cycle}`, projectId, projectName, kind: 'error', title: `${projectName}: Guardian ${run.status === 'expired' ? '時間上限' : '停止'}`, detail: run.error || run.message || 'Guardianが上限または復旧不能エラーで停止しました。', ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${run.pullRequest.number} を確認`, actionUrl: run.pullRequest.url } : {}) });
+  if (run.status === 'review_ready') return persist({ dedupeKey: `guardian:${run.id}:review_ready:${run.cycle}`, projectId, projectName, kind: 'human', title: `${projectName}: Guardianレビュー待ち`, detail: run.message || run.finalSummary || 'コード作業は終了しましたが、CIを確認できないためレビューが必要です。', ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `${pullRequestPhrase(run.pullRequest)} を開く`, actionUrl: run.pullRequest.url } : {}) });
+  if (run.status === 'completed') return persist({ dedupeKey: `guardian:${run.id}:completed`, projectId, projectName, kind: run.pullRequest ? 'human' : 'complete', title: run.pullRequest ? `${projectName}: CI成功・最終レビュー待ち` : `${projectName}: Guardian完了`, detail: run.message || run.finalSummary || 'Guardianが設定した工程を完了しました。', ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `${pullRequestPhrase(run.pullRequest)} を開く`, actionUrl: run.pullRequest.url } : {}) });
+  if (run.status === 'failed' || run.status === 'expired') return persist({ dedupeKey: `guardian:${run.id}:${run.status}:${run.cycle}`, projectId, projectName, kind: 'error', title: `${projectName}: Guardian ${run.status === 'expired' ? '時間上限' : '停止'}`, detail: run.error || run.message || 'Guardianが上限または復旧不能エラーで停止しました。', ...(run.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `${pullRequestPhrase(run.pullRequest)} を確認`, actionUrl: run.pullRequest.url } : {}) });
   return 0;
 }
 function persistDeveloper(projectId: string, projectName: string, job: DeveloperJob) {
-  if (job.status === 'completed') return persist({ dedupeKey: `developer:${job.id}:completed`, projectId, projectName, kind: 'human', title: `${projectName}: GitHub Agent完了`, detail: job.outputText || (job.pullRequest ? `Draft PR #${job.pullRequest.number} を作成しました。` : 'Developer Agentの結果を確認してください。'), ...(job.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${job.pullRequest.number} を開く`, actionUrl: job.pullRequest.url } : {}) });
-  if (job.status === 'failed') return persist({ dedupeKey: `developer:${job.id}:failed`, projectId, projectName, kind: 'error', title: `${projectName}: GitHub Agent停止`, detail: job.error || job.outputText || 'Developer Agentが停止しました。', ...(job.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `Draft PR #${job.pullRequest.number} を確認`, actionUrl: job.pullRequest.url } : {}) });
+  if (job.status === 'completed') return persist({ dedupeKey: `developer:${job.id}:completed`, projectId, projectName, kind: 'human', title: `${projectName}: GitHub Agent完了`, detail: job.outputText || (job.pullRequest ? `${pullRequestPhrase(job.pullRequest)} を作成しました。` : 'Developer Agentの結果を確認してください。'), ...(job.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `${pullRequestPhrase(job.pullRequest)} を開く`, actionUrl: job.pullRequest.url } : {}) });
+  if (job.status === 'failed') return persist({ dedupeKey: `developer:${job.id}:failed`, projectId, projectName, kind: 'error', title: `${projectName}: GitHub Agent停止`, detail: job.error || job.outputText || 'Developer Agentが停止しました。', ...(job.pullRequest ? { action: 'OPEN_URL' as const, actionLabel: `${pullRequestPhrase(job.pullRequest)} を確認`, actionUrl: job.pullRequest.url } : {}) });
   return 0;
 }
 function safeChatUrl(value?: string) { if (!value) return null; try { const url = new URL(value); const host = url.hostname.toLowerCase(); if (url.protocol !== 'https:' || (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com') && host !== 'chat.openai.com')) return null; return url.toString(); } catch { return null; } }
