@@ -5,6 +5,7 @@ import {
   DeveloperJob,
   getDeveloperConfig,
   getLatestDeveloperJob,
+  pullRequestStatusLabel,
   startDeveloperJob,
 } from './developerAgent';
 import { GuardianRun, getLatestGuardianRun, startGuardianRun } from './guardianRunner';
@@ -207,7 +208,7 @@ export default function DeveloperAgentCenter() {
         )}
 
         {message && <div className="developer-message">{message}</div>}
-        <p className="developer-footnote">GuardianはCronで再確認します。Provider/API/Pushの一時失敗は監督状態を失敗終了させず再試行し、CIのコード失敗はChatGPT復旧指示へ変換します。自動merge・本番deployはしません。</p>
+        <p className="developer-footnote">GuardianはCronで再確認します。Provider/API/Pushの一時失敗は監督状態を失敗終了させず再試行し、CIのコード失敗はChatGPT復旧指示へ変換します。自動mergeはプロジェクト設定でオプトインした場合のみ(Completion Judge認定時)。本番deployはしません。</p>
       </section>
     </div>
   ) : null;
@@ -221,7 +222,7 @@ function DeveloperJobCard({ job, project }: { job: DeveloperJob; project: DevPro
     {job.ciChecks && job.ciChecks.length > 0 && <CiChecks checks={job.ciChecks} />}
     {job.changedFiles && job.changedFiles.length > 0 && <details open className="developer-files"><summary>ChatGPT側の変更 {job.changedFiles.length}件</summary>{job.changedFiles.slice(0, 30).map((file) => <div key={file.filename}><code>{file.filename}</code><span>+{file.additions}/-{file.deletions}</span></div>)}</details>}
     {job.handoffPrompt && <HandoffActions prompt={job.handoffPrompt} project={project} label={job.phase === 'recovery_ready' ? 'ChatGPTで復旧する' : 'ChatGPTで作業する'} />}
-    {job.pullRequest && <button className="developer-pr" onClick={() => openGitHub(job.pullRequest!.url)}>Draft PR #{job.pullRequest.number} を開く ↗</button>}
+    {job.pullRequest && <PullRequestStatus pullRequest={job.pullRequest} />}
     {job.error && <div className="developer-error">⚠ {job.error}</div>}
     {job.outputText && <details className="developer-output" open={job.phase === 'recovery_ready'}><summary>Supervisorレポート</summary><pre>{job.outputText}</pre></details>}
   </article>;
@@ -237,11 +238,19 @@ function GuardianCard({ run, project }: { run: GuardianRun; project: DevProject 
     {run.degradedOrchestration && <div className="developer-warning">外部AI障害中でもフォールバック監督を継続しています。</div>}
     {run.ciChecks && run.ciChecks.length > 0 && <CiChecks checks={run.ciChecks} />}
     {run.handoffPrompt && !final && <HandoffActions prompt={run.handoffPrompt} project={project} label={run.phase === 'recovery_ready' ? 'ChatGPTで修正を続ける' : 'ChatGPTで作業を続ける'} />}
-    {run.pullRequest && <button className="developer-pr" onClick={() => openGitHub(run.pullRequest!.url)}>Draft PR #{run.pullRequest.number} を開く ↗</button>}
+    {run.pullRequest && <PullRequestStatus pullRequest={run.pullRequest} />}
     {run.error && <div className="developer-error">⚠ {run.error}</div>}
     {run.finalSummary && <details className="developer-output" open={run.phase === 'recovery_ready'}><summary>Supervisorレポート</summary><pre>{run.finalSummary}</pre></details>}
     {!final && <div className="guardian-live">● Worker Supervisor監督中</div>}
   </article>;
+}
+
+function PullRequestStatus({ pullRequest }: { pullRequest: NonNullable<DeveloperJob['pullRequest']> }) {
+  const { label, note } = pullRequestStatusLabel(pullRequest);
+  return <div className="developer-pr-status">
+    <button className={`developer-pr${pullRequest.merged ? ' developer-pr-merged' : ''}`} onClick={() => openGitHub(pullRequest.url)}>{label}</button>
+    {note && <small className="developer-pr-note">{note}</small>}
+  </div>;
 }
 
 function CiChecks({ checks }: { checks: Array<{ name: string; status: string; conclusion: string | null; url: string; headSha: string }> }) {

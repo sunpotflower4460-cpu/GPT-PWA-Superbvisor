@@ -1,6 +1,6 @@
 import { WorkerConnection, loadWorkerConnection } from './backgroundWorker';
 import { DevProject } from './core';
-import { AutopilotRouteState, DeveloperJobPhase } from './developerAgent';
+import { AutopilotRouteState, DeveloperJobPhase, PullRequestRef } from './developerAgent';
 import { RouteNode } from './operatingPlan';
 
 export interface GuardianCiCheck {
@@ -35,7 +35,7 @@ export interface GuardianRun {
   error?: string;
   transientErrorCount?: number;
   ciChecks?: GuardianCiCheck[];
-  pullRequest?: { number: number; url: string; draft: true };
+  pullRequest?: PullRequestRef;
   finalSummary?: string;
   handoffPrompt?: string;
   recoveryCount?: number;
