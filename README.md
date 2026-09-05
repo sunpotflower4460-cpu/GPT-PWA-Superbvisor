@@ -156,6 +156,7 @@ delivered / retrying / failed / cancelled
 - retry/requeue時は以前のBridge ownershipを解放
 - manual fallback時はqueued/failed→cancelledとBridge claimを同じCoordinator内で直列化
 - 自動試行上限後のみterminal `failed`
+- terminal `failed`になった時点で1回だけpush通知(以前はChat Control Centerを開いて`failed`行に気づくまで無音でした)
 - automation由来commandはdedupe keyで重複投入を抑制
 
 `PROJECT_COORDINATOR` が未設定の古いWorkerではKV fallbackで基本操作はできますが、**atomic multi-device guaranteeは有効ではありません**。Setup Doctorがこの状態を警告します。
@@ -257,6 +258,7 @@ Guardianは外部AI開発者ではなく、**ChatGPT作業を監督するハー�
 - CI成功はそれだけで「完了」扱いにしない → Completion Judge(deterministic checks + Semantic Judge)がGOAL/TASK/変更ファイル範囲・KERNEL_AWAREプロジェクトなら実在するHANDOFF.mdも参照して完了証明書(certificate)を発行し、要確認と判定された場合は完了通知の文面にそのまま反映する(Developer/Guardian双方の通知経路)
 - Cron/manual refresh競合 → Coordinatorの`guardian-advance` leaseで通常の二重advanceを抑止
 - 自動mergeはオプトイン: プロジェクト設定で`autoMerge`を有効にし、Completion Judgeが`CERTIFIED`と判定し、かつ差分がCI/governanceに関わるパス(`.github/workflows/`、`project-kernel.json`、`CODEOWNERS`、secrets等)を含まない場合のみ、Draft PRをready化してsquash mergeを試行する。この最後のガード(CI/governanceパスの除外)はopt-inでも無効化できない。失敗時(コンフリクト・他の必須チェック待ち等)は既存同様Draft/Open PRのまま人間のmerge待ちにフォールバックする
+- `waiting_chatgpt`/`handoff_ready`でChatGPT Apps Bridgeが15分以上応答しない場合、Guardianのsweepが能動的に検知して1回だけpush通知する(Guardian run経由のジョブのみ対象)
 - production deployなし
 
 Guardian leaseは通常の二重advanceを抑える入口ロックであり、Guardian / Developer KV state全体を完全transactional/fencedにしたとは扱いません。

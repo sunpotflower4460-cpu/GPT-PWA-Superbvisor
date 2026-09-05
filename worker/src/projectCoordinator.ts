@@ -243,7 +243,7 @@ export class ProjectCoordinator {
 
       if (current.status === body.status && (current.status === 'delivered' || current.status === 'failed' || current.status === 'cancelled')) {
         if (current.bridgeId && current.bridgeId !== body.bridgeId) return json({ error: 'claim_owner_mismatch', command: current }, 409);
-        return json({ command: current });
+        return json({ command: current, transitioned: false });
       }
       if (current.status !== 'claimed') return json({ error: 'command_not_claimed', command: current }, 409);
       if (current.bridgeId !== body.bridgeId) return json({ error: 'claim_owner_mismatch', command: current }, 409);
@@ -253,7 +253,11 @@ export class ProjectCoordinator {
         detail: body.detail,
       });
       await this.state.storage.put(`${COMMAND_PREFIX}${updated.id}`, updated);
-      return json({ command: updated });
+      // Only reachable when current.status was 'claimed' just above, so this
+      // always reflects a real claimed->result transition happening in THIS
+      // call, never a duplicate/idempotent re-read — chatCommandQueue.ts's
+      // notifyChatCommandFailed relies on this to fire a push exactly once.
+      return json({ command: updated, transitioned: true });
     }
 
     if (url.pathname === '/commands/retry' && request.method === 'POST') {

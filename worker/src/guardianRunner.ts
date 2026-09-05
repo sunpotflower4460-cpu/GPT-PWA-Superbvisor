@@ -6,6 +6,7 @@ import {
   refreshDeveloperJob,
 } from './developerAgent';
 import { CompletionCertificate, describeCompletionOutcome } from './completionJudge';
+import { ChatBridgeEnv, getChatBridgeStatus } from './chatBridge';
 import { GitHubEnv, PullRequestRef } from './githubExecutor';
 import { OrchestrationEnv } from './orchestrationModel';
 import { AutopilotRouteState } from './orchestratorPolicy';
@@ -18,7 +19,7 @@ import {
 } from './projectCoordinator';
 import { PushEnv, sendSupervisorPush } from './push';
 
-interface GuardianEnv extends GitHubEnv, PushEnv, OrchestrationEnv {
+export interface GuardianEnv extends GitHubEnv, PushEnv, OrchestrationEnv, ChatBridgeEnv {
   SUPERVISOR_STATE: KVNamespace;
   PROJECT_COORDINATOR?: DurableObjectNamespace;
 }
@@ -76,6 +77,14 @@ export interface GuardianRun {
   // job.status === 'completed', so a Guardian-run consumer sees the same
   // Semantic Judge verdict a plain Developer job would.
   completionCertificate?: CompletionCertificate;
+  // Bridge-staleness tracking for phases that mean "waiting on the human's
+  // ChatGPT tab" (waiting_chatgpt / handoff_ready) — see
+  // checkBridgeStaleness. Both cleared whenever the run leaves those phases
+  // or the Bridge is observed connected again, so a later stall gets a
+  // fresh clock and a fresh notification rather than being permanently
+  // debounced by an earlier, unrelated disconnection.
+  bridgeDisconnectedSinceAt?: string;
+  bridgeStallNotifiedAt?: string;
 }
 
 const RUN_TTL = 60 * 60 * 24 * 14;
@@ -257,19 +266,20 @@ async function advanceGuardianRunUnlocked(
   }
 
   if (job.phase === 'waiting_ci') {
-    run = { ...run, status: 'waiting_ci', message: '現在headのGitHub Actionsを監視中です。失敗してもジョブ自体は終了せず、復旧経路へ移ります。' };
+    run = clearBridgeStallTracking({ ...run, status: 'waiting_ci', message: '現在headのGitHub Actionsを監視中です。失敗してもジョブ自体は終了せず、復旧経路へ移ります。' });
   } else if (job.phase === 'recovery_ready') {
-    run = {
+    run = clearBridgeStallTracking({
       ...run,
       status: 'running',
       message: overNominalRecoveryBudget
         ? '通常の復旧サイクル目安を超えましたが、Guardianは停止せず監視を継続しています。ChatGPT用の最新復旧指示を使用してください。'
         : `CI失敗を検出しました。復旧サイクル ${recoveryCount}/${run.maxCycles}。ChatGPT用の修正指示を更新し、監視を継続しています。`,
-    };
+    });
   } else if (job.phase === 'waiting_chatgpt' || job.phase === 'handoff_ready') {
     run = { ...run, status: 'running', message: 'ChatGPTによるbranch上の作業を待っています。Workerは外部APIで実装せず、定期監視を継続します。' };
+    run = await checkBridgeStaleness(env, run, job.chatUrl);
   } else {
-    run = { ...run, status: 'running', message: job.outputText || 'Supervisor is monitoring the ChatGPT execution state.' };
+    run = clearBridgeStallTracking({ ...run, status: 'running', message: job.outputText || 'Supervisor is monitoring the ChatGPT execution state.' });
   }
 
   await saveRun(env, run);
@@ -308,6 +318,63 @@ export async function sweepGuardianRuns(env: GuardianEnv): Promise<{ checked: nu
   return { checked, advanced, recoverableErrors };
 }
 
+const BRIDGE_STALL_THRESHOLD_MS = 15 * 60_000;
+
+export function clearBridgeStallTracking(run: GuardianRun): GuardianRun {
+  if (!run.bridgeDisconnectedSinceAt && !run.bridgeStallNotifiedAt) return run;
+  return { ...run, bridgeDisconnectedSinceAt: undefined, bridgeStallNotifiedAt: undefined };
+}
+
+// Only called for a run whose job.phase is waiting_chatgpt/handoff_ready —
+// i.e. genuinely waiting on the human's ChatGPT tab (via the ChatGPT Apps
+// Bridge widget) to act. Before this, nothing proactively noticed a
+// project's Bridge going dark while a job depended on it: getChatBridgeStatus
+// was only ever checked reactively, from the PWA's own overview poll while
+// Chat Control happened to be open. A closed/abandoned tab could leave a
+// job silently stuck with zero signal.
+//
+// Scoped limitation, stated honestly rather than assumed universal: this
+// only covers Guardian-run-tracked jobs. A standalone ad-hoc Quick Command
+// enqueued outside a Guardian run has no analogous waiting-state machine to
+// hang a staleness check off of, and is not covered here.
+//
+// Debounced via bridgeStallNotifiedAt so an ongoing stall pushes exactly
+// once, not every 5-minute sweep; clearBridgeStallTracking (called from
+// every other phase branch, and from here once reconnected) resets both
+// fields so a later, genuinely new disconnection gets a fresh clock and a
+// fresh notification.
+export async function checkBridgeStaleness(env: GuardianEnv, run: GuardianRun, chatUrl?: string): Promise<GuardianRun> {
+  if (!run.projectId) return run;
+  try {
+    const bridge = await getChatBridgeStatus(env, run.projectId, chatUrl);
+    if (bridge.connected) return clearBridgeStallTracking(run);
+
+    const nowMs = Date.now();
+    let updated = run.bridgeDisconnectedSinceAt ? run : { ...run, bridgeDisconnectedSinceAt: new Date(nowMs).toISOString() };
+    const disconnectedSinceMs = new Date(updated.bridgeDisconnectedSinceAt!).getTime();
+    const stalled = Number.isFinite(disconnectedSinceMs) && nowMs - disconnectedSinceMs >= BRIDGE_STALL_THRESHOLD_MS;
+    if (stalled && !updated.bridgeStallNotifiedAt) {
+      const name = updated.projectName || updated.repository;
+      try {
+        await sendSupervisorPush(env, {
+          title: `${name}: ChatGPTタブが応答していません`,
+          body: `Bridgeからのheartbeatが${Math.round(BRIDGE_STALL_THRESHOLD_MS / 60_000)}分以上ありません。ChatGPTタブを確認してください。`,
+          tag: `guardian-bridge-stall-${updated.id}`,
+          projectId: updated.projectId,
+          kind: 'human',
+        });
+        updated = { ...updated, bridgeStallNotifiedAt: new Date(nowMs).toISOString() };
+      } catch {
+        // Push delivery is best-effort, same as finalize()'s own push below.
+      }
+    }
+    return updated;
+  } catch {
+    // A bridge-status lookup failure must never corrupt Guardian orchestration state.
+    return run;
+  }
+}
+
 async function recordRecoverableError(env: GuardianEnv, run: GuardianRun, detail: string): Promise<GuardianRun> {
   const count = (run.transientErrorCount || 0) + 1;
   const updated: GuardianRun = {
@@ -328,13 +395,13 @@ async function finalize(
   status: 'review_ready' | 'completed' | 'expired',
   message: string,
 ): Promise<GuardianRun> {
-  let updated: GuardianRun = {
+  let updated: GuardianRun = clearBridgeStallTracking({
     ...run,
     status,
     message,
     error: status === 'expired' ? message : run.error,
     updatedAt: new Date().toISOString(),
-  };
+  });
   if (!run.notifiedAt) {
     const name = run.projectName || run.repository;
     const title = status === 'completed' ? `${name}: Guardian完了` : status === 'review_ready' ? `${name}: 人間確認が必要` : `${name}: 監視時間上限`;

@@ -55,6 +55,14 @@ export default function ChatControlCenter() {
     return () => window.removeEventListener('devdeck:open-chat-control', handler);
   }, []);
 
+  // Seeds `projects` (and therefore overviewProjectIds below) regardless of
+  // whether the sheet has ever been opened — previously only openCenter()
+  // populated it, so the FAB attention badge could never show anything
+  // before the user opened Chat Control at least once.
+  useEffect(() => {
+    setProjects(loadProjects());
+  }, []);
+
   useEffect(() => {
     if (!open || !selected) return;
     let cancelled = false;
@@ -130,6 +138,32 @@ export default function ChatControlCenter() {
       window.removeEventListener('focus', refreshOnWake);
     };
   // overviewKey gives this polling effect a stable dependency across project-array reloads.
+  }, [open, overviewKey]);
+
+  // Keeps `overviews` (and therefore the FAB's attention badge) fresh while
+  // the sheet is closed — the effect above stops entirely on close, so
+  // without this the badge would freeze at whatever it last showed. Lower
+  // cadence than the open-sheet poll (60s vs 8s) and no visibility/online/
+  // focus listeners, since this is a lightweight background badge, not a
+  // real-time view someone is actively watching.
+  useEffect(() => {
+    if (open || !overviewProjectIds.length) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const result = await getChatControlOverview(overviewProjectIds);
+        if (!cancelled) setOverviews(Object.fromEntries(result.projects.map((item) => [item.projectId, item])));
+      } catch {
+        // Best-effort background badge refresh; a failure here must not
+        // surface a message while the sheet isn't even open.
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [open, overviewKey]);
 
   function openCenter(preferredProjectId?: string) {
@@ -306,7 +340,12 @@ export default function ChatControlCenter() {
 
   return (
     <>
-      <button className="chat-control-fab" onClick={() => openCenter()} aria-label="Chat操作">💬</button>
+      <button className="chat-control-fab" onClick={() => openCenter()} aria-label="Chat操作">
+        💬
+        {overviewSummary.attention > 0 && (
+          <span className="chat-control-fab-badge" aria-label={`${overviewSummary.attention}件要確認`}>{overviewSummary.attention}</span>
+        )}
+      </button>
       {open && (
         <div className="chat-control-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
           <section className="chat-control-sheet">

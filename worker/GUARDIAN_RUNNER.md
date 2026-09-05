@@ -35,6 +35,7 @@ Guardianはrecoverableな失敗を原則として終端状態にしません。
 - CI failure → 同じheadの失敗をfingerprintし、ChatGPT用の原因確認・修正指示を1回生成
 - Push失敗 → 監督状態には影響させない
 - 100件を超えるGuardian run → KV listをページングして巡回
+- `waiting_chatgpt`/`handoff_ready`(ChatGPT側の作業待ち)でChatGPT Apps Bridgeが15分以上heartbeatなし → 1回だけpush通知(`bridgeStallNotifiedAt`で同じ停滞を再通知しない。再接続後の新たな停滞は改めて通知)。Guardian run経由のジョブのみ対象で、Guardian runを介さないad-hoc Quick Commandはこの対象外
 
 ## Stop / pause conditions
 
