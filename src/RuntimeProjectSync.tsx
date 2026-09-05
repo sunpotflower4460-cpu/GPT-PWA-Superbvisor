@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { BackgroundJob, getLatestBackgroundJob, loadWorkerConnection } from './backgroundWorker';
 import { DevProject, ProjectStatus, TimelineEvent, loadProjects, saveProjects } from './core';
-import { DeveloperJob, getLatestDeveloperJob } from './developerAgent';
+import { DeveloperJob, getLatestDeveloperJob, pullRequestPhrase } from './developerAgent';
 import { GuardianRun, getLatestGuardianRun } from './guardianRunner';
 
 const SYNC_INTERVAL_MS = 120_000;
@@ -119,14 +119,19 @@ function applyGuardian(project: DevProject, run: GuardianRun): DevProject {
     phase = run.phase === 'human_required' ? '人間操作が必要' : 'レビュー待ち';
     blockers = unique(run.phase === 'human_required'
       ? [run.message || '権限・承認など人間操作を確認']
-      : [run.pullRequest ? `Draft PR #${run.pullRequest.number} をレビュー` : '成果物と証拠をレビュー']);
+      : [run.pullRequest ? `${pullRequestPhrase(run.pullRequest)} をレビュー` : '成果物と証拠をレビュー']);
     kind = 'human';
   } else if (run.status === 'completed') {
-    if (run.pullRequest) {
+    if (run.pullRequest?.merged) {
+      status = 'COMPLETED';
+      progress = 100;
+      phase = `CI成功・自動マージ完了(${pullRequestPhrase(run.pullRequest)})`;
+      kind = 'success';
+    } else if (run.pullRequest) {
       status = 'WAITING_USER';
       progress = Math.max(progress, 95);
-      phase = 'CI成功 · Draft PRの最終レビュー待ち';
-      blockers = unique([`Draft PR #${run.pullRequest.number} を最終レビューしてマージ`]);
+      phase = `CI成功 · ${pullRequestPhrase(run.pullRequest)}の最終レビュー待ち`;
+      blockers = unique([`${pullRequestPhrase(run.pullRequest)} を最終レビューしてマージ`]);
       kind = 'human';
     } else {
       status = 'COMPLETED';
@@ -203,11 +208,16 @@ function applyDeveloper(project: DevProject, job: DeveloperJob): DevProject {
       progress = Math.max(progress, 35);
       phase = job.autoDispatch ? 'ChatGPT Bridge配送 / 実行待ち' : 'ChatGPT実行待ち';
     }
+  } else if (job.status === 'completed' && job.pullRequest?.merged) {
+    status = 'COMPLETED';
+    progress = 100;
+    phase = `CI成功・自動マージ完了(${pullRequestPhrase(job.pullRequest)})`;
+    kind = 'success';
   } else if (job.status === 'completed') {
     status = 'WAITING_USER';
     progress = Math.max(progress, job.pullRequest ? 95 : 90);
-    phase = job.pullRequest ? `CI成功 · Draft PR #${job.pullRequest.number} レビュー待ち` : 'CI成功 · 最終確認待ち';
-    blockers = unique([job.pullRequest ? `Draft PR #${job.pullRequest.number} をレビュー` : '実装結果と証拠を最終確認']);
+    phase = job.pullRequest ? `CI成功 · ${pullRequestPhrase(job.pullRequest)} レビュー待ち` : 'CI成功 · 最終確認待ち';
+    blockers = unique([job.pullRequest ? `${pullRequestPhrase(job.pullRequest)} をレビュー` : '実装結果と証拠を最終確認']);
     kind = 'human';
   } else {
     status = 'ERROR';
@@ -297,7 +307,7 @@ function patchRuntime(project: DevProject, patch: Partial<DevProject>, event: Ti
 }
 
 function runtimeGuardianMessage(run: GuardianRun) {
-  if (run.status === 'completed') return `Guardian: ChatGPT作業後のCI成功確認済み${run.pullRequest ? ` / Draft PR #${run.pullRequest.number}` : ''}`;
+  if (run.status === 'completed') return `Guardian: ChatGPT作業後のCI成功確認済み${run.pullRequest ? ` / ${pullRequestPhrase(run.pullRequest)}` : ''}`;
   if (run.status === 'review_ready') return `Guardian: ${run.phase === 'human_required' ? '人間操作が必要' : 'レビュー待ち'}`;
   if (run.status === 'waiting_ci') return 'Guardian: 現在headのGitHub Actionsを監視中';
   if (run.status === 'expired') return 'Guardian: 監視時間上限。状態保存済み';
@@ -315,7 +325,7 @@ function runtimeGuardianMessage(run: GuardianRun) {
 }
 
 function runtimeDeveloperMessage(job: DeveloperJob) {
-  if (job.status === 'completed') return job.pullRequest ? `ChatGPT作業後のCI成功: Draft PR #${job.pullRequest.number}` : 'ChatGPT作業後のCI成功確認済み';
+  if (job.status === 'completed') return job.pullRequest ? `ChatGPT作業後のCI成功: ${pullRequestPhrase(job.pullRequest)}` : 'ChatGPT作業後のCI成功確認済み';
   if (job.phase === 'recovery_ready') {
     const base = job.autoDispatch
       ? `CI失敗: ChatGPT復旧指示を自動Queue（${job.recoveryCount ?? 0}回目）`

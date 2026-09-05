@@ -15,6 +15,50 @@ export interface AutopilotRouteState {
   completedAt?: string;
 }
 
+// Mirrors the Worker's own PullRequestRef (worker/src/githubExecutor.ts) —
+// shared here so DeveloperJob and GuardianRun (guardianRunner.ts) don't
+// each redeclare it with a stale literal `draft: true`, the exact drift
+// that let GuardianRun's own copy slip out of date across the auto-merge
+// feature (PR #56) without anyone noticing until this file was touched
+// again.
+export interface PullRequestRef {
+  number: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  merged?: boolean;
+  mergedAt?: string;
+  mergeMethod?: string;
+  autoMergeSkippedReason?: string;
+}
+
+// Single shared label for the three PWA call sites that render a job's/
+// run's PullRequestRef (DeveloperAgentCenter.tsx x2, OperatingPlanCenter.tsx)
+// — before this, all three independently said "Draft PR" unconditionally,
+// which became inaccurate the moment a PR could be auto-merged or
+// undrafted-but-not-merged (see autoMergePolicy.ts's attemptAutoMerge).
+export function pullRequestStatusLabel(pr: PullRequestRef): { label: string; note?: string } {
+  if (pr.merged) return { label: `マージ済み PR #${pr.number} を開く ↗` };
+  if (pr.autoMergeSkippedReason) {
+    return {
+      label: `${pr.draft ? 'Draft ' : ''}PR #${pr.number} を開く ↗`,
+      note: `自動マージ対象外: ${pr.autoMergeSkippedReason}`,
+    };
+  }
+  return { label: `${pr.draft ? 'Draft ' : ''}PR #${pr.number} を開く ↗` };
+}
+
+// A shorter "Draft PR #N" / "マージ済み PR #N" fragment for call sites that
+// compose it into their own sentence (NotificationCenter.tsx,
+// RuntimeProjectSync.tsx) rather than rendering a standalone button —
+// same underlying staleness this file's own pullRequestStatusLabel exists
+// to fix, just without a note (these are compact one-liners, no room for
+// a secondary explanation).
+export function pullRequestPhrase(pr: PullRequestRef): string {
+  if (pr.merged) return `マージ済み PR #${pr.number}`;
+  return `${pr.draft ? 'Draft ' : ''}PR #${pr.number}`;
+}
+
 export interface DeveloperJob {
   id: string;
   projectId?: string;
@@ -50,7 +94,7 @@ export interface DeveloperJob {
   maxAutoCiReruns?: number;
   ciChecks?: Array<{ id: number; name: string; status: string; conclusion: string | null; url: string; headSha: string }>;
   changedFiles?: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }>;
-  pullRequest?: { number: number; url: string; state: string; draft: boolean; merged?: boolean; mergedAt?: string; mergeMethod?: string; autoMergeSkippedReason?: string };
+  pullRequest?: PullRequestRef;
   chatUrl?: string;
   autoDispatch?: boolean;
   autoMerge?: boolean;

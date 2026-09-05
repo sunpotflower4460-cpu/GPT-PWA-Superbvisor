@@ -6,6 +6,7 @@ import {
   startBackgroundJob,
 } from './backgroundWorker';
 import { GuardianRun, startGuardianRun } from './guardianRunner';
+import { pullRequestStatusLabel } from './developerAgent';
 import { enqueueProjectChatCommand } from './chatControl';
 import {
   OperatingPlan,
@@ -400,7 +401,13 @@ export default function OperatingPlanCenter() {
 
                     {background && <article className="plan-run-status background completed"><div><b>Supervisor · QUEUED TO CHATGPT</b><span>{background.orchestratorProvider || 'deterministic'} / {background.model}</span></div><p>{background.checkpoint?.summary || background.report?.summary || 'ChatGPTへ渡すPlanを準備しQueueへ送信しました。'}</p><button onClick={openChatControl}>Chat Controlで確認</button></article>}
 
-                    {guardian && <article className={`plan-run-status ${guardian.status}`}><div><b>Guardian · {guardian.status}</b><span>復旧 {guardian.recoveryCount || 0}回</span></div><p>{guardian.message || 'Guardian監督を開始しました。'}</p>{guardian.status !== 'completed' && <button onClick={openChatControl}>Chat Controlで確認</button>}{guardian.pullRequest && <button onClick={() => openGitHub(guardian.pullRequest!.url)}>Draft PR #{guardian.pullRequest.number} ↗</button>}</article>}
+                    {guardian && <article className={`plan-run-status ${guardian.status}`}><div><b>Guardian · {guardian.status}</b><span>復旧 {guardian.recoveryCount || 0}回</span></div><p>{guardian.message || 'Guardian監督を開始しました。'}</p>{guardian.status !== 'completed' && <button onClick={openChatControl}>Chat Controlで確認</button>}{guardian.pullRequest && (() => {
+                      const { label, note } = pullRequestStatusLabel(guardian.pullRequest);
+                      return <>
+                        <button onClick={() => openGitHub(guardian.pullRequest!.url)}>{label}</button>
+                        {note && <small className="plan-pr-note">{note}</small>}
+                      </>;
+                    })()}</article>}
                     {message && <div className="plan-message">{message}</div>}
                   </div>
                 )}
