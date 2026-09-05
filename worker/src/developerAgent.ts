@@ -1,6 +1,7 @@
 import {
   GitHubEnv,
   GitHubWorkspace,
+  PullRequestRef,
   assertAllowedRepo,
   compareWorkspace,
   createPullRequest,
@@ -9,6 +10,7 @@ import {
   getRepositorySummary,
   getWorkflowRunJobs,
 } from './githubExecutor';
+import { AUTO_MERGE_METHOD, attemptAutoMerge, shouldAutoMerge } from './autoMergePolicy';
 import { OrchestrationEnv, runOrchestrationModel } from './orchestrationModel';
 import {
   AutopilotRouteState,
@@ -68,6 +70,11 @@ export interface CreateDeveloperJobBody {
   maxAutoCiReruns?: number;
   chatUrl?: string;
   autoDispatch?: boolean;
+  // Opt-in only: see shouldAutoMerge (autoMergePolicy.ts). Never implies
+  // anything on its own — a merge is only ever attempted once this job's
+  // completionCertificate reaches CERTIFIED and the diff touches no
+  // CI/governance path.
+  autoMerge?: boolean;
   // The declared Route plan (see routePlan.ts) — an ordered list of named
   // phases the caller (the PWA, from src/operatingPlan.ts's
   // parseRoutePlan) planned upfront. Optional and never required: a caller
@@ -102,7 +109,7 @@ export interface DeveloperJob {
   error?: string;
   changedFiles?: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }>;
   ciChecks?: CiCheckLike[];
-  pullRequest?: { number: number; url: string; draft: true };
+  pullRequest?: PullRequestRef;
   managedByGoalRunId?: string;
   // Detected once at job creation and cached; never a hard dependency —
   // GENERIC_REPO (no manifest, or one that failed to parse) falls back to
@@ -174,6 +181,7 @@ export interface DeveloperJob {
   trace?: TraceEntry[];
   chatUrl?: string;
   autoDispatch: boolean;
+  autoMerge: boolean;
   lastQueuedHandoffFingerprint?: string;
   lastQueuedCommandId?: string;
   lastDispatchError?: string;
@@ -233,6 +241,7 @@ export async function continueDeveloperJob(
     maxAutoCiReruns: previous.maxAutoCiReruns,
     chatUrl: previous.chatUrl,
     autoDispatch: previous.autoDispatch,
+    autoMerge: previous.autoMerge,
     routePlan: previous.routePlan,
   }, previous.workspace, goalRunId ?? previous.managedByGoalRunId);
 }
@@ -314,6 +323,7 @@ async function createDeveloperJobInternal(
     orchestratorRateLimited: decision.rateLimited,
     chatUrl: body.chatUrl?.trim() || undefined,
     autoDispatch: Boolean(body.autoDispatch),
+    autoMerge: Boolean(body.autoMerge),
     kernelMode: kernel.mode,
     kernelManifest: kernel.manifest,
     inferredContract: kernel.inferredContract,
@@ -615,17 +625,55 @@ export async function refreshDeveloperJob(env: AgentEnv, id: string): Promise<De
   // PENDING never blocks or reverts status/phase here, it's an additional
   // advisory layer surfaced alongside, not a gate.
   job = { ...job, completionCertificate: await buildCompletionCertificateAsync(job, createSemanticJudge(env)) };
+
+  // Opt-in auto-merge attempt — see autoMergePolicy.ts. Fires at most once:
+  // this whole completion transition only runs once per job (see the
+  // comment above), so there is no later-sweep retry if the attempt fails.
+  // That's acceptable: CERTIFIED already implies job.phase !== 'human_required'
+  // (see evaluateDeterministicCompletion's humanApprovalOutstanding check),
+  // so for kernel-aware repos declaring GPT-template's check-approval gate,
+  // that gate has already passed by the time we get here — a required-check
+  // timing race at merge time is unlikely. Any failure (conflict, a
+  // different still-pending required check, disallowed merge method) is
+  // non-fatal and leaves the PR exactly where today's baseline already
+  // leaves it: open, for a human to merge manually. No regression, only a
+  // missed optimization on that one job.
+  const mergePolicy = shouldAutoMerge({
+    certificate: job.completionCertificate,
+    changedFiles: comparison.files ?? [],
+    autoMergeEnabled: job.autoMerge,
+  });
+  if (pullRequest && mergePolicy.allowed) {
+    const outcome = await attemptAutoMerge(env, job.workspace, pullRequest.number, AUTO_MERGE_METHOD);
+    job = {
+      ...job,
+      pullRequest: {
+        ...pullRequest,
+        ...(outcome.merged
+          ? { draft: false, merged: true, mergedAt: outcome.mergedAt, mergeMethod: outcome.mergeMethod }
+          : { draft: outcome.readyForReview ? false : pullRequest.draft, autoMergeSkippedReason: outcome.reason }),
+      },
+      trace: appendTrace(job, outcome.merged ? 'AUTO_MERGED' : 'AUTO_MERGE_ATTEMPT_FAILED', outcome.merged ? undefined : outcome.reason),
+    };
+  } else if (pullRequest && job.autoMerge && mergePolicy.reason) {
+    // Opted in, but not (yet) eligible — no GitHub call was made; record
+    // why for visibility rather than silently doing nothing.
+    job = { ...job, pullRequest: { ...pullRequest, autoMergeSkippedReason: mergePolicy.reason } };
+  }
+
   await saveJob(env, job);
   await safePush(env, {
     title: `${job.projectName || job.repository}: CI確認完了`,
-    body: describeCompletionOutcome(
-      job.completionCertificate,
-      pullRequest ? `CI成功。Draft PR #${pullRequest.number} を確認できます。` : 'CI成功を確認しました。',
-    ),
+    body: job.pullRequest?.merged
+      ? `CI成功・Completion Judge認定・自動マージ完了 (PR #${job.pullRequest.number})。`
+      : describeCompletionOutcome(
+        job.completionCertificate,
+        pullRequest ? `CI成功。Draft PR #${pullRequest.number} を確認できます。` : 'CI成功を確認しました。',
+      ),
     tag: `developer-${job.id}`,
     projectId: job.projectId,
     kind: 'complete',
-    url: pullRequest?.url || './',
+    url: job.pullRequest?.url || pullRequest?.url || './',
   });
   return job;
 }
@@ -859,7 +907,7 @@ async function tryCreateDraftPr(
       `${job.projectName || 'AI DEV DECK'}: ${shortTitle(job.goal)}`,
       buildPullRequestBody(job, comparison),
     );
-    return { pullRequest: { number: pr.number, url: pr.url, draft: true } };
+    return { pullRequest: pr };
   } catch (error) {
     return { error: error instanceof Error ? error.message : 'Draft PR creation failed' };
   }

@@ -256,7 +256,7 @@ Guardianは外部AI開発者ではなく、**ChatGPT作業を監督するハー�
 - CI成功 → Draft PR導線
 - CI成功はそれだけで「完了」扱いにしない → Completion Judge(deterministic checks + Semantic Judge)がGOAL/TASK/変更ファイル範囲・KERNEL_AWAREプロジェクトなら実在するHANDOFF.mdも参照して完了証明書(certificate)を発行し、要確認と判定された場合は完了通知の文面にそのまま反映する(Developer/Guardian双方の通知経路)
 - Cron/manual refresh競合 → Coordinatorの`guardian-advance` leaseで通常の二重advanceを抑止
-- 自動mergeなし
+- 自動mergeはオプトイン: プロジェクト設定で`autoMerge`を有効にし、Completion Judgeが`CERTIFIED`と判定し、かつ差分がCI/governanceに関わるパス(`.github/workflows/`、`project-kernel.json`、`CODEOWNERS`、secrets等)を含まない場合のみ、Draft PRをready化してsquash mergeを試行する。この最後のガード(CI/governanceパスの除外)はopt-inでも無効化できない。失敗時(コンフリクト・他の必須チェック待ち等)は既存同様Draft/Open PRのまま人間のmerge待ちにフォールバックする
 - production deployなし
 
 Guardian leaseは通常の二重advanceを抑える入口ロックであり、Guardian / Developer KV state全体を完全transactional/fencedにしたとは扱いません。
@@ -428,9 +428,10 @@ node scripts/local-ci.mjs --fresh              # node_modulesがあっても常�
 - Bridge project allowlistをfail-closedにする
 - stale/non-owner Bridgeからのresult overwriteを拒否する
 - manual fallbackでautomatic Queueを残したまま同じ本文を別送信しない
-- 外部LLMにGitHub write/delete/merge権限を与えない
+- 外部LLMにGitHub write/delete/merge権限を与えない(mergeはWorker自身が`GITHUB_TOKEN`で実行する場合のみ、下記の自動merge条件の下で発生する)
 - main/default branchへWorkerからコードwriteしない
-- 自動merge / production deployなし
+- 自動mergeはプロジェクトのopt-inかつCompletion Judge `CERTIFIED`時のみ、CI/governanceパスを含む差分は常に対象外(詳細は「GitHub Guardian」節)
+- production deployなし
 - CI未確認を成功扱いしない
 
 より詳しい設計判断は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照してください。

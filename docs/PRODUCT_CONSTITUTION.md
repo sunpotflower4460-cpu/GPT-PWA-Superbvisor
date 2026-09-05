@@ -135,6 +135,8 @@ Transportは公式Apps SDK / MCP等へ差し替え可能な境界として保ち
 
 明示的な将来方針変更がない限り、automatic merge / production deployは行いません。
 
+方針変更後の現状: production deployは引き続き完全に対象外です。mergeのみ、プロジェクトごとのopt-in設定があり、かつCompletion Judge(deterministic checks + Semantic Judge)が`CERTIFIED`と認定し、かつ差分がCI/governanceに関わるパス(`.github/workflows/`、`project-kernel.json`、`CODEOWNERS`、secrets等)を一切含まない場合に限り、Workerが自動でDraft PRをready化しmergeを試行します。最後のガード(CI/governanceパスの除外)はプロジェクト側のopt-inでも無効化できません — `CERTIFIED`という判定自体が、CI設定やガバナンス定義が変更されていないという前提の上に成り立っているためです。マージ試行が失敗した場合(コンフリクト、他の必須チェック待ち等)は、常に安全側(人間によるmerge待ちの通常のDraft/Open PR)にフォールバックします。
+
 ### C8 — Mobile and low friction
 
 機能が増えても、主操作は「スマホから数秒で案件の状態を把握し、次の指示を送る」ことを優先します。

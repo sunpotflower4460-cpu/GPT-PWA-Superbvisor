@@ -41,6 +41,7 @@ function baseJob(overrides: Partial<DeveloperJob> = {}): DeveloperJob {
     ciAutoReruns: 0,
     maxAutoCiReruns: 2,
     autoDispatch: false,
+    autoMerge: false,
     ...overrides,
   };
 }

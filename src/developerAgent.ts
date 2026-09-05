@@ -50,9 +50,10 @@ export interface DeveloperJob {
   maxAutoCiReruns?: number;
   ciChecks?: Array<{ id: number; name: string; status: string; conclusion: string | null; url: string; headSha: string }>;
   changedFiles?: Array<{ filename: string; status: string; additions: number; deletions: number; changes: number }>;
-  pullRequest?: { number: number; url: string; draft: true };
+  pullRequest?: { number: number; url: string; state: string; draft: boolean; merged?: boolean; mergedAt?: string; mergeMethod?: string; autoMergeSkippedReason?: string };
   chatUrl?: string;
   autoDispatch?: boolean;
+  autoMerge?: boolean;
   lastQueuedCommandId?: string;
   lastDispatchError?: string;
 }
@@ -93,6 +94,7 @@ export async function startDeveloperJob(
       maxAutoCiReruns: 2,
       chatUrl: project.chatUrl,
       autoDispatch: project.automationLevel === 'AUTO' || project.automationLevel === 'GUARDIAN',
+      autoMerge: Boolean(project.autoMerge),
       routePlan,
     }),
   });

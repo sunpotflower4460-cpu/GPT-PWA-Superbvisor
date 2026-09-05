@@ -6,7 +6,7 @@ import {
   refreshDeveloperJob,
 } from './developerAgent';
 import { CompletionCertificate, describeCompletionOutcome } from './completionJudge';
-import { GitHubEnv } from './githubExecutor';
+import { GitHubEnv, PullRequestRef } from './githubExecutor';
 import { OrchestrationEnv } from './orchestrationModel';
 import { AutopilotRouteState } from './orchestratorPolicy';
 import { RouteNode } from './routePlan';
@@ -62,7 +62,7 @@ export interface GuardianRun {
   error?: string;
   transientErrorCount?: number;
   ciChecks?: GuardianCiCheck[];
-  pullRequest?: { number: number; url: string; draft: true };
+  pullRequest?: PullRequestRef;
   finalSummary?: string;
   handoffPrompt?: string;
   recoveryCount?: number;

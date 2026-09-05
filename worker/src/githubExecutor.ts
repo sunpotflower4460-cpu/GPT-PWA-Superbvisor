@@ -23,10 +23,29 @@ export interface GitHubFileResult {
   size: number;
 }
 
+// Single shared shape for a job/run's tracked pull request — previously
+// redeclared independently (with a stale literal `draft: true`) in
+// worker/src/developerAgent.ts, worker/src/guardianRunner.ts and
+// src/developerAgent.ts (the PWA client). draft is a real boolean now that
+// autoMergePolicy.ts can undraft a PR; the remaining fields are populated
+// only once an auto-merge attempt actually ran (see autoMergePolicy.ts).
+export interface PullRequestRef {
+  number: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  merged?: boolean;
+  mergedAt?: string;
+  mergeMethod?: MergeMethod;
+  autoMergeSkippedReason?: string;
+}
+
+export type MergeMethod = 'merge' | 'squash' | 'rebase';
+
 const API = 'https://api.github.com';
 const BRANCH_PREFIX = 'ai-dev-deck/';
 const MAX_FILE_BYTES = 250_000;
-const BLOCKED_PATHS = [
+export const BLOCKED_PATHS = [
   /^\.env(?:\.|$)/i,
   /(^|\/)\.env(?:\.|$)/i,
   /(^|\/)(?:id_rsa|id_ed25519)$/i,
@@ -192,6 +211,24 @@ export async function createPullRequest(env: GitHubEnv, workspace: GitHubWorkspa
     }
     throw error;
   }
+}
+
+// Both throw uniformly on any non-2xx response, exactly like every other
+// helper in this file — a merge conflict, a still-pending required check
+// and a disallowed merge method are all ordinary GitHub error responses
+// (405/409) here, not special-cased. Auto-merge's own "never fatal" policy
+// lives entirely in autoMergePolicy.ts's attemptAutoMerge(), which is the
+// only caller — keeping that business rule in one place rather than
+// spreading status-code handling across this file's otherwise-uniform
+// throw-on-error convention.
+export async function markPullRequestReadyForReview(env: GitHubEnv, workspace: GitHubWorkspace, pullNumber: number) {
+  const repo = assertAllowedRepo(env, workspace.repository);
+  return githubJson<{ number: number; draft: boolean }>(env, repo, 'PATCH', `/pulls/${pullNumber}`, { draft: false });
+}
+
+export async function mergePullRequest(env: GitHubEnv, workspace: GitHubWorkspace, pullNumber: number, mergeMethod: MergeMethod) {
+  const repo = assertAllowedRepo(env, workspace.repository);
+  return githubJson<{ merged: boolean; message?: string; sha?: string }>(env, repo, 'PUT', `/pulls/${pullNumber}/merge`, { merge_method: mergeMethod });
 }
 
 // For GENERIC_REPO inference (no project-kernel.json to declare a

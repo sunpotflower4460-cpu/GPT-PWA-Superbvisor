@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getWorkflowRunJobs, listRecentWorkflowEvents, type GitHubEnv } from './githubExecutor';
+import { getWorkflowRunJobs, listRecentWorkflowEvents, markPullRequestReadyForReview, mergePullRequest, type GitHubEnv, type GitHubWorkspace } from './githubExecutor';
 
 const env: GitHubEnv = {
   GITHUB_TOKEN: 'test-token',
   GITHUB_ALLOWED_REPOS: 'sunpotflower4460-cpu/GPT-template',
+};
+
+const workspace: GitHubWorkspace = {
+  repository: 'sunpotflower4460-cpu/GPT-template',
+  defaultBranch: 'main',
+  branch: 'ai-dev-deck/task-abcd1234',
+  baseSha: 'base123',
+  createdAt: '2026-01-01T00:00:00.000Z',
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -174,5 +182,49 @@ describe('listRecentWorkflowEvents', () => {
     vi.stubGlobal('fetch', fetchMock);
     await expect(listRecentWorkflowEvents(env, 'someone-else/other-repo')).rejects.toThrow('not allowlisted');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('markPullRequestReadyForReview', () => {
+  it('PATCHes the pull request with draft:false', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe('https://api.github.com/repos/sunpotflower4460-cpu/GPT-template/pulls/42');
+      expect(init?.method).toBe('PATCH');
+      expect(JSON.parse(String(init?.body))).toEqual({ draft: false });
+      return jsonResponse({ number: 42, draft: false });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await markPullRequestReadyForReview(env, workspace, 42);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ number: 42, draft: false });
+  });
+
+  it('throws on a non-2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ message: 'Not Found' }, 404)));
+    await expect(markPullRequestReadyForReview(env, workspace, 42)).rejects.toThrow('Not Found');
+  });
+});
+
+describe('mergePullRequest', () => {
+  it('PUTs the merge request with the given merge_method', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe('https://api.github.com/repos/sunpotflower4460-cpu/GPT-template/pulls/42/merge');
+      expect(init?.method).toBe('PUT');
+      expect(JSON.parse(String(init?.body))).toEqual({ merge_method: 'squash' });
+      return jsonResponse({ merged: true, sha: 'deadbeef' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await mergePullRequest(env, workspace, 42, 'squash');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ merged: true, sha: 'deadbeef' });
+  });
+
+  it('throws on a non-2xx response (e.g. a merge conflict or a still-pending required check)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ message: 'Pull Request is not mergeable' }, 405)));
+    await expect(mergePullRequest(env, workspace, 42, 'squash')).rejects.toThrow('Pull Request is not mergeable');
   });
 });
