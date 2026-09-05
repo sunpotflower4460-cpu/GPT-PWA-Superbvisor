@@ -84,7 +84,12 @@ export async function attemptAutoMerge(
   }
 
   try {
-    await mergePullRequest(env, workspace, pullNumber, mergeMethod);
+    const result = await mergePullRequest(env, workspace, pullNumber, mergeMethod);
+    // GitHub's merge endpoint only returns a 2xx status on an actual
+    // successful merge (failures are 405/409/422, all caught below) — this
+    // check is defensive, not currently reachable, in case that assumption
+    // ever stops holding.
+    if (!result.merged) return { merged: false, readyForReview: true, reason: result.message || 'マージAPIが merged:false を返しました' };
     return { merged: true, mergedAt: new Date().toISOString(), mergeMethod };
   } catch (error) {
     // Undraft already succeeded — a human reviewing later should see a

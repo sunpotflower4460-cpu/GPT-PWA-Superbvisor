@@ -915,7 +915,14 @@ async function tryCreateDraftPr(
 
 function buildPullRequestBody(job: DeveloperJob, comparison: Awaited<ReturnType<typeof compareWorkspace>>) {
   const files = (comparison.files ?? []).slice(0, 50).map((file) => `- \`${file.filename}\` (${file.status}, +${file.additions}/-${file.deletions})`).join('\n') || '- No file list returned';
-  return `## AI DEV DECK / ChatGPT execution\n\n**Goal:** ${job.goal}\n\n**Executor:** ChatGPT chat\n**Orchestrator:** ${job.orchestratorProvider}/${job.model}\n**Worker role:** branch preparation, monitoring, CI recovery routing, Chat Control Bus routing, Draft PR preparation. The external orchestration model did not edit repository files.\n\n### Changed files\n${files}\n\n### Supervisor summary\n${job.outputText || 'No summary'}\n\n### Safety\n- Draft only\n- No automatic merge\n- No production deploy\n`;
+  // A reviewer reads this body at Draft-PR-creation time, before the
+  // Completion Judge has run — so this must not claim "No automatic merge"
+  // for a project that opted in, or it tells the reviewer something false
+  // about what may happen to this exact PR (see autoMergePolicy.ts).
+  const mergeLine = job.autoMerge
+    ? '- Automatic merge is opted in for this project: once the Completion Judge certifies this job (CERTIFIED) and the diff touches no CI/governance path, the Worker will undraft and squash-merge this PR automatically'
+    : '- No automatic merge';
+  return `## AI DEV DECK / ChatGPT execution\n\n**Goal:** ${job.goal}\n\n**Executor:** ChatGPT chat\n**Orchestrator:** ${job.orchestratorProvider}/${job.model}\n**Worker role:** branch preparation, monitoring, CI recovery routing, Chat Control Bus routing, Draft PR preparation. The external orchestration model did not edit repository files.\n\n### Changed files\n${files}\n\n### Supervisor summary\n${job.outputText || 'No summary'}\n\n### Safety\n- Draft only until CI/Completion Judge evidence exists\n${mergeLine}\n- No production deploy\n`;
 }
 
 async function saveJob(env: AgentEnv, job: DeveloperJob) {

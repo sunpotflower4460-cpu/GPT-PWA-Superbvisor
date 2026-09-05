@@ -192,8 +192,12 @@ export async function compareWorkspace(env: GitHubEnv, workspace: GitHubWorkspac
 export async function createPullRequest(env: GitHubEnv, workspace: GitHubWorkspace, title: string, body: string) {
   assertSafeBranch(workspace.branch);
   const repo = assertAllowedRepo(env, workspace.repository);
+  // An already-open PR may have been manually undrafted by a human since
+  // the Worker last saw it (or by a previous auto-merge attempt) — report
+  // its real draft state rather than always claiming true, since that
+  // field now has real meaning (see autoMergePolicy.ts/PullRequestRef).
   const existing = await findOpenPullRequest(env, repo, workspace);
-  if (existing) return { number: existing.number, url: existing.html_url, state: existing.state, draft: true };
+  if (existing) return { number: existing.number, url: existing.html_url, state: existing.state, draft: existing.draft ?? true };
 
   try {
     const result = await githubJson<{ number: number; html_url: string; state: string }>(env, repo, 'POST', '/pulls', {
@@ -207,7 +211,7 @@ export async function createPullRequest(env: GitHubEnv, workspace: GitHubWorkspa
   } catch (error) {
     if (error instanceof GitHubHttpError && error.status === 422) {
       const raced = await findOpenPullRequest(env, repo, workspace);
-      if (raced) return { number: raced.number, url: raced.html_url, state: raced.state, draft: true };
+      if (raced) return { number: raced.number, url: raced.html_url, state: raced.state, draft: raced.draft ?? true };
     }
     throw error;
   }
