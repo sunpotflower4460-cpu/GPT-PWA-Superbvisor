@@ -12,6 +12,7 @@ import {
   summarizeCoordinatorCommands,
 } from './projectCoordinator';
 import { normalizeChatUrl } from './chatUrl';
+import { PushEnv, sendSupervisorPush } from './push';
 
 export { normalizeChatUrl } from './chatUrl';
 
@@ -22,7 +23,7 @@ export interface ChatCommandOverviewSnapshot extends CoordinatorCommandOverview 
   approximate: boolean;
 }
 
-export interface ChatCommandEnv extends AtomicCoordinatorEnv {
+export interface ChatCommandEnv extends AtomicCoordinatorEnv, PushEnv {
   SUPERVISOR_STATE: KVNamespace;
 }
 
@@ -244,7 +245,7 @@ export async function updateChatCommandResult(env: ChatCommandEnv, id: string, i
 
   if (hasAtomicCoordinator(env) && projectId && bridgeId) {
     await ensureCoordinatorCommandsMigrated(env, projectId);
-    const result = await coordinatorFetch<{ command?: ChatCommand; error?: string }>(env, chatScope(projectId), '/commands/result', {
+    const result = await coordinatorFetch<{ command?: ChatCommand; error?: string; transitioned?: boolean }>(env, chatScope(projectId), '/commands/result', {
       method: 'POST',
       body: JSON.stringify({ id, projectId, bridgeId, status: input.status, detail: input.detail }),
     });
@@ -252,6 +253,9 @@ export async function updateChatCommandResult(env: ChatCommandEnv, id: string, i
     if (result.status === 409) throw new ChatCommandConflictError(result.data.error || 'chat_command_conflict', result.data.error || 'chat_command_conflict');
     if (!result.ok || !result.data.command) throw new Error(result.data.error || `atomic_result_failed_${result.status}`);
     await mirrorCommand(env, result.data.command);
+    if (result.data.transitioned && result.data.command.status === 'failed') {
+      await notifyChatCommandFailed(env, result.data.command);
+    }
     return result.data.command;
   }
 
@@ -268,6 +272,12 @@ export async function updateChatCommandResult(env: ChatCommandEnv, id: string, i
   if (bridgeId && current.bridgeId !== bridgeId) throw new ChatCommandConflictError('claim_owner_mismatch', 'claim_owner_mismatch');
   const updated = applyCommandResult(current, input);
   await saveCommand(env, updated);
+  // current.status is guaranteed 'claimed' here (checked above), so
+  // updated.status === 'failed' always means a fresh transition into
+  // terminal failure, never a re-read of an already-failed command.
+  if (updated.status === 'failed') {
+    await notifyChatCommandFailed(env, updated);
+  }
   return updated;
 }
 
@@ -643,4 +653,27 @@ function chatScope(projectId: string) {
 
 function dedupeStorageKey(projectId: string, dedupeKeyValue: string) {
   return `${DEDUPE_PREFIX}${encodeURIComponent(projectId)}:${encodeURIComponent(dedupeKeyValue)}`;
+}
+
+// Both call sites above gate this so it fires exactly once per real
+// transition into terminal 'failed' — never on an idempotent re-read of an
+// already-failed command, and never on a mere backoff-requeue (which keeps
+// status 'queued'). Before this, the only way a human learned a command
+// needed a manual retry was opening Chat Control and noticing a failed row;
+// this could otherwise sit silently for hours. Push delivery is always
+// best-effort (sendSupervisorPush already no-ops safely when VAPID isn't
+// configured) and must never fail the result/retry response the Bridge is
+// waiting on.
+async function notifyChatCommandFailed(env: ChatCommandEnv, command: ChatCommand) {
+  try {
+    await sendSupervisorPush(env, {
+      title: `${command.projectName || command.projectId}: ChatGPTへの送信に失敗`,
+      body: (command.detail || 'ChatGPT delivery failed.').slice(0, 240),
+      tag: `chat-command-failed-${command.id}`,
+      projectId: command.projectId,
+      kind: 'error',
+    });
+  } catch {
+    // best-effort, see comment above
+  }
 }

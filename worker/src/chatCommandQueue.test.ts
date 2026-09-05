@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { sendSupervisorPush } from './push';
 import {
   ChatCommandConflictError,
   INVALID_CHAT_COMMAND_ERROR,
@@ -15,6 +16,8 @@ import {
   type ChatCommandEnv,
 } from './chatCommandQueue';
 import { applyCommandResult } from './projectCoordinator';
+
+vi.mock('./push', () => ({ sendSupervisorPush: vi.fn().mockResolvedValue({ sent: 0, failed: 0, disabled: true }) }));
 
 const baseCommand: ChatCommand = {
   id: 'command-1',
@@ -411,6 +414,86 @@ describe('chat command delivery recovery', () => {
     expect(exhausted.status).toBe('failed');
     expect(exhausted.deliveryFailures).toBe(3);
     expect(exhausted.nextAttemptAt).toBeUndefined();
+  });
+
+  // Before this, the only way a human learned a command needed a manual
+  // retry was opening Chat Control and noticing a failed row — could sit
+  // silently for hours. These three cases are what keep the resulting push
+  // to exactly once per real transition into terminal failure.
+  it('sends a push exactly once when a command exhausts delivery attempts via the KV-fallback path', async () => {
+    vi.mocked(sendSupervisorPush).mockClear();
+    const { env, store } = fakeEnv();
+    const claimed: ChatCommand = {
+      ...baseCommand,
+      id: 'exhausted-kv',
+      status: 'claimed',
+      bridgeId: 'bridge-a',
+      claimedAt: new Date().toISOString(),
+      deliveryFailures: 2,
+      maxDeliveryAttempts: 3,
+    };
+    store.set(`chat-command:${claimed.id}`, JSON.stringify(claimed));
+
+    const updated = await updateChatCommandResult(env, claimed.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'failed',
+      detail: 'still unavailable',
+    });
+
+    expect(updated?.status).toBe('failed');
+    expect(sendSupervisorPush).toHaveBeenCalledTimes(1);
+    const [, payload] = vi.mocked(sendSupervisorPush).mock.calls[0];
+    expect(payload.kind).toBe('error');
+    expect(payload.tag).toBe(`chat-command-failed-${claimed.id}`);
+  });
+
+  it('does not send a push when a failure only triggers a backoff-requeue', async () => {
+    vi.mocked(sendSupervisorPush).mockClear();
+    const { env, store } = fakeEnv();
+    const claimed: ChatCommand = {
+      ...baseCommand,
+      id: 'requeue-kv',
+      status: 'claimed',
+      bridgeId: 'bridge-a',
+      claimedAt: new Date().toISOString(),
+      deliveryFailures: 0,
+      maxDeliveryAttempts: 3,
+    };
+    store.set(`chat-command:${claimed.id}`, JSON.stringify(claimed));
+
+    const updated = await updateChatCommandResult(env, claimed.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'failed',
+      detail: 'transient',
+    });
+
+    expect(updated?.status).toBe('queued');
+    expect(sendSupervisorPush).not.toHaveBeenCalled();
+  });
+
+  it('does not send a second push on a repeated result for an already-terminal-failed command', async () => {
+    vi.mocked(sendSupervisorPush).mockClear();
+    const { env, store } = fakeEnv();
+    const alreadyFailed: ChatCommand = {
+      ...baseCommand,
+      id: 'already-failed-kv',
+      status: 'failed',
+      bridgeId: 'bridge-a',
+      deliveryFailures: 3,
+      maxDeliveryAttempts: 3,
+    };
+    store.set(`chat-command:${alreadyFailed.id}`, JSON.stringify(alreadyFailed));
+
+    const updated = await updateChatCommandResult(env, alreadyFailed.id, {
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'failed',
+    });
+
+    expect(updated?.status).toBe('failed');
+    expect(sendSupervisorPush).not.toHaveBeenCalled();
   });
 
   it('does not extend the original 14-day KV retention window when an old command is updated', async () => {

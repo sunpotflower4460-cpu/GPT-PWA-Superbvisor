@@ -457,6 +457,7 @@ Implemented foundation:
 26. Semantic Judge(`semanticJudge.ts`)の実装: LLMによる完了判定レビュー、KERNEL_AWAREプロジェクトのHANDOFF.md自己監査文書を証拠として評価(prompt injection対策のnonce区切り込み)、`refreshDeveloperJob`/`guardianRunner.ts`の実際の完了フローへの配線(Developer/Guardian両方のpush通知に反映、`GET .../completion`は再計算せず永続化済みcertificateを優先)
 27. `scripts/local-ci.mjs`: GitHub Actionsが利用できない状況向けのローカルフォールバックCI(ci.ymlと同じジョブ構成)
 28. Auto-merge(`autoMergePolicy.ts`): プロジェクトごとのopt-in(`autoMerge`)かつCompletion Judge `CERTIFIED`時のみ、Draft PRをready化しsquash mergeを試行(`markPullRequestReadyForReview`/`mergePullRequest`)。CI/governanceに関わるパス(`.github/workflows/`、`project-kernel.json`、`CODEOWNERS`、secrets等)を含む差分は非configurableにブロック。失敗は常にsoft-fail(既存のDraft/Open PRへフォールバック、Developer/Guardian両方のpush通知に反映)
+29. ChatGPT Apps Bridge信頼性向上: (a) チャットコマンドが配送試行を使い果たし恒久的に`failed`となった場合、`chatCommandQueue.ts`が一度だけpush通知(以前は人間がChat Control Centerを開いて`failed`行に気づくまで無音でした)。(b) `guardianRunner.ts`のsweepが`waiting_chatgpt`/`handoff_ready`中のBridge heartbeat断絶を能動的に検知し、15分以上続いた場合に一度だけpush通知(`bridgeStallNotifiedAt`でデバウンス、再接続後の新たな断絶は再通知)。(c) Chat Control FABに未確認件数バッジを追加(シート未オープン時も低頻度background pollで鮮度を保つ)
 
 Next high-priority gaps:
 

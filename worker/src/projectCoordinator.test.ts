@@ -415,6 +415,73 @@ describe('ProjectCoordinator command atomicity', () => {
     expect(updated.nextAttemptAt).toBeTruthy();
   });
 
+  // `transitioned` is what chatCommandQueue.ts's notifyChatCommandFailed
+  // relies on to send a push exactly once per real transition into terminal
+  // failure — never on an idempotent re-read, and never on a mere
+  // backoff-requeue. These three cases are the ones that matter for that.
+  it('reports transitioned:true and a requeue (not terminal) on the first failure while attempts remain', async () => {
+    const coordinator = createCoordinator();
+    const queued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue',
+    });
+    const id = (await queued.json() as { command: { id: string } }).command.id;
+    await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    const failed = await post(coordinator, '/commands/result', {
+      id,
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'failed',
+    });
+    const body = await failed.json() as { command: { status: string }; transitioned?: boolean };
+    expect(body.transitioned).toBe(true);
+    expect(body.command.status).toBe('queued');
+  });
+
+  it('reports transitioned:true and terminal failed once delivery attempts are exhausted', async () => {
+    const { coordinator, values } = createCoordinatorHarness();
+    const now = new Date().toISOString();
+    values.set('command:exhausted-1', {
+      id: 'exhausted-1',
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue',
+      status: 'claimed',
+      bridgeId: 'bridge-a',
+      claimedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      deliveryFailures: 2,
+      maxDeliveryAttempts: 3,
+    });
+    const failed = await post(coordinator, '/commands/result', {
+      id: 'exhausted-1',
+      projectId: 'project-1',
+      bridgeId: 'bridge-a',
+      status: 'failed',
+    });
+    const body = await failed.json() as { command: { status: string; deliveryFailures: number }; transitioned?: boolean };
+    expect(body.transitioned).toBe(true);
+    expect(body.command.status).toBe('failed');
+    expect(body.command.deliveryFailures).toBe(3);
+  });
+
+  it('reports transitioned:false on a repeated result for an already-terminal command', async () => {
+    const coordinator = createCoordinator();
+    const queued = await post(coordinator, '/commands/enqueue', {
+      projectId: 'project-1',
+      chatUrl: 'https://chatgpt.com/c/example',
+      prompt: 'continue',
+    });
+    const id = (await queued.json() as { command: { id: string } }).command.id;
+    await post(coordinator, '/commands/claim', { bridgeId: 'bridge-a' });
+    await post(coordinator, '/commands/result', { id, projectId: 'project-1', bridgeId: 'bridge-a', status: 'delivered' });
+    const repeated = await post(coordinator, '/commands/result', { id, projectId: 'project-1', bridgeId: 'bridge-a', status: 'delivered' });
+    const body = await repeated.json() as { transitioned?: boolean };
+    expect(body.transitioned).toBe(false);
+  });
+
   it('atomically cancels queued work before manual fallback and prevents a later claim', async () => {
     const coordinator = createCoordinator();
     const queued = await post(coordinator, '/commands/enqueue', {
