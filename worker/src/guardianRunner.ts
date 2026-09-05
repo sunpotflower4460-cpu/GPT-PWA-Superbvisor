@@ -395,13 +395,13 @@ async function finalize(
   status: 'review_ready' | 'completed' | 'expired',
   message: string,
 ): Promise<GuardianRun> {
-  let updated: GuardianRun = {
+  let updated: GuardianRun = clearBridgeStallTracking({
     ...run,
     status,
     message,
     error: status === 'expired' ? message : run.error,
     updatedAt: new Date().toISOString(),
-  };
+  });
   if (!run.notifiedAt) {
     const name = run.projectName || run.repository;
     const title = status === 'completed' ? `${name}: Guardian完了` : status === 'review_ready' ? `${name}: 人間確認が必要` : `${name}: 監視時間上限`;
