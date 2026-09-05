@@ -403,7 +403,8 @@ budget超過時は、上限引き上げより先にsecondary centerのlazy-load�
 - irreversible external action
 - 大きな仕様変更
 - security-sensitive permission expansion
-- merge / production deploy（明示許可がない限り）
+- production deploy（許可なし）
+- merge（オプトインかつCompletion Judgeが CERTIFIED と判定した場合のみ自動。CI/governanceに関わる変更(.github/workflows/、project-kernel.json、CODEOWNERS等)を含む差分は、opt-inの有無に関わらず常に対象外）
 
 Chat transportについても、ChatGPT session cookieの窃取・非公式な認証回避・秘密情報の保存を前提にしない。
 
@@ -455,6 +456,7 @@ Implemented foundation:
 25. GPT-template連携: 実project-kernel.jsonに対するlive drift検知(週次スケジュール、PR CIはブロックしない)、新規プロジェクト作成時のGPT-template導線
 26. Semantic Judge(`semanticJudge.ts`)の実装: LLMによる完了判定レビュー、KERNEL_AWAREプロジェクトのHANDOFF.md自己監査文書を証拠として評価(prompt injection対策のnonce区切り込み)、`refreshDeveloperJob`/`guardianRunner.ts`の実際の完了フローへの配線(Developer/Guardian両方のpush通知に反映、`GET .../completion`は再計算せず永続化済みcertificateを優先)
 27. `scripts/local-ci.mjs`: GitHub Actionsが利用できない状況向けのローカルフォールバックCI(ci.ymlと同じジョブ構成)
+28. Auto-merge(`autoMergePolicy.ts`): プロジェクトごとのopt-in(`autoMerge`)かつCompletion Judge `CERTIFIED`時のみ、Draft PRをready化しsquash mergeを試行(`markPullRequestReadyForReview`/`mergePullRequest`)。CI/governanceに関わるパス(`.github/workflows/`、`project-kernel.json`、`CODEOWNERS`、secrets等)を含む差分は非configurableにブロック。失敗は常にsoft-fail(既存のDraft/Open PRへフォールバック、Developer/Guardian両方のpush通知に反映)
 
 Next high-priority gaps:
 

@@ -109,6 +109,9 @@ h2 { margin-bottom: 8px; font-size: 18px; letter-spacing: -.02em; }
 .segmented button { min-width: 0; padding: 10px 4px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 10px; cursor: pointer; }
 .segmented button.active { border-color: rgba(124,156,255,.45); background: rgba(124,156,255,.14); color: #dce5ff; font-weight: 800; }
 
+.auto-merge-toggle { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; cursor: pointer; }
+.auto-merge-toggle input { margin: 0; }
+
 .timeline { display: grid; gap: 0; }
 .timeline-row { display: grid; grid-template-columns: 58px 1fr; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .timeline-row:last-child { border-bottom: 0; }

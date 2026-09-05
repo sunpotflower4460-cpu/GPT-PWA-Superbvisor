@@ -29,6 +29,7 @@ function baseJob(overrides: Partial<DeveloperJob> = {}): DeveloperJob {
     ciAutoReruns: 0,
     maxAutoCiReruns: 2,
     autoDispatch: false,
+    autoMerge: false,
     changedFiles: [{ filename: 'src/thing.ts', status: 'modified', additions: 20, deletions: 3, changes: 23 }],
     outputText: 'Implemented the feature and added tests, CI is green.',
     ...overrides,

@@ -70,7 +70,9 @@ if (manifest) {
   assert(manifest.experience?.mobileJsGzipBudgetKiB === 130, 'manifest: JavaScript mobile budget remains 130 KiB gzip');
   assert(manifest.experience?.mobileCssGzipBudgetKiB === 20, 'manifest: CSS mobile budget remains 20 KiB gzip');
   assert(manifest.safety?.externalLlmGithubWrite === false, 'manifest: external LLM GitHub write remains disabled');
-  assert(manifest.safety?.automaticMerge === false, 'manifest: automatic merge remains disabled');
+  assert(manifest.safety?.automaticMerge === true, 'manifest: opt-in automatic merge capability exists');
+  assert(manifest.safety?.automaticMergeRequiresCertification === true, 'manifest: automatic merge is never allowed without Completion Judge CERTIFIED');
+  assert(manifest.safety?.automaticMergeBlocksGovernanceFileChanges === true, 'manifest: automatic merge hard-blocks CI/governance file diffs, non-configurable');
   assert(manifest.safety?.automaticProductionDeploy === false, 'manifest: automatic production deploy remains disabled');
   assert(manifest.safety?.chatSessionCookieAutomation === false, 'manifest: ChatGPT session-cookie automation remains disabled');
   assert(manifest.safety?.evidenceRequiredForCompletion === true, 'manifest: evidence remains required for completion');

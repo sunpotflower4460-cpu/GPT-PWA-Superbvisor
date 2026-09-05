@@ -282,6 +282,15 @@ export default function App() {
               ))}
             </div>
             <p className="muted">AUTO / GUARDIANでは、復旧やAutopilot Routeの次工程をChat Control Busへ自動投入します。本人操作が必要な時だけ「あなた待ち」になります。</p>
+            <label className="auto-merge-toggle">
+              <input
+                type="checkbox"
+                checked={Boolean(selected.autoMerge)}
+                onChange={(event) => patchProject(selected.id, { autoMerge: event.target.checked })}
+              />
+              <span>Completion Judgeが認定した場合、自動でマージする</span>
+            </label>
+            <p className="muted">Completion Judge(CI + Semantic Judge)が CERTIFIED と判定した場合のみ自動マージを試みます。CI/governanceに関わる変更(.github/workflows/、project-kernel.json、CODEOWNERS等)を含む場合は、この設定に関わらず常に対象外です。</p>
           </article>
 
           <article className="panel">

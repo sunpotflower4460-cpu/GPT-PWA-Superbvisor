@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "conceptId": "multi-chat-remote-v1",
   "productName": "AI DEV DECK",
   "primaryPurpose": "普段使っている複数のChatGPT開発チャットを、スマホPWAからまとめて同時並行・軽量・バックグラウンド耐性ありで操作する",
@@ -68,7 +68,7 @@
     },
     {
       "id": "C8",
-      "rule": "No automatic merge or production deployment without an explicit future product decision and human approval boundary."
+      "rule": "Production deployment is never automatic. A PR may auto-merge only when opted in per project AND the Completion Judge certifies it (deterministic checks pass AND the Semantic Judge verdict is PASS) AND the diff touches no CI/governance path (workflows, project-kernel.json, CODEOWNERS, secrets); that governance-path block is not itself opt-out-able."
     },
     {
       "id": "C9",
@@ -105,7 +105,7 @@
     "chat transcript viewer as the primary experience",
     "generic project manager with ChatGPT links attached",
     "provider benchmark or LLM router as the product itself",
-    "automatic merge or production deployment by default",
+    "automatic merge without per-project opt-in, Completion Judge certification, or the non-configurable CI/governance-path block; automatic production deployment under any circumstances",
     "unofficial ChatGPT cookie/session automation",
     "clipboard-first normal command flow",
     "routine ChatGPT or recovery states mislabeled as human waiting",
@@ -141,7 +141,9 @@
   ],
   "safety": {
     "externalLlmGithubWrite": false,
-    "automaticMerge": false,
+    "automaticMerge": true,
+    "automaticMergeRequiresCertification": true,
+    "automaticMergeBlocksGovernanceFileChanges": true,
     "automaticProductionDeploy": false,
     "chatSessionCookieAutomation": false,
     "evidenceRequiredForCompletion": true

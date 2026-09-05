@@ -39,6 +39,11 @@ export interface DevProject {
   status: ProjectStatus;
   executionMode: ExecutionMode;
   automationLevel: AutomationLevel;
+  // Opt-in only, independent of automationLevel — see the Worker's
+  // shouldAutoMerge (autoMergePolicy.ts): a merge is only ever attempted
+  // once the Completion Judge certifies a job AND the diff touches no
+  // CI/governance path, regardless of this flag.
+  autoMerge?: boolean;
   progress: number;
   currentPhase: string;
   lastActivityAt: string;
@@ -104,6 +109,7 @@ export function createProject(input: Pick<DevProject, 'name' | 'goal'> & Partial
     status: input.status ?? 'WAITING_AI',
     executionMode: input.executionMode === 'WORK' ? 'WORK' : 'CHAT',
     automationLevel: input.automationLevel ?? 'ASSIST',
+    autoMerge: Boolean(input.autoMerge),
     progress: input.progress ?? 0,
     currentPhase: input.currentPhase ?? '開始待ち',
     lastActivityAt: input.lastActivityAt ?? now(),
@@ -178,6 +184,7 @@ function normalizeStoredProject(value: unknown): DevProject | null {
     automationLevel: ['OFF', 'ASSIST', 'AUTO', 'GUARDIAN'].includes(stored.automationLevel || '')
       ? stored.automationLevel as AutomationLevel
       : 'ASSIST',
+    autoMerge: Boolean(stored.autoMerge),
     humanBlockers: Array.isArray(stored.humanBlockers) ? stored.humanBlockers : [],
     milestones: Array.isArray(stored.milestones) ? stored.milestones : [],
     timeline: Array.isArray(stored.timeline) ? stored.timeline : [],

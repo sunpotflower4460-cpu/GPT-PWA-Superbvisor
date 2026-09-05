@@ -10,3 +10,6 @@ worker/.wrangler/
 worker/dist-ci/
 chatgpt-bridge/.wrangler-dry-run/
 tsconfig.tsbuildinfo
+package-lock.json
+worker/package-lock.json
+chatgpt-bridge/package-lock.json
